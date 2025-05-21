@@ -26,7 +26,7 @@ logger = logging.getLogger("youtube_trans_downloader.main")
 # Stripe configuration
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 endpoint_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
-DOMAIN = os.getenv("DOMAIN", "https://youtube-transcript-api-3.onrender.com")
+DOMAIN = os.getenv("DOMAIN", "https://youtube-trans-downloader-api.onrender.com")
 
 # Create FastAPI app
 app = FastAPI(
