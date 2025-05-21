@@ -1,7 +1,41 @@
+# render.yaml
 services:
   - type: web
     name: youtube-transcript-api
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+    startCommand: python run.py
+    envVars:
+      - key: ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: 10000
+      - key: SECRET_KEY
+        sync: false #This line'd be 'generateValue: true', if SECRET_KEY isn,t added in .en file
+        #generateValue: true
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: BASIC_PRICE_ID
+        sync: false
+      - key: PREMIUM_PRICE_ID
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: youtube-trans-db
+          property: connectionString
+      # Using DATABASE_URL which Render provides instead of the individual DB parameters
+      # But our code will still work as is because we have fallbacks
+
+databases:
+  - name: youtube-trans-db
+    plan: free
+    # The free plan includes:
+    # - 1 PostgreSQL database
+    # - Automatic daily backups with 7 day retention
+    # - 256MB RAM, Shared CPU
+    # - 1GB storage (expandable to 5GB when you upgrade)

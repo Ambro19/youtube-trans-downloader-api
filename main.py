@@ -1,29 +1,48 @@
-from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks
+from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks, Request, Response
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List
 import jwt
 from pydantic import BaseModel
 from passlib.context import CryptContext
 import stripe
 import youtube_transcript_api
 from youtube_transcript_api import YouTubeTranscriptApi
+import os
+import json
+import logging
+from dotenv import load_dotenv
 
 # Import from database.py
 from database import get_db, User, Subscription, TranscriptDownload, create_tables
 
+# Load environment variables
+load_dotenv()
+
+# Configure logging
+logger = logging.getLogger("youtube_trans_downloader.main")
+
+# Stripe configuration
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+endpoint_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+DOMAIN = os.getenv("DOMAIN", "https://youtube-transcript-api-3.onrender.com")
+
 # Create FastAPI app
-app = FastAPI(title="YouTubeTransDownloader API")
+app = FastAPI(
+    title="YouTubeTransDownloader API", 
+    description="API for downloading and processing YouTube video transcripts",
+    version="1.0.0"
+)
 
 # Authentication setup
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# Constants
-SECRET_KEY = "your-secure-secret-key-change-this-in-production"  # Store in environment variables in production
+# Constants - Load from environment variables
+SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))  # 24 hours
 
 # Subscription tiers and limits
 SUBSCRIPTION_LIMITS = {
@@ -32,13 +51,22 @@ SUBSCRIPTION_LIMITS = {
     "premium": {"unclean": float('inf'), "clean": 50}
 }
 
-# Stripe setup (payment processing)
-stripe.api_key = "your-stripe-secret-key"  # Store in environment variables
+# Price ID mapping from environment variables
+PRICE_ID_MAP = {
+    "basic": os.getenv("BASIC_PRICE_ID"),
+    "premium": os.getenv("PREMIUM_PRICE_ID")
+}
 
 # Initialize database on startup
 @app.on_event("startup")
 async def startup_event():
-    create_tables()
+    try:
+        logger.info("Initializing application...")
+        create_tables()
+        logger.info("Application initialized successfully")
+    except Exception as e:
+        logger.error(f"Error during application startup: {str(e)}")
+        raise
 
 # Pydantic models for request/response validation
 class Token(BaseModel):
@@ -70,6 +98,17 @@ class PaymentRequest(BaseModel):
     token: str
     subscription_tier: str
 
+class SubscriptionResponse(BaseModel):
+    tier: str
+    status: str
+    expiry_date: Optional[str] = None
+    limits: dict
+    usage: Optional[dict] = None
+    remaining: Optional[dict] = None
+    
+    class Config:
+        orm_mode = True
+
 # Helper functions
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
@@ -89,6 +128,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
 
 def get_user(db: Session, username: str):
     return db.query(User).filter(User.username == username).first()
+
+def get_user_by_id(db: Session, user_id: int):
+    return db.query(User).filter(User.id == user_id).first()
 
 def authenticate_user(db: Session, username: str, password: str):
     user = get_user(db, username)
@@ -166,23 +208,26 @@ def process_youtube_transcript(youtube_id: str, clean: bool):
             return "\n".join(formatted_transcript)
     
     except youtube_transcript_api._errors.TranscriptsDisabled:
+        logger.warning(f"Transcripts are disabled for video: {youtube_id}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Transcripts are disabled for this video"
         )
     except youtube_transcript_api._errors.NoTranscriptFound:
+        logger.warning(f"No transcript found for video: {youtube_id}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No transcript found for this video"
         )
     except Exception as e:
+        logger.error(f"Error retrieving transcript for video {youtube_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error retrieving transcript: {str(e)}"
         )
 
 # API Endpoints
-@app.post("/register", response_model=UserResponse)
+@app.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def register_user(user_data: UserCreate, db: Session = Depends(get_db)):
     db_user = get_user(db, user_data.username)
     if db_user:
@@ -207,11 +252,19 @@ def register_user(user_data: UserCreate, db: Session = Depends(get_db)):
         created_at=datetime.now()
     )
     
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-    
-    return new_user
+    try:
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+        logger.info(f"User registered successfully: {user_data.username}")
+        return new_user
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error registering user: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error registering user"
+        )
 
 @app.post("/token", response_model=Token)
 async def login_for_access_token(
@@ -220,6 +273,7 @@ async def login_for_access_token(
 ):
     user = authenticate_user(db, form_data.username, form_data.password)
     if not user:
+        logger.warning(f"Failed login attempt for user: {form_data.username}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -231,6 +285,7 @@ async def login_for_access_token(
         data={"sub": user.username}, expires_delta=access_token_expires
     )
     
+    logger.info(f"User logged in successfully: {form_data.username}")
     return {"access_token": access_token, "token_type": "bearer"}
 
 @app.get("/users/me", response_model=UserResponse)
@@ -248,6 +303,7 @@ async def download_transcript(
     # Check if user has reached subscription limit
     can_download = check_subscription_limit(user.id, transcript_type, db)
     if not can_download:
+        logger.warning(f"User {user.username} reached subscription limit for {transcript_type} transcripts")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"You've reached your monthly limit for {transcript_type} transcripts. Please upgrade your subscription."
@@ -266,8 +322,15 @@ async def download_transcript(
         transcript_type=transcript_type,
         created_at=datetime.now()
     )
-    db.add(new_download)
-    db.commit()
+    
+    try:
+        db.add(new_download)
+        db.commit()
+        logger.info(f"User {user.username} downloaded {transcript_type} transcript for video {request.youtube_id}")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error recording transcript download: {str(e)}")
+        # Continue anyway as the transcript was already processed
     
     # Return transcript data
     return {"transcript": transcript_text, "youtube_id": request.youtube_id}
@@ -278,22 +341,28 @@ async def create_subscription(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    if request.subscription_tier not in PRICE_ID_MAP:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid subscription tier. Must be one of: {', '.join(PRICE_ID_MAP.keys())}"
+        )
+        
     try:
         # Create Stripe customer & subscription
         customer = stripe.Customer.create(
             source=request.token,
-            email=current_user.email
+            email=current_user.email,
+            name=current_user.username
         )
-        
-        # Map your tiers to Stripe price IDs
-        price_id_map = {
-            "basic": "price_basic_id_from_stripe",  # Replace with actual Stripe price IDs
-            "premium": "price_premium_id_from_stripe"  # Replace with actual Stripe price IDs
-        }
         
         subscription = stripe.Subscription.create(
             customer=customer.id,
-            items=[{"price": price_id_map[request.subscription_tier]}]
+            items=[{"price": PRICE_ID_MAP[request.subscription_tier]}],
+            metadata={
+                "user_id": str(current_user.id),
+                "username": current_user.username,
+                "tier": request.subscription_tier
+            }
         )
         
         # Check if user already has a subscription and update it
@@ -320,13 +389,89 @@ async def create_subscription(
             db.add(new_subscription)
         
         db.commit()
+        logger.info(f"User {current_user.username} created {request.subscription_tier} subscription successfully")
         
-        return {"status": "success", "subscription_id": subscription.id, "tier": request.subscription_tier}
+        return {
+            "status": "success", 
+            "subscription_id": subscription.id, 
+            "tier": request.subscription_tier
+        }
     
     except stripe.error.StripeError as e:
+        logger.error(f"Stripe error processing subscription: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error creating subscription: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error processing subscription"
+        )
 
-@app.get("/subscription/status")
+# Webhook handler for Stripe events
+@app.post("/webhook", status_code=200)
+async def webhook_received(request: Request, response: Response, db: Session = Depends(get_db)):
+    payload = await request.body()
+    sig_header = request.headers.get("Stripe-Signature")
+    
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, endpoint_secret
+        )
+    except ValueError as e:
+        # Invalid payload
+        logger.warning(f"Invalid webhook payload: {str(e)}")
+        response.status_code = 400
+        return {"error": str(e)}
+    except stripe.error.SignatureVerificationError as e:
+        # Invalid signature
+        logger.warning(f"Invalid webhook signature: {str(e)}")
+        response.status_code = 400
+        return {"error": str(e)}
+    
+    # Handle the event
+    event_type = event['type']
+    logger.info(f"Received Stripe webhook event: {event_type}")
+    
+    if event_type == 'invoice.payment_succeeded':
+        # Subscription was paid - update expiration date
+        invoice = event['data']['object']
+        subscription_id = invoice['subscription']
+        
+        # Find subscription in database
+        subscription = db.query(Subscription).filter(
+            Subscription.payment_id == subscription_id
+        ).first()
+        
+        if subscription:
+            # Extend subscription by 30 days
+            subscription.expiry_date = datetime.now() + timedelta(days=30)
+            db.commit()
+            logger.info(f"Subscription {subscription_id} extended by 30 days")
+        else:
+            logger.warning(f"Subscription {subscription_id} not found in database")
+    
+    elif event_type == 'customer.subscription.deleted':
+        # Subscription was cancelled
+        subscription_data = event['data']['object']
+        subscription_id = subscription_data['id']
+        
+        # Find subscription in database
+        subscription = db.query(Subscription).filter(
+            Subscription.payment_id == subscription_id
+        ).first()
+        
+        if subscription:
+            # Mark subscription as not auto-renewing
+            subscription.auto_renew = False
+            db.commit()
+            logger.info(f"Subscription {subscription_id} marked as not auto-renewing")
+        else:
+            logger.warning(f"Subscription {subscription_id} not found in database")
+    
+    return {"success": True}
+
+@app.get("/subscription/status", response_model=SubscriptionResponse)
 async def get_subscription_status(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -380,7 +525,7 @@ async def get_subscription_status(
         }
     }
 
-# Run the application with: uvicorn main:app --reload
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+# Add healthcheck endpoint
+@app.get("/healthcheck")
+async def healthcheck():
+    return {"status": "ok", "version": "1.0.0"}
