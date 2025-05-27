@@ -1,4 +1,8 @@
+# main.py
+# main.py
+
 from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks, Request, Response
+from fastapi.middleware.cors import CORSMiddleware  # ADD THIS IMPORT
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
@@ -33,6 +37,15 @@ app = FastAPI(
     title="YouTubeTransDownloader API", 
     description="API for downloading and processing YouTube video transcripts",
     version="1.0.0"
+)
+
+# ADD CORS MIDDLEWARE - THIS IS THE KEY FIX!
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],  # React app URLs
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Include OPTIONS
+    allow_headers=["*"],  # Allow all headers
 )
 
 # Authentication setup
@@ -88,7 +101,7 @@ class UserResponse(BaseModel):
     created_at: datetime
     
     class Config:
-        orm_mode = True
+        from_attributes = True  # FIXED: Changed from orm_mode to from_attributes
 
 class TranscriptRequest(BaseModel):
     youtube_id: str
@@ -107,7 +120,7 @@ class SubscriptionResponse(BaseModel):
     remaining: Optional[dict] = None
     
     class Config:
-        orm_mode = True
+        from_attributes = True  # FIXED: Changed from orm_mode to from_attributes
 
 # Helper functions
 def verify_password(plain_password, hashed_password):
@@ -128,6 +141,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
 
 def get_user(db: Session, username: str):
     return db.query(User).filter(User.username == username).first()
+
+def get_user_by_email(db: Session, email: str):
+    return db.query(User).filter(User.email == email).first()
 
 def get_user_by_id(db: Session, user_id: int):
     return db.query(User).filter(User.id == user_id).first()
@@ -227,18 +243,25 @@ def process_youtube_transcript(youtube_id: str, clean: bool):
         )
 
 # API Endpoints
+@app.get("/")
+async def root():
+    return {"message": "YouTube Transcript Downloader API", "status": "running", "version": "1.0.0"}
+
 @app.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def register_user(user_data: UserCreate, db: Session = Depends(get_db)):
+    # Check if username exists
     db_user = get_user(db, user_data.username)
     if db_user:
+        logger.warning(f"Registration attempt with existing username: {user_data.username}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Username already registered"
         )
     
     # Check if email exists
-    email_exists = db.query(User).filter(User.email == user_data.email).first()
+    email_exists = get_user_by_email(db, user_data.email)
     if email_exists:
+        logger.warning(f"Registration attempt with existing email: {user_data.email}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
@@ -485,7 +508,9 @@ async def get_subscription_status(
         return {
             "tier": "free",
             "status": "active",
-            "limits": SUBSCRIPTION_LIMITS["free"]
+            "limits": SUBSCRIPTION_LIMITS["free"],
+            "usage": {"clean": 0, "unclean": 0},
+            "remaining": {"clean": SUBSCRIPTION_LIMITS["free"]["clean"], "unclean": SUBSCRIPTION_LIMITS["free"]["unclean"]}
         }
 
     # Check if subscription is expired

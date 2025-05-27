@@ -1,3 +1,5 @@
+# database.py
+
 from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey, create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
@@ -34,7 +36,7 @@ class Subscription(Base):
    
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"))
-    tier = Column(String)  # "free", "basic", "premium"
+    tier = Column(String)  # "free", "pro", "premium"  
     start_date = Column(DateTime, default=datetime.now)
     expiry_date = Column(DateTime)
     payment_id = Column(String, nullable=True)
@@ -108,4 +110,4 @@ def create_tables():
         logger.info("Database tables created successfully")
     except Exception as e:
         logger.error(f"Error creating database tables: {str(e)}")
-        raise 
+        raise

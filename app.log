@@ -11,3 +11,104 @@
 2025-05-22 03:40:57,181 - youtube_trans_downloader.main - INFO - Initializing application...
 2025-05-22 03:40:57,320 - youtube_trans_downloader.database - INFO - Database tables created successfully
 2025-05-22 03:40:57,320 - youtube_trans_downloader.main - INFO - Application initialized successfully
+2025-05-22 19:37:05,369 - youtube_trans_downloader - INFO - Environment: development
+2025-05-22 19:37:05,369 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-05-22 19:37:05,370 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-05-22 19:37:05,370 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-05-22 19:37:05,918 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-05-22 19:37:06,117 - youtube_trans_downloader - INFO - Environment: development
+2025-05-22 19:37:06,117 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-05-22 19:37:06,118 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-05-22 19:37:06,118 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-05-22 19:37:13,133 - youtube_trans_downloader.database - INFO - Using database: sqlite://****
+2025-05-22 19:37:13,294 - youtube_trans_downloader.main - INFO - Initializing application...
+2025-05-22 19:37:13,325 - youtube_trans_downloader.database - INFO - Database tables created successfully
+2025-05-22 19:37:13,326 - youtube_trans_downloader.main - INFO - Application initialized successfully
+2025-05-22 22:59:07,917 - youtube_trans_downloader - INFO - Environment: development
+2025-05-22 22:59:07,919 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-05-22 22:59:07,920 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-05-22 22:59:07,922 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-05-22 22:59:09,157 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-05-22 22:59:09,702 - youtube_trans_downloader - INFO - Environment: development
+2025-05-22 22:59:09,704 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-05-22 22:59:09,704 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-05-22 22:59:09,705 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-05-22 22:59:22,587 - youtube_trans_downloader.database - INFO - Using database: sqlite://****
+2025-05-22 22:59:22,826 - youtube_trans_downloader.main - INFO - Initializing application...
+2025-05-22 22:59:22,886 - youtube_trans_downloader.database - INFO - Database tables created successfully
+2025-05-22 22:59:22,890 - youtube_trans_downloader.main - INFO - Application initialized successfully
+2025-05-23 00:46:23,826 - youtube_trans_downloader - INFO - Environment: development
+2025-05-23 00:46:23,828 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-05-23 00:46:23,828 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-05-23 00:46:23,829 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-05-23 00:46:24,564 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-05-23 00:46:25,037 - youtube_trans_downloader - INFO - Environment: development
+2025-05-23 00:46:25,038 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-05-23 00:46:25,039 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-05-23 00:46:25,039 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-05-23 00:46:37,482 - youtube_trans_downloader.database - INFO - Using database: sqlite://****
+2025-05-23 00:46:37,772 - youtube_trans_downloader.main - INFO - Initializing application...
+2025-05-23 00:46:37,824 - youtube_trans_downloader.database - INFO - Database tables created successfully
+2025-05-23 00:46:37,825 - youtube_trans_downloader.main - INFO - Application initialized successfully
+2025-05-23 22:38:26,698 - youtube_trans_downloader - INFO - Environment: development
+2025-05-23 22:38:26,702 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-05-23 22:38:26,703 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-05-23 22:38:26,704 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-05-23 22:38:27,185 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-05-23 22:38:27,355 - youtube_trans_downloader - INFO - Environment: development
+2025-05-23 22:38:27,357 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-05-23 22:38:27,358 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-05-23 22:38:27,358 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-05-23 22:38:34,896 - youtube_trans_downloader.database - INFO - Using database: sqlite://****
+2025-05-23 22:38:35,084 - youtube_trans_downloader.main - INFO - Initializing application...
+2025-05-23 22:38:35,117 - youtube_trans_downloader.database - INFO - Database tables created successfully
+2025-05-23 22:38:35,119 - youtube_trans_downloader.main - INFO - Application initialized successfully
+2025-05-24 01:17:13,789 - youtube_trans_downloader - INFO - Environment: development
+2025-05-24 01:17:13,793 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-05-24 01:17:13,794 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-05-24 01:17:13,795 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-05-24 01:17:14,377 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-05-24 01:17:14,573 - youtube_trans_downloader - INFO - Environment: development
+2025-05-24 01:17:14,574 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-05-24 01:17:14,574 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-05-24 01:17:14,575 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-05-24 01:17:19,974 - youtube_trans_downloader.database - INFO - Using database: sqlite://****
+2025-05-24 01:17:20,106 - youtube_trans_downloader.main - INFO - Initializing application...
+2025-05-24 01:17:20,133 - youtube_trans_downloader.database - INFO - Database tables created successfully
+2025-05-24 01:17:20,142 - youtube_trans_downloader.main - INFO - Application initialized successfully
+2025-05-24 20:24:33,979 - youtube_trans_downloader - INFO - Environment: development
+2025-05-24 20:24:33,982 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-05-24 20:24:33,983 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-05-24 20:24:33,983 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-05-24 20:24:54,566 - youtube_trans_downloader.database - INFO - Using database: sqlite://****
+2025-05-24 20:24:54,795 - youtube_trans_downloader.main - INFO - Initializing application...
+2025-05-24 20:24:54,842 - youtube_trans_downloader.database - INFO - Database tables created successfully
+2025-05-24 20:24:54,843 - youtube_trans_downloader.main - INFO - Application initialized successfully
+2025-05-26 21:11:52,364 - youtube_trans_downloader - INFO - Environment: development
+2025-05-26 21:11:52,367 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-05-26 21:11:52,368 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-05-26 21:11:52,368 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-05-26 21:11:52,881 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-05-26 21:11:53,079 - youtube_trans_downloader - INFO - Environment: development
+2025-05-26 21:11:53,079 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-05-26 21:11:53,080 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-05-26 21:11:53,080 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-05-26 21:12:01,248 - youtube_trans_downloader.database - INFO - Using database: sqlite://****
+2025-05-26 21:12:01,424 - youtube_trans_downloader.main - INFO - Initializing application...
+2025-05-26 21:12:01,453 - youtube_trans_downloader.database - INFO - Database tables created successfully
+2025-05-26 21:12:01,454 - youtube_trans_downloader.main - INFO - Application initialized successfully
+2025-05-26 23:23:13,007 - youtube_trans_downloader.main - WARNING - Failed login attempt for user: OneTechly
+2025-05-26 23:23:31,793 - youtube_trans_downloader.main - WARNING - Failed login attempt for user: OneTechly
+2025-05-26 23:27:37,877 - youtube_trans_downloader - INFO - Environment: development
+2025-05-26 23:27:37,879 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-05-26 23:27:37,880 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-05-26 23:27:37,881 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-05-26 23:27:38,367 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-05-26 23:27:38,528 - youtube_trans_downloader - INFO - Environment: development
+2025-05-26 23:27:38,529 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-05-26 23:27:38,530 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-05-26 23:27:38,530 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-05-26 23:27:42,989 - youtube_trans_downloader.database - INFO - Using database: sqlite://****
+2025-05-26 23:27:43,099 - youtube_trans_downloader.main - INFO - Initializing application...
+2025-05-26 23:27:43,126 - youtube_trans_downloader.database - INFO - Database tables created successfully
+2025-05-26 23:27:43,127 - youtube_trans_downloader.main - INFO - Application initialized successfully
