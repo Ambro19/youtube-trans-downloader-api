@@ -71,8 +71,6 @@ PRICE_ID_MAP = {
 }
 
 
-
-
 # Initialize database on startup
 @app.on_event("startup")
 async def startup_event():
