@@ -57,12 +57,18 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))  # 24 hours
 
-# Subscription tiers and limits (use "pro" instead of "basic")
 SUBSCRIPTION_LIMITS = {
-    "free": {"transcript": 5, "audio": 2, "video": 1},
-    "pro": {"transcript": 100, "audio": 50, "video": 20}, 
-    "premium": {"transcript": float('inf'), "audio": float('inf'), "video": float('inf')}
+    "free": {"transcript": 5, "audio": 2, "video": 1, "clean": 5, "unclean": 3},
+    "pro": {"transcript": 100, "audio": 50, "video": 20, "clean": 100, "unclean": 50},
+    "premium": {"transcript": float('inf'), "audio": float('inf'), "video": float('inf'), "clean": float('inf'), "unclean": float('inf')}
 }
+
+# # Subscription tiers and limits (use "pro" instead of "basic")
+# SUBSCRIPTION_LIMITS = {
+#     "free": {"transcript": 5, "audio": 2, "video": 1},
+#     "pro": {"transcript": 100, "audio": 50, "video": 20}, 
+#     "premium": {"transcript": float('inf'), "audio": float('inf'), "video": float('inf')}
+# }
 
 # Price ID mapping (use "pro" instead of "basic")
 PRICE_ID_MAP = {
