@@ -1,5 +1,4 @@
 # main.py
-# main.py
 
 from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks, Request, Response
 from fastapi.middleware.cors import CORSMiddleware  # ADD THIS IMPORT
@@ -63,19 +62,11 @@ SUBSCRIPTION_LIMITS = {
     "premium": {"transcript": float('inf'), "audio": float('inf'), "video": float('inf'), "clean": float('inf'), "unclean": float('inf')}
 }
 
-# # Subscription tiers and limits (use "pro" instead of "basic")
-# SUBSCRIPTION_LIMITS = {
-#     "free": {"transcript": 5, "audio": 2, "video": 1},
-#     "pro": {"transcript": 100, "audio": 50, "video": 20}, 
-#     "premium": {"transcript": float('inf'), "audio": float('inf'), "video": float('inf')}
-# }
-
 # Price ID mapping (use "pro" instead of "basic")
 PRICE_ID_MAP = {
     "pro": os.getenv("PRO_PRICE_ID"),
     "premium": os.getenv("PREMIUM_PRICE_ID")
 }
-
 
 # Initialize database on startup
 @app.on_event("startup")
