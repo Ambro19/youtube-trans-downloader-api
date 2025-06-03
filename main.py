@@ -17,6 +17,9 @@ import json
 import logging
 from dotenv import load_dotenv
 
+import warnings
+warnings.filterwarnings("ignore", message=".*bcrypt.*")
+
 # Import from database.py
 from database import get_db, User, Subscription, TranscriptDownload, create_tables
 
