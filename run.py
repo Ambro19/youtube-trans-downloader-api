@@ -43,8 +43,8 @@ if missing_vars:
     sys.exit(1)
 
 # Validate Stripe price IDs
-if not os.getenv("BASIC_PRICE_ID") or not os.getenv("PREMIUM_PRICE_ID"):
-    logger.warning("Stripe price IDs (BASIC_PRICE_ID, PREMIUM_PRICE_ID) are not set. Subscription creation may fail.")
+if not os.getenv("PRO_PRICE_ID") or not os.getenv("PREMIUM_PRICE_ID"):
+    logger.warning("Stripe price IDs (PRO_PRICE_ID, PREMIUM_PRICE_ID) are not set. Subscription creation may fail.")
 
 # Log startup information
 logger.info("Starting YouTube Transcript Downloader API")
