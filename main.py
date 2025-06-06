@@ -1,5 +1,11 @@
 # main.py - Enhanced with Complete Stripe Payment Integration
 
+# Make sure you have these imports at the top:
+# from datetime import datetime, timedelta
+# from typing import Optional
+# import jwt  # PyJWT library
+# from passlib.context import CryptContext
+
 from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
