@@ -1,11 +1,4 @@
 # main.py - Enhanced with Complete Stripe Payment Integration
-
-# Make sure you have these imports at the top:
-# from datetime import datetime, timedelta
-# from typing import Optional
-# import jwt  # PyJWT library
-# from passlib.context import CryptContext
-
 from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -57,6 +50,42 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+#=========================
+# Add this to your main.py - Production-ready CORS configuration
+
+# Environment-aware configuration
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+# Configure CORS based on environment
+if ENVIRONMENT == "production":
+    allowed_origins = [
+        #"https://your-actual-frontend-domain.com",  # Replace with your actual frontend URL
+        
+        "http://localhost:8000", #Or "http://localhost:3000"?
+       # "https://youtube-transcript-downloader.netlify.app",  # Example
+       "https://youtube-trans-downloader-api.onrender.com",
+        FRONTEND_URL  # From environment variable
+    ]
+    logger.info(f"🌍 Production mode - CORS origins: {allowed_origins}")
+else:
+    allowed_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        FRONTEND_URL
+    ]
+    logger.info(f"🔧 Development mode - CORS origins: {allowed_origins}")
+
+# CORS MIDDLEWARE with environment awareness
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
+#==================
+
 # Authentication setup
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -98,15 +127,65 @@ PLAN_PRICING = {
     "premium": 1999  # $19.99
 }
 
-# Initialize database on startup
+# # Initialize database on startup
+# @app.on_event("startup")
+# async def startup_event():
+#     try:
+#         logger.info("Initializing application...")
+#         create_tables()
+#         logger.info("Application initialized successfully")
+#     except Exception as e:
+#         logger.error(f"Error during application startup: {str(e)}")
+#         raise
+
+# Enhanced startup validation
 @app.on_event("startup")
 async def startup_event():
+    """Enhanced startup with environment validation"""
     try:
-        logger.info("Initializing application...")
+        logger.info("🚀 Starting YouTube Transcript Downloader API...")
+        logger.info(f"🌍 Environment: {ENVIRONMENT}")
+        logger.info(f"🔗 Domain: {DOMAIN}")
+        
+        # Validate critical environment variables
+        required_vars = {
+            "SECRET_KEY": "JWT secret key",
+            "STRIPE_SECRET_KEY": "Stripe secret key",
+        }
+        
+        missing_vars = []
+        for var, description in required_vars.items():
+            value = os.getenv(var)
+            if not value:
+                missing_vars.append(f"{var} ({description})")
+            else:
+                # Log first few characters (for debugging)
+                logger.info(f"✅ {var}: {value[:8]}..." if len(value) > 8 else f"✅ {var}: SET")
+        
+        if missing_vars:
+            logger.error(f"❌ Missing required environment variables:")
+            for var in missing_vars:
+                logger.error(f"   - {var}")
+            raise ValueError(f"Missing environment variables: {', '.join(missing_vars)}")
+        
+        # Optional variables with warnings
+        optional_vars = {
+            "STRIPE_PRO_PRICE_ID": "Pro plan price ID",
+            "STRIPE_PREMIUM_PRICE_ID": "Premium plan price ID", 
+            "STRIPE_WEBHOOK_SECRET": "Webhook verification"
+        }
+        
+        for var, description in optional_vars.items():
+            if not os.getenv(var):
+                logger.warning(f"⚠️  {var} not set - {description} will not work")
+        
+        # Initialize database
         create_tables()
-        logger.info("Application initialized successfully")
+        logger.info("✅ Database initialized successfully")
+        logger.info("🎉 Application startup complete!")
+        
     except Exception as e:
-        logger.error(f"Error during application startup: {str(e)}")
+        logger.error(f"❌ Startup failed: {str(e)}")
         raise
 
 # Enhanced Pydantic models
