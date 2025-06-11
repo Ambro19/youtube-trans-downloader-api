@@ -83,6 +83,7 @@ def get_or_create_stripe_customer(user, db: Session):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create payment customer"
         )
+
 # 🔧 ALSO UPDATE the endpoint signature to use the new model:
 
 @router.post("/create_payment_intent/")
