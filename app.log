@@ -112,3 +112,14 @@
 2025-05-26 23:27:43,099 - youtube_trans_downloader.main - INFO - Initializing application...
 2025-05-26 23:27:43,126 - youtube_trans_downloader.database - INFO - Database tables created successfully
 2025-05-26 23:27:43,127 - youtube_trans_downloader.main - INFO - Application initialized successfully
+2025-06-10 20:52:13,347 - youtube_trans_downloader - INFO - Environment: development
+2025-06-10 20:52:13,347 - youtube_trans_downloader - WARNING - Stripe price IDs (PRO_PRICE_ID, PREMIUM_PRICE_ID) are not set. Subscription creation may fail.
+2025-06-10 20:52:13,348 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-10 20:52:13,348 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-10 20:52:13,348 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-10 20:52:13,865 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-06-10 20:52:14,042 - youtube_trans_downloader - INFO - Environment: development
+2025-06-10 20:52:14,042 - youtube_trans_downloader - WARNING - Stripe price IDs (PRO_PRICE_ID, PREMIUM_PRICE_ID) are not set. Subscription creation may fail.
+2025-06-10 20:52:14,043 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-10 20:52:14,043 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-10 20:52:14,043 - youtube_trans_downloader - INFO - Using SQLite database for development
