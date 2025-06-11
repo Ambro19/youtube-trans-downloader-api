@@ -1,14 +1,19 @@
-# payment.py - Complete Stripe Backend Integration (SECURE VERSION)
+# payment.py - Complete Stripe Backend Integration (FIXED VERSION)
 
 import stripe
 import os
 from datetime import datetime, timedelta
-from fastapi import HTTPException, Depends, status
+from fastapi import HTTPException, Depends, status, APIRouter
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Dict, Any
 import logging
 from dotenv import load_dotenv
+
+# Import your existing dependencies
+from database import get_db
+from models import User, Subscription
+from auth import get_current_user
 
 # Load environment variables
 load_dotenv()
@@ -24,20 +29,20 @@ stripe.api_key = stripe_secret
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Create router
+router = APIRouter()
+
 # Pydantic models for request/response
 class PaymentIntentRequest(BaseModel):
-    amount: int  # Amount in cents
-    currency: str = 'usd'
-    payment_method_id: str
-    plan_name: str
+    price_id: str  # Changed to price_id for simplified flow
+
+class PaymentIntentResponse(BaseModel):
+    client_secret: str
+    payment_intent_id: str
 
 class SubscriptionRequest(BaseModel):
     token: Optional[str] = None
     subscription_tier: str
-
-class PaymentIntentResponse(BaseModel):
-    client_secret: str
-    token: str
 
 class SubscriptionResponse(BaseModel):
     subscription_id: str
@@ -122,67 +127,66 @@ def get_or_create_stripe_customer(user, db: Session):
             detail="Failed to create payment customer"
         )
 
+@router.post("/create_payment_intent/")
 async def create_payment_intent(
     request: PaymentIntentRequest,
-    current_user,
-    db: Session
-):
-    """Create a payment intent for subscription upgrade"""
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> PaymentIntentResponse:
+    """
+    Create a PaymentIntent for subscription upgrade - FIXED VERSION
+    """
     try:
-        # Validate plan
-        if request.plan_name not in SUBSCRIPTION_PLANS:
+        # Validate price_id
+        valid_price_ids = [
+            os.getenv("STRIPE_PRO_PRICE_ID"),
+            os.getenv("STRIPE_PREMIUM_PRICE_ID")
+        ]
+        
+        if request.price_id not in valid_price_ids:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid subscription plan"
+                detail="Invalid price ID"
             )
+
+        # Get the price from Stripe to determine amount
+        price = stripe.Price.retrieve(request.price_id)
         
-        plan = SUBSCRIPTION_PLANS[request.plan_name]
-        
-        # Validate amount
-        if request.amount != plan['amount']:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid payment amount"
-            )
+        # Determine plan type
+        plan_type = 'pro' if request.price_id == os.getenv("STRIPE_PRO_PRICE_ID") else 'premium'
         
         # Get or create Stripe customer
         customer = get_or_create_stripe_customer(current_user, db)
         
-        # Create payment intent
-        payment_intent = stripe.PaymentIntent.create(
-            amount=request.amount,
-            currency=request.currency,
+        # Create PaymentIntent with FIXED configuration
+        intent = stripe.PaymentIntent.create(
+            amount=price.unit_amount,  # Amount in cents
+            currency=price.currency,
             customer=customer.id,
-            payment_method=request.payment_method_id,
-            confirmation_method='manual',
-            confirm=True,
+            automatic_payment_methods={
+                'enabled': True,
+                'allow_redirects': 'never'  # 🔧 THIS FIXES THE STRIPE ERROR!
+            },
             metadata={
                 'user_id': str(current_user.id),
-                'plan_name': request.plan_name,
-                'subscription_upgrade': 'true'
+                'user_email': current_user.email,
+                'price_id': request.price_id,
+                'plan_type': plan_type
             }
         )
-        
-        # Generate a simple token for verification
-        import secrets
-        token = secrets.token_urlsafe(32)
-        
+
+        logger.info(f"Payment intent created for user {current_user.id}: {intent.id}")
+
         return PaymentIntentResponse(
-            client_secret=payment_intent.client_secret,
-            token=token
+            client_secret=intent.client_secret,
+            payment_intent_id=intent.id
         )
-        
-    except stripe.error.CardError as e:
-        logger.error(f"Card error: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Card error: {e.user_message}"
-        )
+
     except stripe.error.StripeError as e:
         logger.error(f"Stripe error: {str(e)}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Payment processing error"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Stripe error: {str(e)}"
         )
     except Exception as e:
         logger.error(f"Payment intent creation error: {str(e)}")
@@ -191,6 +195,75 @@ async def create_payment_intent(
             detail="Failed to create payment intent"
         )
 
+@router.post("/confirm_payment/")
+async def confirm_payment(
+    payment_intent_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """
+    Confirm payment and update user subscription
+    """
+    try:
+        # Retrieve the PaymentIntent from Stripe
+        intent = stripe.PaymentIntent.retrieve(payment_intent_id)
+        
+        if intent.status != 'succeeded':
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Payment not completed"
+            )
+
+        # Update user subscription in database
+        user_subscription = db.query(Subscription).filter(
+            Subscription.user_id == current_user.id
+        ).first()
+
+        plan_type = intent.metadata.get('plan_type', 'pro')
+
+        if not user_subscription:
+            # Create new subscription record
+            user_subscription = Subscription(
+                user_id=current_user.id,
+                tier=plan_type,
+                status='active',
+                stripe_payment_intent_id=payment_intent_id,
+                created_at=datetime.utcnow(),
+                expires_at=datetime.utcnow() + timedelta(days=30)  # 30 days from now
+            )
+            db.add(user_subscription)
+        else:
+            # Update existing subscription
+            user_subscription.tier = plan_type
+            user_subscription.status = 'active'
+            user_subscription.stripe_payment_intent_id = payment_intent_id
+            user_subscription.expires_at = datetime.utcnow() + timedelta(days=30)
+
+        db.commit()
+        db.refresh(user_subscription)
+
+        logger.info(f"User {current_user.id} subscription updated to {plan_type}")
+
+        return {
+            'success': True,
+            'subscription_tier': user_subscription.tier,
+            'expires_at': user_subscription.expires_at.isoformat()
+        }
+
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Stripe error: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Payment confirmation error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to confirm payment"
+        )
+
+# Legacy function - keep for backward compatibility
 async def create_subscription(
     request: SubscriptionRequest,
     current_user,
@@ -253,6 +326,3 @@ async def create_subscription(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to process subscription"
         )
-
-# Additional secure functions...
-# (Include other functions from the original payment.py but with proper environment variable usage)
