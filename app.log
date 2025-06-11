@@ -123,3 +123,20 @@
 2025-06-10 20:52:14,043 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
 2025-06-10 20:52:14,043 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
 2025-06-10 20:52:14,043 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-10 22:37:38,134 - youtube_trans_downloader - INFO - Environment: development
+2025-06-10 22:37:38,135 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-10 22:37:38,135 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-10 22:37:38,135 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-10 22:37:38,602 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-06-10 22:37:38,764 - youtube_trans_downloader - INFO - Environment: development
+2025-06-10 22:37:38,765 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-10 22:37:38,765 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-10 22:37:38,765 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-10 22:38:52,427 - passlib.handlers.bcrypt - WARNING - (trapped) error reading bcrypt version
+Traceback (most recent call last):
+  File "C:\Users\xiggy\YOUTUBE-TRANSCRIPT-APP\venv\Lib\site-packages\passlib\handlers\bcrypt.py", line 620, in _load_backend_mixin
+    version = _bcrypt.__about__.__version__
+              ^^^^^^^^^^^^^^^^^
+AttributeError: module 'bcrypt' has no attribute '__about__'
+2025-06-10 22:38:52,884 - youtube_trans_downloader.main - INFO - User logged in successfully: OneTechly
+2025-06-10 22:41:55,050 - youtube_trans_downloader.main - INFO - User logged in successfully: xiggy
