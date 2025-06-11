@@ -187,3 +187,36 @@ AttributeError: module 'bcrypt' has no attribute '__about__'
 2025-06-11 03:10:26,081 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
 2025-06-11 03:10:26,082 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
 2025-06-11 03:10:26,082 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-11 03:12:27,585 - youtube_trans_downloader - INFO - Environment: development
+2025-06-11 03:12:27,585 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-11 03:12:27,586 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-11 03:12:27,586 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-11 03:12:27,788 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-06-11 03:12:27,934 - youtube_trans_downloader - INFO - Environment: development
+2025-06-11 03:12:27,935 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-11 03:12:27,935 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-11 03:12:27,935 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-11 03:13:18,324 - passlib.handlers.bcrypt - WARNING - (trapped) error reading bcrypt version
+Traceback (most recent call last):
+  File "C:\Users\xiggy\YOUTUBE-TRANSCRIPT-APP\venv\Lib\site-packages\passlib\handlers\bcrypt.py", line 620, in _load_backend_mixin
+    version = _bcrypt.__about__.__version__
+              ^^^^^^^^^^^^^^^^^
+AttributeError: module 'bcrypt' has no attribute '__about__'
+2025-06-11 03:13:18,660 - youtube_trans_downloader.main - INFO - User logged in successfully: OneTechly
+2025-06-11 03:15:33,305 - youtube_trans_downloader - INFO - Environment: development
+2025-06-11 03:15:33,306 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-11 03:15:33,306 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-11 03:15:33,307 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-11 03:19:32,281 - youtube_trans_downloader - INFO - Environment: development
+2025-06-11 03:19:32,282 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-11 03:19:32,282 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-11 03:19:32,282 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-11 03:19:32,467 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-06-11 03:19:32,599 - youtube_trans_downloader - INFO - Environment: development
+2025-06-11 03:19:32,599 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-11 03:19:32,600 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-11 03:19:32,600 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-11 03:20:11,815 - youtube_trans_downloader - INFO - Environment: development
+2025-06-11 03:20:11,816 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-11 03:20:11,816 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-11 03:20:11,816 - youtube_trans_downloader - INFO - Using SQLite database for development
