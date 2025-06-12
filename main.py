@@ -659,15 +659,15 @@ async def create_payment_intent_endpoint(
         )
 
 #===================== Newly Added ==============================
+# 🔧 PERFECT FIX: Replace your confirm_payment endpoint in main.py
 
-# 🔧 NEW: Add confirm payment endpoint to main.py
 @app.post("/confirm_payment/")
 async def confirm_payment_endpoint(
     request: ConfirmPaymentRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Confirm payment and update user subscription"""
+    """Confirm payment and update user subscription - PERFECTLY MATCHED TO YOUR MODEL"""
     try:
         logger.info(f"Confirming payment for user {current_user.id} with payment_intent: {request.payment_intent_id}")
         
@@ -689,22 +689,23 @@ async def confirm_payment_endpoint(
         plan_type = intent.metadata.get('plan_type', 'pro')
 
         if not user_subscription:
-            # Create new subscription record
+            # 🔧 PERFECT: Create new subscription using YOUR EXACT model fields
             user_subscription = Subscription(
                 user_id=current_user.id,
                 tier=plan_type,
-                status='active',
-                stripe_payment_intent_id=request.payment_intent_id,
-                created_at=datetime.utcnow(),
-                expires_at=datetime.utcnow() + timedelta(days=30)
+                start_date=datetime.utcnow(),
+                expiry_date=datetime.utcnow() + timedelta(days=30),
+                payment_id=request.payment_intent_id,
+                auto_renew=True
             )
             db.add(user_subscription)
         else:
-            # Update existing subscription
+            # 🔧 PERFECT: Update existing subscription using YOUR EXACT model fields
             user_subscription.tier = plan_type
-            user_subscription.status = 'active'
-            user_subscription.stripe_payment_intent_id = request.payment_intent_id
-            user_subscription.expires_at = datetime.utcnow() + timedelta(days=30)
+            user_subscription.start_date = datetime.utcnow()
+            user_subscription.expiry_date = datetime.utcnow() + timedelta(days=30)
+            user_subscription.payment_id = request.payment_intent_id
+            user_subscription.auto_renew = True
 
         db.commit()
         db.refresh(user_subscription)
@@ -714,8 +715,8 @@ async def confirm_payment_endpoint(
         return {
             'success': True,
             'subscription_tier': user_subscription.tier,
-            'expires_at': user_subscription.expires_at.isoformat(),
-            'status': 'active'
+            'expires_at': user_subscription.expiry_date.isoformat(),
+            'status': 'active'  # 🔧 Return in response only, don't store in DB
         }
 
     except stripe.error.StripeError as e:
