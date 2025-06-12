@@ -1,4 +1,5 @@
 # main.py - Enhanced with Complete Stripe Payment Integration
+
 from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -50,7 +51,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-#=========================
+#===========================================================================
+
 # Add this to your main.py - Production-ready CORS configuration
 
 # Environment-aware configuration
@@ -115,10 +117,18 @@ SUBSCRIPTION_LIMITS = {
     }
 }
 
-# Price ID mapping
+# # Price ID mapping
+# PRICE_ID_MAP = {
+#     "pro": os.getenv("PRO_PRICE_ID") or os.getenv("STRIPE_PRO_PRICE_ID"),
+#     "premium": os.getenv("PREMIUM_PRICE_ID") or os.getenv("STRIPE_PREMIUM_PRICE_ID")
+# }
+
+#=================
+
+# Price ID mapping - UPDATED to use your standardized variable names
 PRICE_ID_MAP = {
-    "pro": os.getenv("PRO_PRICE_ID") or os.getenv("STRIPE_PRO_PRICE_ID"),
-    "premium": os.getenv("PREMIUM_PRICE_ID") or os.getenv("STRIPE_PREMIUM_PRICE_ID")
+    "pro": os.getenv("PRO_PRICE_ID"),
+    "premium": os.getenv("PREMIUM_PRICE_ID")
 }
 
 # Plan pricing in cents
@@ -127,18 +137,6 @@ PLAN_PRICING = {
     "premium": 1999  # $19.99
 }
 
-# # Initialize database on startup
-# @app.on_event("startup")
-# async def startup_event():
-#     try:
-#         logger.info("Initializing application...")
-#         create_tables()
-#         logger.info("Application initialized successfully")
-#     except Exception as e:
-#         logger.error(f"Error during application startup: {str(e)}")
-#         raise
-
-# Enhanced startup validation
 @app.on_event("startup")
 async def startup_event():
     """Enhanced startup with environment validation"""
@@ -168,16 +166,18 @@ async def startup_event():
                 logger.error(f"   - {var}")
             raise ValueError(f"Missing environment variables: {', '.join(missing_vars)}")
         
-        # Optional variables with warnings
+        # 🔧 UPDATED: Optional variables with correct names
         optional_vars = {
-            "STRIPE_PRO_PRICE_ID": "Pro plan price ID",
-            "STRIPE_PREMIUM_PRICE_ID": "Premium plan price ID", 
+            "PRO_PRICE_ID": "Pro plan price ID",
+            "PREMIUM_PRICE_ID": "Premium plan price ID", 
             "STRIPE_WEBHOOK_SECRET": "Webhook verification"
         }
         
         for var, description in optional_vars.items():
             if not os.getenv(var):
                 logger.warning(f"⚠️  {var} not set - {description} will not work")
+            else:
+                logger.info(f"✅ {var}: SET")
         
         # Initialize database
         create_tables()
@@ -188,6 +188,7 @@ async def startup_event():
         logger.error(f"❌ Startup failed: {str(e)}")
         raise
 
+#============================================
 # Enhanced Pydantic models
 class Token(BaseModel):
     access_token: str
@@ -219,15 +220,28 @@ class PaymentRequest(BaseModel):
     subscription_tier: str
 
 # NEW: Enhanced payment models
+# 🔧 UPDATED: Payment models to match your new implementation
+class CreatePaymentIntentRequest(BaseModel):
+    price_id: str  # 🔧 SIMPLIFIED: Only price_id needed
+
+class ConfirmPaymentRequest(BaseModel):
+    payment_intent_id: str
+
+
 class PaymentIntentRequest(BaseModel):
     amount: int  # Amount in cents
     currency: str = 'usd'
     payment_method_id: str
     plan_name: str
 
+# class PaymentIntentResponse(BaseModel):
+#     client_secret: str
+#     token: str
+
 class PaymentIntentResponse(BaseModel):
     client_secret: str
-    token: str
+    payment_intent_id: str  # 🔧 UPDATED: Changed from token to payment_intent_id
+
 
 class SubscriptionRequest(BaseModel):
     token: Optional[str] = None
@@ -561,76 +575,163 @@ async def download_transcript(
     
     return {"transcript": transcript_text, "youtube_id": request.youtube_id}
 
-# NEW: Enhanced payment intent endpoint
+# 🔧 UPDATED: Enhanced payment intent endpoint to match payment.py
 @app.post("/create_payment_intent/")
 async def create_payment_intent_endpoint(
-    request: PaymentIntentRequest,
+    request: CreatePaymentIntentRequest,  # 🔧 UPDATED: Use new simple model
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Create a payment intent for subscription upgrade"""
+    """Create a payment intent for subscription upgrade - UPDATED VERSION"""
     try:
-        # Validate plan
-        if request.plan_name not in PLAN_PRICING:
+        logger.info(f"Creating payment intent for user {current_user.id} with price_id: {request.price_id}")
+        
+        # Validate price_id using your standardized variable names
+        valid_price_ids = [
+            os.getenv("PRO_PRICE_ID"),
+            os.getenv("PREMIUM_PRICE_ID")
+        ]
+        
+        if request.price_id not in valid_price_ids:
+            logger.error(f"Invalid price ID: {request.price_id}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid subscription plan"
+                detail=f"Invalid price ID: {request.price_id}"
             )
-        
-        expected_amount = PLAN_PRICING[request.plan_name]
-        
-        # Validate amount
-        if request.amount != expected_amount:
+
+        # Get the price from Stripe
+        try:
+            price = stripe.Price.retrieve(request.price_id)
+            logger.info(f"Retrieved price: {price.unit_amount} {price.currency}")
+        except stripe.error.InvalidRequestError as e:
+            logger.error(f"Invalid Stripe price ID: {request.price_id}, error: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid payment amount. Expected {expected_amount}, got {request.amount}"
+                detail=f"Invalid Stripe price ID: {request.price_id}"
             )
+        
+        # Determine plan type using your standardized variable names
+        plan_type = 'pro' if request.price_id == os.getenv("PRO_PRICE_ID") else 'premium'
+        logger.info(f"Plan type: {plan_type}")
         
         # Get or create Stripe customer
         customer = get_or_create_stripe_customer(current_user, db)
+        logger.info(f"Stripe customer: {customer.id}")
         
-        # Create payment intent
-        payment_intent = stripe.PaymentIntent.create(
-            amount=request.amount,
-            currency=request.currency,
+        # 🔧 FIXED: Create PaymentIntent with proper configuration
+        intent = stripe.PaymentIntent.create(
+            amount=price.unit_amount,  # Amount in cents
+            currency=price.currency,
             customer=customer.id,
-            payment_method=request.payment_method_id,
-            confirmation_method='manual',
-            confirm=True,
+            automatic_payment_methods={
+                'enabled': True,
+                'allow_redirects': 'never'  # 🔧 THIS FIXES THE STRIPE REDIRECT ERROR!
+            },
             metadata={
                 'user_id': str(current_user.id),
-                'plan_name': request.plan_name,
-                'subscription_upgrade': 'true'
+                'user_email': current_user.email,
+                'price_id': request.price_id,
+                'plan_type': plan_type
             }
         )
-        
-        # Generate verification token
-        token = secrets.token_urlsafe(32)
-        
-        return PaymentIntentResponse(
-            client_secret=payment_intent.client_secret,
-            token=token
-        )
-        
-    except stripe.error.CardError as e:
-        logger.error(f"Card error: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Card error: {e.user_message}"
-        )
+
+        logger.info(f"✅ Payment intent created successfully: {intent.id}")
+
+        return {
+            'client_secret': intent.client_secret,
+            'payment_intent_id': intent.id,
+            'amount': price.unit_amount,
+            'currency': price.currency,
+            'plan_type': plan_type
+        }
+
     except stripe.error.StripeError as e:
         logger.error(f"Stripe error: {str(e)}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Payment processing error"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Stripe error: {str(e)}"
         )
     except Exception as e:
         logger.error(f"Payment intent creation error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create payment intent"
+            detail=f"Failed to create payment intent: {str(e)}"
         )
 
+#===================== Newly Added ==============================
+
+# 🔧 NEW: Add confirm payment endpoint to main.py
+@app.post("/confirm_payment/")
+async def confirm_payment_endpoint(
+    request: ConfirmPaymentRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Confirm payment and update user subscription"""
+    try:
+        logger.info(f"Confirming payment for user {current_user.id} with payment_intent: {request.payment_intent_id}")
+        
+        # Retrieve the PaymentIntent from Stripe
+        intent = stripe.PaymentIntent.retrieve(request.payment_intent_id)
+        
+        if intent.status != 'succeeded':
+            logger.error(f"Payment not completed. Status: {intent.status}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Payment not completed. Status: {intent.status}"
+            )
+
+        # Update user subscription in database
+        user_subscription = db.query(Subscription).filter(
+            Subscription.user_id == current_user.id
+        ).first()
+
+        plan_type = intent.metadata.get('plan_type', 'pro')
+
+        if not user_subscription:
+            # Create new subscription record
+            user_subscription = Subscription(
+                user_id=current_user.id,
+                tier=plan_type,
+                status='active',
+                stripe_payment_intent_id=request.payment_intent_id,
+                created_at=datetime.utcnow(),
+                expires_at=datetime.utcnow() + timedelta(days=30)
+            )
+            db.add(user_subscription)
+        else:
+            # Update existing subscription
+            user_subscription.tier = plan_type
+            user_subscription.status = 'active'
+            user_subscription.stripe_payment_intent_id = request.payment_intent_id
+            user_subscription.expires_at = datetime.utcnow() + timedelta(days=30)
+
+        db.commit()
+        db.refresh(user_subscription)
+
+        logger.info(f"✅ User {current_user.id} subscription updated to {plan_type}")
+
+        return {
+            'success': True,
+            'subscription_tier': user_subscription.tier,
+            'expires_at': user_subscription.expires_at.isoformat(),
+            'status': 'active'
+        }
+
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error during confirmation: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Stripe error: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Payment confirmation error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to confirm payment: {str(e)}"
+        )
+
+#==============================================================
 # ENHANCED: Updated create_subscription endpoint
 @app.post("/create_subscription/")
 async def create_subscription_enhanced(
