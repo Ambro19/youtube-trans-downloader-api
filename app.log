@@ -236,3 +236,143 @@ Traceback (most recent call last):
               ^^^^^^^^^^^^^^^^^
 AttributeError: module 'bcrypt' has no attribute '__about__'
 2025-06-11 03:22:38,571 - youtube_trans_downloader.main - INFO - User logged in successfully: OneTechly
+2025-06-12 00:41:14,861 - youtube_trans_downloader - INFO - Environment: development
+2025-06-12 00:41:14,861 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-12 00:41:14,862 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-12 00:41:14,862 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-12 00:41:15,224 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-06-12 00:41:15,413 - youtube_trans_downloader - INFO - Environment: development
+2025-06-12 00:41:15,413 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-12 00:41:15,414 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-12 00:41:15,414 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-12 00:44:41,286 - passlib.handlers.bcrypt - WARNING - (trapped) error reading bcrypt version
+Traceback (most recent call last):
+  File "C:\Users\xiggy\YOUTUBE-TRANSCRIPT-APP\venv\Lib\site-packages\passlib\handlers\bcrypt.py", line 620, in _load_backend_mixin
+    version = _bcrypt.__about__.__version__
+              ^^^^^^^^^^^^^^^^^
+AttributeError: module 'bcrypt' has no attribute '__about__'
+2025-06-12 00:44:41,626 - youtube_trans_downloader.main - INFO - User logged in successfully: OneTechly
+2025-06-12 00:45:08,746 - youtube_trans_downloader.main - INFO - Creating payment intent for user 1 with price_id: price_1RTZOEGg8JIA2Tvt7LYf6EB5
+2025-06-12 00:45:08,958 - stripe - INFO - message='Request to Stripe api' method=get path=https://api.stripe.com/v1/prices/price_1RTZOEGg8JIA2Tvt7LYf6EB5
+2025-06-12 00:45:09,934 - stripe - INFO - message='Stripe API response' path=https://api.stripe.com/v1/prices/price_1RTZOEGg8JIA2Tvt7LYf6EB5 response_code=200
+2025-06-12 00:45:09,937 - youtube_trans_downloader.main - INFO - Retrieved price: 999 usd
+2025-06-12 00:45:09,937 - youtube_trans_downloader.main - INFO - Plan type: pro
+2025-06-12 00:45:09,938 - stripe - INFO - message='Request to Stripe api' method=get path=https://api.stripe.com/v1/customers/cus_STWYI6xyVV9fRB
+2025-06-12 00:45:10,128 - stripe - INFO - message='Stripe API response' path=https://api.stripe.com/v1/customers/cus_STWYI6xyVV9fRB response_code=200
+2025-06-12 00:45:10,129 - youtube_trans_downloader.main - INFO - Stripe customer: cus_STWYI6xyVV9fRB
+2025-06-12 00:45:10,129 - stripe - INFO - message='Request to Stripe api' method=post path=https://api.stripe.com/v1/payment_intents
+2025-06-12 00:45:10,452 - stripe - INFO - message='Stripe API response' path=https://api.stripe.com/v1/payment_intents response_code=200
+2025-06-12 00:45:11,594 - youtube_trans_downloader.main - INFO - Confirming payment for user 1 with payment_intent: pi_3RZ30lGg8JIA2Tvt1Ow721xT
+2025-06-12 00:45:11,594 - stripe - INFO - message='Request to Stripe api' method=get path=https://api.stripe.com/v1/payment_intents/pi_3RZ30lGg8JIA2Tvt1Ow721xT
+2025-06-12 00:45:11,834 - stripe - INFO - message='Stripe API response' path=https://api.stripe.com/v1/payment_intents/pi_3RZ30lGg8JIA2Tvt1Ow721xT response_code=200
+2025-06-12 00:47:02,783 - youtube_trans_downloader.main - INFO - User logged in successfully: OneTechly
+2025-06-12 00:53:01,855 - youtube_trans_downloader.main - INFO - User logged in successfully: OneTechly
+2025-06-12 01:04:31,149 - youtube_trans_downloader.main - WARNING - Failed login attempt for user: OneTechly
+2025-06-12 20:05:29,018 - youtube_trans_downloader - INFO - Environment: development
+2025-06-12 20:05:29,019 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-12 20:05:29,020 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-12 20:05:29,020 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-12 20:05:29,602 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-06-12 20:05:29,806 - youtube_trans_downloader - INFO - Environment: development
+2025-06-12 20:05:29,807 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-12 20:05:29,807 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-12 20:05:29,807 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-12 20:06:11,857 - passlib.handlers.bcrypt - WARNING - (trapped) error reading bcrypt version
+Traceback (most recent call last):
+  File "C:\Users\xiggy\YOUTUBE-TRANSCRIPT-APP\venv\Lib\site-packages\passlib\handlers\bcrypt.py", line 620, in _load_backend_mixin
+    version = _bcrypt.__about__.__version__
+              ^^^^^^^^^^^^^^^^^
+AttributeError: module 'bcrypt' has no attribute '__about__'
+2025-06-12 20:06:12,238 - youtube_trans_downloader.main - INFO - User logged in successfully: OneTechly
+2025-06-12 21:34:52,203 - youtube_trans_downloader.main - INFO - User logged in successfully: OneTechly
+2025-06-12 21:37:29,276 - youtube_trans_downloader.main - INFO - User logged in successfully: OneTechly
+2025-06-12 21:42:47,385 - youtube_trans_downloader.main - INFO - User logged in successfully: OneTechly
+2025-06-12 21:58:59,590 - youtube_trans_downloader.main - INFO - User logged in successfully: OneTechly
+2025-06-12 23:18:31,740 - youtube_trans_downloader.main - ERROR - Error retrieving transcript for video https://www.youtube.com/shorts/PcE4bFUBSBg: 
+Could not retrieve a transcript for the video https://www.youtube.com/watch?v=https://www.youtube.com/shorts/PcE4bFUBSBg! This is most likely caused by:
+
+You provided an invalid video id. Make sure you are using the video id and NOT the url!
+
+Do NOT run: `YouTubeTranscriptApi.get_transcript("https://www.youtube.com/watch?v=1234")`
+Instead run: `YouTubeTranscriptApi.get_transcript("1234")`
+
+If you are sure that the described cause is not responsible for this error and that a transcript should be retrievable, please create an issue at https://github.com/jdepoix/youtube-transcript-api/issues. Please add which version of youtube_transcript_api you are using and provide the information needed to replicate the error. Also make sure that there are no open issues which already describe your problem!
+2025-06-12 23:18:47,388 - youtube_trans_downloader.main - ERROR - Error retrieving transcript for video https://www.youtube.com/shorts/PcE4bFUBSBg: 
+Could not retrieve a transcript for the video https://www.youtube.com/watch?v=https://www.youtube.com/shorts/PcE4bFUBSBg! This is most likely caused by:
+
+You provided an invalid video id. Make sure you are using the video id and NOT the url!
+
+Do NOT run: `YouTubeTranscriptApi.get_transcript("https://www.youtube.com/watch?v=1234")`
+Instead run: `YouTubeTranscriptApi.get_transcript("1234")`
+
+If you are sure that the described cause is not responsible for this error and that a transcript should be retrievable, please create an issue at https://github.com/jdepoix/youtube-transcript-api/issues. Please add which version of youtube_transcript_api you are using and provide the information needed to replicate the error. Also make sure that there are no open issues which already describe your problem!
+2025-06-12 23:19:52,514 - youtube_trans_downloader.main - ERROR - Error retrieving transcript for video PcE4bFUBSBg: no element found: line 1, column 0
+2025-06-12 23:20:01,369 - youtube_trans_downloader.main - ERROR - Error retrieving transcript for video PcE4bFUBSBg: no element found: line 1, column 0
+2025-06-12 23:20:28,251 - youtube_trans_downloader.main - ERROR - Error retrieving transcript for video https://www.youtube.com/shorts/PcE4bFUBSBg: 
+Could not retrieve a transcript for the video https://www.youtube.com/watch?v=https://www.youtube.com/shorts/PcE4bFUBSBg! This is most likely caused by:
+
+You provided an invalid video id. Make sure you are using the video id and NOT the url!
+
+Do NOT run: `YouTubeTranscriptApi.get_transcript("https://www.youtube.com/watch?v=1234")`
+Instead run: `YouTubeTranscriptApi.get_transcript("1234")`
+
+If you are sure that the described cause is not responsible for this error and that a transcript should be retrievable, please create an issue at https://github.com/jdepoix/youtube-transcript-api/issues. Please add which version of youtube_transcript_api you are using and provide the information needed to replicate the error. Also make sure that there are no open issues which already describe your problem!
+2025-06-12 23:20:55,402 - youtube_trans_downloader.main - INFO - User logged in successfully: xiggy
+2025-06-12 23:21:15,889 - youtube_trans_downloader.main - ERROR - Error retrieving transcript for video https://www.youtube.com/shorts/PcE4bFUBSBg: 
+Could not retrieve a transcript for the video https://www.youtube.com/watch?v=https://www.youtube.com/shorts/PcE4bFUBSBg! This is most likely caused by:
+
+You provided an invalid video id. Make sure you are using the video id and NOT the url!
+
+Do NOT run: `YouTubeTranscriptApi.get_transcript("https://www.youtube.com/watch?v=1234")`
+Instead run: `YouTubeTranscriptApi.get_transcript("1234")`
+
+If you are sure that the described cause is not responsible for this error and that a transcript should be retrievable, please create an issue at https://github.com/jdepoix/youtube-transcript-api/issues. Please add which version of youtube_transcript_api you are using and provide the information needed to replicate the error. Also make sure that there are no open issues which already describe your problem!
+2025-06-12 23:22:42,128 - youtube_trans_downloader.main - INFO - User logged in successfully: xiggy
+2025-06-12 23:23:30,302 - youtube_trans_downloader.main - ERROR - Error retrieving transcript for video https://www.youtube.com/shorts/PcE4bFUBSBg: 
+Could not retrieve a transcript for the video https://www.youtube.com/watch?v=https://www.youtube.com/shorts/PcE4bFUBSBg! This is most likely caused by:
+
+You provided an invalid video id. Make sure you are using the video id and NOT the url!
+
+Do NOT run: `YouTubeTranscriptApi.get_transcript("https://www.youtube.com/watch?v=1234")`
+Instead run: `YouTubeTranscriptApi.get_transcript("1234")`
+
+If you are sure that the described cause is not responsible for this error and that a transcript should be retrievable, please create an issue at https://github.com/jdepoix/youtube-transcript-api/issues. Please add which version of youtube_transcript_api you are using and provide the information needed to replicate the error. Also make sure that there are no open issues which already describe your problem!
+2025-06-12 23:23:34,013 - youtube_trans_downloader.main - ERROR - Error retrieving transcript for video https://www.youtube.com/shorts/PcE4bFUBSBg: 
+Could not retrieve a transcript for the video https://www.youtube.com/watch?v=https://www.youtube.com/shorts/PcE4bFUBSBg! This is most likely caused by:
+
+You provided an invalid video id. Make sure you are using the video id and NOT the url!
+
+Do NOT run: `YouTubeTranscriptApi.get_transcript("https://www.youtube.com/watch?v=1234")`
+Instead run: `YouTubeTranscriptApi.get_transcript("1234")`
+
+If you are sure that the described cause is not responsible for this error and that a transcript should be retrievable, please create an issue at https://github.com/jdepoix/youtube-transcript-api/issues. Please add which version of youtube_transcript_api you are using and provide the information needed to replicate the error. Also make sure that there are no open issues which already describe your problem!
+2025-06-12 23:23:40,890 - youtube_trans_downloader.main - ERROR - Error retrieving transcript for video PcE4bFUBSBg: no element found: line 1, column 0
+2025-06-12 23:23:45,701 - youtube_trans_downloader.main - ERROR - Error retrieving transcript for video PcE4bFUBSBg: no element found: line 1, column 0
+2025-06-13 00:59:25,486 - youtube_trans_downloader.main - INFO - User logged in successfully: OneTechly
+2025-06-13 01:00:34,529 - youtube_trans_downloader.main - ERROR - Error retrieving transcript for video Jz8QT8KcXVI: no element found: line 1, column 0
+2025-06-13 01:00:54,269 - youtube_trans_downloader.main - ERROR - Error retrieving transcript for video Jz8QT8KcXVI: no element found: line 1, column 0
+2025-06-13 01:45:17,524 - youtube_trans_downloader - INFO - Environment: development
+2025-06-13 01:45:17,525 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-13 01:45:17,526 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-13 01:45:17,526 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-13 01:45:18,041 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-06-13 01:45:18,202 - youtube_trans_downloader - INFO - Environment: development
+2025-06-13 01:45:18,203 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-13 01:45:18,204 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-13 01:45:18,204 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-13 01:49:17,706 - passlib.handlers.bcrypt - WARNING - (trapped) error reading bcrypt version
+Traceback (most recent call last):
+  File "C:\Users\xiggy\YOUTUBE-TRANSCRIPT-APP\venv\Lib\site-packages\passlib\handlers\bcrypt.py", line 620, in _load_backend_mixin
+    version = _bcrypt.__about__.__version__
+              ^^^^^^^^^^^^^^^^^
+AttributeError: module 'bcrypt' has no attribute '__about__'
+2025-06-13 01:49:18,125 - youtube_trans_downloader.main - INFO - User logged in successfully: OneTechly
+2025-06-13 01:49:56,629 - youtube_trans_downloader.main - ERROR - Error retrieving transcript for video PcE4bFUBSBg: no element found: line 1, column 0
+2025-06-13 02:01:49,606 - youtube_trans_downloader - INFO - Environment: development
+2025-06-13 02:01:49,606 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-13 02:01:49,607 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-13 02:01:49,607 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-13 02:11:50,024 - youtube_trans_downloader - INFO - Environment: development
+2025-06-13 02:11:50,025 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-13 02:11:50,025 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-13 02:11:50,026 - youtube_trans_downloader - INFO - Using SQLite database for development

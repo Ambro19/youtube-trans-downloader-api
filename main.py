@@ -543,8 +543,40 @@ async def download_transcript(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    transcript_type = "clean" if request.clean_transcript else "unclean"
+    # 🔧 FIX: Extract and validate video ID first
+    video_id = request.youtube_id.strip()
     
+    # Extract video ID if a URL was somehow passed (safety check)
+    if 'youtube.com' in video_id or 'youtu.be' in video_id:
+        # Extract just the ID from URL
+        import re
+        patterns = [
+            r'(?:youtube\.com\/watch\?v=)([^&\n?#]+)',
+            r'(?:youtu\.be\/)([^&\n?#]+)',
+            r'(?:youtube\.com\/shorts\/)([^&\n?#]+)',
+            r'(?:youtube\.com\/embed\/)([^&\n?#]+)',
+            r'[?&]v=([^&\n?#]+)'
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, video_id)
+            if match:
+                video_id = match.group(1)[:11]
+                break
+    
+    # Ensure it's a valid 11-character video ID
+    if not video_id or len(video_id) != 11:
+        logger.error(f"Invalid video ID received: '{request.youtube_id}' -> '{video_id}'")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid YouTube video ID. Please provide a valid 11-character video ID."
+        )
+    
+    logger.info(f"Processing transcript request for video ID: {video_id}")
+    
+    # Determine transcript type
+    transcript_type = "clean" if request.clean_transcript else "unclean"
+   
+    # Check subscription limits
     can_download = check_subscription_limit(user.id, transcript_type, db)
     if not can_download:
         logger.warning(f"User {user.username} reached subscription limit for {transcript_type} transcripts")
@@ -552,28 +584,41 @@ async def download_transcript(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"You've reached your monthly limit for {transcript_type} transcripts. Please upgrade your subscription."
         )
-    
-    transcript_text = process_youtube_transcript(
-        request.youtube_id, 
-        clean=request.clean_transcript
-    )
-    
+   
+    # 🔧 FIX: Use the cleaned video_id instead of original request.youtube_id
+    try:
+        transcript_text = process_youtube_transcript(
+            video_id,  # Use cleaned video ID
+            clean=request.clean_transcript
+        )
+    except Exception as e:
+        logger.error(f"Error retrieving transcript for video {video_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve transcript: {str(e)}"
+        )
+   
+    # Record the download in database (use cleaned video_id)
     new_download = TranscriptDownload(
         user_id=user.id,
-        youtube_id=request.youtube_id,
+        youtube_id=video_id,  # Store cleaned video ID
         transcript_type=transcript_type,
         created_at=datetime.now()
     )
-    
+   
     try:
         db.add(new_download)
         db.commit()
-        logger.info(f"User {user.username} downloaded {transcript_type} transcript for video {request.youtube_id}")
+        logger.info(f"User {user.username} downloaded {transcript_type} transcript for video {video_id}")
     except Exception as e:
         db.rollback()
         logger.error(f"Error recording transcript download: {str(e)}")
-    
-    return {"transcript": transcript_text, "youtube_id": request.youtube_id}
+        # Don't fail the request if database recording fails
+   
+    return {
+        "transcript": transcript_text, 
+        "youtube_id": video_id  # Return cleaned video ID
+    }
 
 # 🔧 UPDATED: Enhanced payment intent endpoint to match payment.py
 @app.post("/create_payment_intent/")
