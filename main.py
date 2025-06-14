@@ -1,5 +1,7 @@
 # main.py - Enhanced with Complete Stripe Payment Integration
+# main.py - Completed all the required modifications including Testing the Debug Endpoints 
 
+# Fixed imports section - Replace lines 1-20 in your main.py
 from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -19,7 +21,10 @@ from dotenv import load_dotenv
 import secrets
 import requests
 import re
-import xml.etree.ElementTree as ET from urllib.parse import unquote
+import ssl  # ✅ ADDED
+import sys  # ✅ ADDED
+import xml.etree.ElementTree as ET  # ✅ FIXED
+from urllib.parse import unquote  # ✅ FIXED
 
 import warnings
 warnings.filterwarnings("ignore", message=".*bcrypt.*")
@@ -304,38 +309,57 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         raise credentials_exception
     return user
 
-# NEW: Enhanced payment helper functions
+# Improved get_or_create_stripe_customer function
 def get_or_create_stripe_customer(user, db: Session):
-    """Get or create a Stripe customer for the user"""
+    """Get or create a Stripe customer for the user - Enhanced version"""
     try:
-        # Check if user has stripe_customer_id attribute (from new User model)
-        if hasattr(user, 'stripe_customer_id') and user.stripe_customer_id:
+        # Check if user has stripe_customer_id attribute and it's valid
+        stripe_customer_id = getattr(user, 'stripe_customer_id', None)
+        
+        if stripe_customer_id:
             try:
-                customer = stripe.Customer.retrieve(user.stripe_customer_id)
+                customer = stripe.Customer.retrieve(stripe_customer_id)
+                logger.info(f"✅ Found existing Stripe customer: {customer.id}")
                 return customer
             except stripe.error.InvalidRequestError:
-                pass
+                logger.warning(f"⚠️ Invalid Stripe customer ID: {stripe_customer_id}, creating new one")
         
         # Create new customer
+        logger.info(f"🆕 Creating new Stripe customer for user: {user.username}")
         customer = stripe.Customer.create(
             email=user.email,
             name=user.username,
             metadata={'user_id': str(user.id)}
         )
         
-        # Save customer ID if user model supports it
-        if hasattr(user, 'stripe_customer_id'):
-            user.stripe_customer_id = customer.id
-            db.commit()
+        # Try to save customer ID if user model supports it
+        try:
+            if hasattr(user, 'stripe_customer_id'):
+                user.stripe_customer_id = customer.id
+                db.commit()
+                logger.info(f"💾 Saved Stripe customer ID to database")
+            else:
+                logger.info(f"ℹ️ User model doesn't have stripe_customer_id field - customer created but not saved")
+        except Exception as save_error:
+            logger.warning(f"⚠️ Could not save Stripe customer ID: {save_error}")
+            # Don't fail the whole process if we can't save the ID
         
         return customer
         
-    except Exception as e:
-        logger.error(f"Error creating Stripe customer: {str(e)}")
+    except stripe.error.StripeError as e:
+        logger.error(f"❌ Stripe error creating customer: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create payment customer"
         )
+    except Exception as e:
+        logger.error(f"❌ Unexpected error creating Stripe customer: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create payment customer"
+        )
+
+
 
 def check_user_limits(user, action_type: str, db: Session):
     """Check if user has exceeded their limits for the current month"""
@@ -1648,7 +1672,7 @@ async def debug_alternative_method(video_id: str):
             "error": str(e),
             "error_type": type(e).__name__
         }
-        
+
 # NEW: Health check endpoint
 @app.get("/health/")
 async def health_check():
