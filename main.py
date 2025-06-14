@@ -29,7 +29,8 @@ from youtube_transcript_api._errors import (
     TranscriptsDisabled, 
     NoTranscriptFound, 
     VideoUnavailable, 
-    TooManyRequests
+    TooManyRequests,
+    NoTranscriptAvailable
 )
 
 # Load environment variables
@@ -476,83 +477,116 @@ def check_subscription_limit(user_id: int, transcript_type: str, db: Session):
 #===========================================================================
 
 # Add this function to your backend (main.py or wherever your transcript processing is)
-
 def process_youtube_transcript(video_id: str, clean: bool = True) -> str:
     """
-    Process YouTube transcript with better error handling
+    Process YouTube transcript using youtube-transcript-api v1.1.0
     """
     try:
-        logger.info(f"Attempting to get transcript for video: {video_id}")
+        logger.info(f"🔍 Getting transcript for video: {video_id}")
         
-        # Try to get the transcript
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+        # Use the updated API - this should work much better now
+        transcript_list = YouTubeTranscriptApi.get_transcript(
+            video_id,
+            languages=['en', 'en-US', 'en-GB']  # Prefer English transcripts
+        )
         
         if not transcript_list:
             raise HTTPException(
                 status_code=404,
-                detail="No transcript found for this video. The video may not have auto-generated captions or manual transcripts available."
+                detail="No transcript data found for this video."
             )
         
-        logger.info(f"Successfully retrieved {len(transcript_list)} transcript segments")
+        logger.info(f"✅ Retrieved {len(transcript_list)} transcript segments")
         
         if clean:
             # Clean format - text only
-            text_only = ' '.join([item['text'] for item in transcript_list])
-            return text_only.strip()
+            text_parts = []
+            for item in transcript_list:
+                if 'text' in item and item['text'].strip():
+                    # Clean up the text
+                    text = item['text'].strip()
+                    # Remove common transcript artifacts
+                    text = text.replace('[Music]', '').replace('[Applause]', '').replace('[Laughter]', '').strip()
+                    if text and not text.startswith('[') and not text.endswith(']'):  # Skip pure markup
+                        text_parts.append(text)
+            
+            if not text_parts:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Transcript contains no readable text content."
+                )
+            
+            return ' '.join(text_parts)
         else:
             # Unclean format - with timestamps
             formatted_transcript = []
             for item in transcript_list:
-                start_time = item['start']
-                minutes = int(start_time // 60)
-                seconds = int(start_time % 60)
-                timestamp = f"[{minutes:02d}:{seconds:02d}]"
-                formatted_transcript.append(f"{timestamp} {item['text']}")
+                if 'text' in item and 'start' in item:
+                    start_time = float(item['start'])
+                    minutes = int(start_time // 60)
+                    seconds = int(start_time % 60)
+                    timestamp = f"[{minutes:02d}:{seconds:02d}]"
+                    text = item['text'].strip()
+                    if text:  # Include all text for unclean format
+                        formatted_transcript.append(f"{timestamp} {text}")
+            
+            if not formatted_transcript:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Transcript contains no content with timestamps."
+                )
+            
             return '\n'.join(formatted_transcript)
             
     except TranscriptsDisabled:
-        logger.error(f"Transcripts are disabled for video {video_id}")
+        logger.error(f"❌ Transcripts disabled for video {video_id}")
         raise HTTPException(
             status_code=404,
-            detail="Transcripts are disabled for this video. The video owner has disabled captions."
+            detail="Transcripts are disabled for this video."
         )
     except NoTranscriptFound:
-        logger.error(f"No transcript found for video {video_id}")
+        logger.error(f"❌ No transcript found for video {video_id}")
         raise HTTPException(
             status_code=404,
-            detail="No transcript available for this video. This video doesn't have auto-generated captions or manual transcripts."
+            detail="No transcript available for this video. Try a different video with captions enabled."
+        )
+    except NoTranscriptAvailable:
+        logger.error(f"❌ No transcript available for video {video_id}")
+        raise HTTPException(
+            status_code=404,
+            detail="No transcript available in the requested language for this video."
         )
     except VideoUnavailable:
-        logger.error(f"Video {video_id} is unavailable")
+        logger.error(f"❌ Video {video_id} unavailable")
         raise HTTPException(
             status_code=404,
-            detail="Video is unavailable. It may be private, deleted, or region-restricted."
+            detail="Video is unavailable, private, or doesn't exist."
         )
     except TooManyRequests:
-        logger.error(f"Rate limited when accessing video {video_id}")
+        logger.error(f"❌ Rate limited for video {video_id}")
         raise HTTPException(
             status_code=429,
             detail="Too many requests. Please wait a moment and try again."
         )
     except Exception as e:
         error_msg = str(e).lower()
-        logger.error(f"Unexpected error getting transcript for {video_id}: {str(e)}")
+        logger.error(f"💥 Error getting transcript for {video_id}: {str(e)}")
         
-        # Handle specific error messages
-        if "no element found" in error_msg:
+        # Handle specific error patterns with the new library
+        if "could not retrieve a transcript" in error_msg:
             raise HTTPException(
                 status_code=404,
-                detail="No transcript available for this video. Please try a different video that has captions enabled."
+                detail="No transcript available for this video. Please try a different video."
             )
         elif "video unavailable" in error_msg:
             raise HTTPException(
                 status_code=404,
-                detail="Video is unavailable or private. Please check the video URL and try again."
+                detail="Video is unavailable or private."
             )
-        elif "transcript disabled" in error_msg:
+        elif "subtitles are disabled" in error_msg:
             raise HTTPException(
                 status_code=404,
-                detail="Transcripts are disabled for this video by the owner."
+                detail="Subtitles are disabled for this video."
             )
         else:
             raise HTTPException(
@@ -560,78 +594,78 @@ def process_youtube_transcript(video_id: str, clean: bool = True) -> str:
                 detail=f"Failed to retrieve transcript: {str(e)}"
             )
 
-# Updated download endpoint
-@app.post("/download_transcript/")
-async def download_transcript(
-    request: TranscriptRequest,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    # Clean and validate video ID
-    video_id = request.youtube_id.strip()
+# # Updated download endpoint
+# @app.post("/download_transcript/")
+# async def download_transcript(
+#     request: TranscriptRequest,
+#     user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db)
+# ):
+#     # Clean and validate video ID
+#     video_id = request.youtube_id.strip()
     
-    # Extract video ID if a URL was passed
-    if 'youtube.com' in video_id or 'youtu.be' in video_id:
-        import re
-        patterns = [
-            r'(?:youtube\.com\/watch\?v=)([^&\n?#]+)',
-            r'(?:youtu\.be\/)([^&\n?#]+)',
-            r'(?:youtube\.com\/shorts\/)([^&\n?#]+)',
-            r'(?:youtube\.com\/embed\/)([^&\n?#]+)',
-            r'[?&]v=([^&\n?#]+)'
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, video_id)
-            if match:
-                video_id = match.group(1)[:11]
-                break
+#     # Extract video ID if a URL was passed
+#     if 'youtube.com' in video_id or 'youtu.be' in video_id:
+#         import re
+#         patterns = [
+#             r'(?:youtube\.com\/watch\?v=)([^&\n?#]+)',
+#             r'(?:youtu\.be\/)([^&\n?#]+)',
+#             r'(?:youtube\.com\/shorts\/)([^&\n?#]+)',
+#             r'(?:youtube\.com\/embed\/)([^&\n?#]+)',
+#             r'[?&]v=([^&\n?#]+)'
+#         ]
+#         for pattern in patterns:
+#             match = re.search(pattern, video_id)
+#             if match:
+#                 video_id = match.group(1)[:11]
+#                 break
     
-    # Validate video ID
-    if not video_id or len(video_id) != 11:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid YouTube video ID. Please provide a valid 11-character video ID."
-        )
+#     # Validate video ID
+#     if not video_id or len(video_id) != 11:
+#         raise HTTPException(
+#             status_code=400,
+#             detail="Invalid YouTube video ID. Please provide a valid 11-character video ID."
+#         )
     
-    logger.info(f"Processing transcript request for video ID: {video_id}")
+#     logger.info(f"Processing transcript request for video ID: {video_id}")
     
-    # Check subscription limits
-    transcript_type = "clean_transcripts" if request.clean_transcript else "unclean_transcripts"
-    can_download = check_subscription_limit(user.id, transcript_type, db)
-    if not can_download:
-        logger.warning(f"User {user.username} reached subscription limit for {transcript_type}")
-        raise HTTPException(
-            status_code=403,
-            detail=f"You've reached your monthly limit for {transcript_type.replace('_', ' ')}. Please upgrade your subscription."
-        )
+#     # Check subscription limits
+#     transcript_type = "clean_transcripts" if request.clean_transcript else "unclean_transcripts"
+#     can_download = check_subscription_limit(user.id, transcript_type, db)
+#     if not can_download:
+#         logger.warning(f"User {user.username} reached subscription limit for {transcript_type}")
+#         raise HTTPException(
+#             status_code=403,
+#             detail=f"You've reached your monthly limit for {transcript_type.replace('_', ' ')}. Please upgrade your subscription."
+#         )
    
-    # Get transcript with improved error handling
-    transcript_text = process_youtube_transcript(
-        video_id,
-        clean=request.clean_transcript
-    )
+#     # Get transcript with improved error handling
+#     transcript_text = process_youtube_transcript(
+#         video_id,
+#         clean=request.clean_transcript
+#     )
    
-    # Record successful download
-    new_download = TranscriptDownload(
-        user_id=user.id,
-        youtube_id=video_id,
-        transcript_type=transcript_type,
-        created_at=datetime.now()
-    )
+#     # Record successful download
+#     new_download = TranscriptDownload(
+#         user_id=user.id,
+#         youtube_id=video_id,
+#         transcript_type=transcript_type,
+#         created_at=datetime.now()
+#     )
    
-    try:
-        db.add(new_download)
-        db.commit()
-        logger.info(f"User {user.username} downloaded {transcript_type} transcript for video {video_id}")
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Error recording transcript download: {str(e)}")
+#     try:
+#         db.add(new_download)
+#         db.commit()
+#         logger.info(f"User {user.username} downloaded {transcript_type} transcript for video {video_id}")
+#     except Exception as e:
+#         db.rollback()
+#         logger.error(f"Error recording transcript download: {str(e)}")
    
-    return {
-        "transcript": transcript_text, 
-        "youtube_id": video_id,
-        "message": "Transcript downloaded successfully"
-    }
+#     return {
+#         "transcript": transcript_text, 
+#         "youtube_id": video_id,
+#         "message": "Transcript downloaded successfully"
+#     }
 
 
 # API Endpoints (existing ones kept, new ones added)
@@ -865,6 +899,7 @@ async def download_transcript(
     }
 
 #==============================================================================
+
 # 🔧 UPDATED: Enhanced payment intent endpoint to match payment.py
 @app.post("/create_payment_intent/")
 async def create_payment_intent_endpoint(
