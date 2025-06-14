@@ -126,12 +126,6 @@ SUBSCRIPTION_LIMITS = {
     }
 }
 
-# # Price ID mapping
-# PRICE_ID_MAP = {
-#     "pro": os.getenv("PRO_PRICE_ID") or os.getenv("STRIPE_PRO_PRICE_ID"),
-#     "premium": os.getenv("PREMIUM_PRICE_ID") or os.getenv("STRIPE_PREMIUM_PRICE_ID")
-# }
-
 #=================
 
 # Price ID mapping - UPDATED to use your standardized variable names
