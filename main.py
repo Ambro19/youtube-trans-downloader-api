@@ -37,7 +37,6 @@ from youtube_transcript_api._errors import (
     TranscriptsDisabled, 
     NoTranscriptFound, 
     VideoUnavailable, 
-    TooManyRequests,
     NoTranscriptAvailable
 )
 
@@ -657,15 +656,16 @@ def process_youtube_transcript_with_fallback(video_id: str, clean: bool = True) 
 
 # ======================== NEW DEFs =================================
 
-# Add this function to your backend (main.py or wherever your transcript processing is)
+# Fixed process_youtube_transcript function
+# Replace your existing process_youtube_transcript function with this:
 def process_youtube_transcript(video_id: str, clean: bool = True) -> str:
     """
-    Process YouTube transcript using youtube-transcript-api v1.1.0
+    Process YouTube transcript using youtube-transcript-api v1.1.0 - FIXED VERSION
     """
     try:
         logger.info(f"🔍 Getting transcript for video: {video_id}")
         
-        # Use the updated API - this should work much better now
+        # Use the updated API
         transcript_list = YouTubeTranscriptApi.get_transcript(
             video_id,
             languages=['en', 'en-US', 'en-GB']  # Prefer English transcripts
@@ -743,18 +743,19 @@ def process_youtube_transcript(video_id: str, clean: bool = True) -> str:
             status_code=404,
             detail="Video is unavailable, private, or doesn't exist."
         )
-    except TooManyRequests:
-        logger.error(f"❌ Rate limited for video {video_id}")
-        raise HTTPException(
-            status_code=429,
-            detail="Too many requests. Please wait a moment and try again."
-        )
+    # ❌ REMOVED: TooManyRequests exception handling since it doesn't exist
     except Exception as e:
         error_msg = str(e).lower()
         logger.error(f"💥 Error getting transcript for {video_id}: {str(e)}")
         
-        # Handle specific error patterns with the new library
-        if "could not retrieve a transcript" in error_msg:
+        # Handle rate limiting through error message patterns
+        if "too many requests" in error_msg or "rate limit" in error_msg:
+            logger.error(f"❌ Rate limited for video {video_id}")
+            raise HTTPException(
+                status_code=429,
+                detail="Too many requests. Please wait a moment and try again."
+            )
+        elif "could not retrieve a transcript" in error_msg:
             raise HTTPException(
                 status_code=404,
                 detail="No transcript available for this video. Please try a different video."
