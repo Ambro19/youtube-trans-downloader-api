@@ -32,13 +32,13 @@ warnings.filterwarnings("ignore", message=".*bcrypt.*")
 # Import from database.py
 from database import get_db, User, Subscription, TranscriptDownload, create_tables
 
-#Add required import to backend
-from youtube_transcript_api._errors import (
-    TranscriptsDisabled, 
-    NoTranscriptFound, 
-    VideoUnavailable, 
-    NoTranscriptAvailable
-)
+# #Add required import to backend
+# from youtube_transcript_api._errors import (
+#     TranscriptsDisabled, 
+#     NoTranscriptFound, 
+#     VideoUnavailable, 
+#     NoTranscriptAvailable
+# )
 
 # Load environment variables
 load_dotenv()
@@ -656,19 +656,19 @@ def process_youtube_transcript_with_fallback(video_id: str, clean: bool = True) 
 
 # ======================== NEW DEFs =================================
 
-# Fixed process_youtube_transcript function
-# Replace your existing process_youtube_transcript function with this:
+# 2. REPLACE your process_youtube_transcript function with this version:
+
 def process_youtube_transcript(video_id: str, clean: bool = True) -> str:
     """
-    Process YouTube transcript using youtube-transcript-api v1.1.0 - FIXED VERSION
+    Process YouTube transcript - FIXED VERSION with generic exception handling
     """
     try:
         logger.info(f"🔍 Getting transcript for video: {video_id}")
         
-        # Use the updated API
+        # Use the YouTube Transcript API
         transcript_list = YouTubeTranscriptApi.get_transcript(
             video_id,
-            languages=['en', 'en-US', 'en-GB']  # Prefer English transcripts
+            languages=['en', 'en-US', 'en-GB']
         )
         
         if not transcript_list:
@@ -684,11 +684,9 @@ def process_youtube_transcript(video_id: str, clean: bool = True) -> str:
             text_parts = []
             for item in transcript_list:
                 if 'text' in item and item['text'].strip():
-                    # Clean up the text
                     text = item['text'].strip()
-                    # Remove common transcript artifacts
                     text = text.replace('[Music]', '').replace('[Applause]', '').replace('[Laughter]', '').strip()
-                    if text and not text.startswith('[') and not text.endswith(']'):  # Skip pure markup
+                    if text and not text.startswith('[') and not text.endswith(']'):
                         text_parts.append(text)
             
             if not text_parts:
@@ -708,7 +706,7 @@ def process_youtube_transcript(video_id: str, clean: bool = True) -> str:
                     seconds = int(start_time % 60)
                     timestamp = f"[{minutes:02d}:{seconds:02d}]"
                     text = item['text'].strip()
-                    if text:  # Include all text for unclean format
+                    if text:
                         formatted_transcript.append(f"{timestamp} {text}")
             
             if not formatted_transcript:
@@ -719,51 +717,36 @@ def process_youtube_transcript(video_id: str, clean: bool = True) -> str:
             
             return '\n'.join(formatted_transcript)
             
-    except TranscriptsDisabled:
-        logger.error(f"❌ Transcripts disabled for video {video_id}")
-        raise HTTPException(
-            status_code=404,
-            detail="Transcripts are disabled for this video."
-        )
-    except NoTranscriptFound:
-        logger.error(f"❌ No transcript found for video {video_id}")
-        raise HTTPException(
-            status_code=404,
-            detail="No transcript available for this video. Try a different video with captions enabled."
-        )
-    except NoTranscriptAvailable:
-        logger.error(f"❌ No transcript available for video {video_id}")
-        raise HTTPException(
-            status_code=404,
-            detail="No transcript available in the requested language for this video."
-        )
-    except VideoUnavailable:
-        logger.error(f"❌ Video {video_id} unavailable")
-        raise HTTPException(
-            status_code=404,
-            detail="Video is unavailable, private, or doesn't exist."
-        )
-    # ❌ REMOVED: TooManyRequests exception handling since it doesn't exist
     except Exception as e:
         error_msg = str(e).lower()
-        logger.error(f"💥 Error getting transcript for {video_id}: {str(e)}")
+        error_type = type(e).__name__
+        logger.error(f"💥 Error getting transcript for {video_id}: {str(e)} (Type: {error_type})")
         
-        # Handle rate limiting through error message patterns
-        if "too many requests" in error_msg or "rate limit" in error_msg:
-            logger.error(f"❌ Rate limited for video {video_id}")
+        # Handle all exceptions generically using error message patterns
+        if "transcript" in error_msg and "disabled" in error_msg:
+            raise HTTPException(
+                status_code=404,
+                detail="Transcripts are disabled for this video."
+            )
+        elif "no transcript" in error_msg or "not found" in error_msg:
+            raise HTTPException(
+                status_code=404,
+                detail="No transcript available for this video. Try a different video with captions enabled."
+            )
+        elif "video unavailable" in error_msg or "private" in error_msg:
+            raise HTTPException(
+                status_code=404,
+                detail="Video is unavailable, private, or doesn't exist."
+            )
+        elif "too many requests" in error_msg or "rate limit" in error_msg:
             raise HTTPException(
                 status_code=429,
                 detail="Too many requests. Please wait a moment and try again."
             )
-        elif "could not retrieve a transcript" in error_msg:
+        elif "could not retrieve" in error_msg:
             raise HTTPException(
                 status_code=404,
                 detail="No transcript available for this video. Please try a different video."
-            )
-        elif "video unavailable" in error_msg:
-            raise HTTPException(
-                status_code=404,
-                detail="Video is unavailable or private."
             )
         elif "subtitles are disabled" in error_msg:
             raise HTTPException(
