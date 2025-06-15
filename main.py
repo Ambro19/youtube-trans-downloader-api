@@ -358,8 +358,6 @@ def get_or_create_stripe_customer(user, db: Session):
             detail="Failed to create payment customer"
         )
 
-
-
 def check_user_limits(user, action_type: str, db: Session):
     """Check if user has exceeded their limits for the current month"""
     # Get subscription tier
@@ -616,15 +614,14 @@ def get_transcript_alternative_method(video_id: str, clean: bool = True) -> str:
             detail=f"Transcript extraction failed: {str(e)}"
         )
 
-#  Updated main transcript processor with fallback
+# 3. ALSO UPDATE your process_youtube_transcript_with_fallback function:
 def process_youtube_transcript_with_fallback(video_id: str, clean: bool = True) -> str:
     """
-    Main transcript processor with fallback to alternative method
+    Main transcript processor with fallback to alternative method - FIXED VERSION
     """
     # Try the original library first
     try:
         logger.info(f"🔍 Trying youtube-transcript-api for video: {video_id}")
-        from youtube_transcript_api import YouTubeTranscriptApi
         
         transcript_list = YouTubeTranscriptApi.get_transcript(
             video_id,
@@ -657,7 +654,6 @@ def process_youtube_transcript_with_fallback(video_id: str, clean: bool = True) 
 # ======================== NEW DEFs =================================
 
 # 2. REPLACE your process_youtube_transcript function with this version:
-
 def process_youtube_transcript(video_id: str, clean: bool = True) -> str:
     """
     Process YouTube transcript - FIXED VERSION with generic exception handling
