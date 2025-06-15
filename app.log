@@ -446,3 +446,12 @@ AttributeError: module 'bcrypt' has no attribute '__about__'
 2025-06-13 21:31:33,000 - youtube_trans_downloader.main - INFO - Processing transcript request for video ID: PcE4bFUBSBg
 2025-06-13 21:31:33,915 - youtube_trans_downloader.main - ERROR - Error retrieving transcript for video PcE4bFUBSBg: no element found: line 1, column 0
 2025-06-13 21:31:33,916 - youtube_trans_downloader.main - ERROR - Error retrieving transcript for video PcE4bFUBSBg: 500: Error retrieving transcript: no element found: line 1, column 0
+2025-06-15 18:29:46,078 - youtube_trans_downloader - INFO - Environment: development
+2025-06-15 18:29:46,082 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-15 18:29:46,083 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-15 18:29:46,084 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-15 18:29:46,548 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-06-15 18:29:46,719 - youtube_trans_downloader - INFO - Environment: development
+2025-06-15 18:29:46,720 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-15 18:29:46,721 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-15 18:29:46,722 - youtube_trans_downloader - INFO - Using SQLite database for development

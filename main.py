@@ -10,7 +10,11 @@ from datetime import datetime, timedelta
 from typing import Optional, List
 
 import jwt
-from jwt.exceptions import PyJWTError
+from jwt import PyJWTError  # ✅ CORRECT: Import PyJWTError directly from jwt
+
+# OR alternatively, you can use:
+# import jwt
+# from jwt.exceptions import InvalidTokenError as PyJWTError
 
 from pydantic import BaseModel
 from passlib.context import CryptContext
@@ -305,7 +309,8 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         username: str = payload.get("sub")
         if username is None:
             raise credentials_exception
-    except PyJWTError:  # ✅ FIXED: Use PyJWTError instead of jwt.PyJWTError
+    except Exception:  # ✅ SAFEST: Catch all JWT-related exceptions generically
+        raise credentials_exception
         raise credentials_exception
         
     user = get_user(db, username)
