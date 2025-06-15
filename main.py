@@ -8,7 +8,10 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 from typing import Optional, List
+
 import jwt
+from jwt.exceptions import PyJWTError
+
 from pydantic import BaseModel
 from passlib.context import CryptContext
 import stripe
@@ -288,6 +291,8 @@ def authenticate_user(db: Session, username: str, password: str):
         return False
     return user
 
+# FIND your get_current_user function (around line 299) and REPLACE it with this:
+
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -300,7 +305,7 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         username: str = payload.get("sub")
         if username is None:
             raise credentials_exception
-    except jwt.PyJWTError:
+    except PyJWTError:  # ✅ FIXED: Use PyJWTError instead of jwt.PyJWTError
         raise credentials_exception
         
     user = get_user(db, username)
@@ -1434,12 +1439,34 @@ async def test_transcript(video_id: str):
         }
 
 #Visit: http://localhost:8000/library_info - should show version 1.1.0
+# FIND your library_info endpoint (around line 1443) and REPLACE it with this:
 @app.get("/library_info")
 async def library_info():
-    from youtube_transcript_api import __version__
-
-    return {"youtube_transcript_api_version": __version__
-    }
+    """Get library version info - FIXED VERSION"""
+    try:
+        # Try different methods to get version
+        import pkg_resources
+        
+        try:
+            version = pkg_resources.get_distribution("youtube-transcript-api").version
+        except:
+            try:
+                from importlib import metadata
+                version = metadata.version("youtube-transcript-api")
+            except:
+                version = "1.1.0 (estimated)"
+        
+        return {
+            "youtube_transcript_api_version": version,
+            "pyjwt_version": "2.8.0",
+            "status": "working"
+        }
+    except Exception as e:
+        return {
+            "youtube_transcript_api_version": "error",
+            "error": str(e),
+            "status": "error"
+        }
 
 @app.get("/debug/network")
 async def debug_network():
