@@ -1,10 +1,9 @@
-# Create enhanced_transcript_handler.py in your backend directory
+# enhanced_transcript_handler.py - FIXED VERSION
 
 import logging
 import re
 from typing import List, Dict, Optional, Tuple
-from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
-from youtube_transcript_api.formatters import TextFormatter
+from youtube_transcript_api import YouTubeTranscriptApi
 import requests
 import json
 from urllib.parse import parse_qs, urlparse
@@ -15,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class EnhancedTranscriptHandler:
     def __init__(self):
-        self.text_formatter = TextFormatter()
+        pass
         
     def extract_video_id(self, url_or_id: str) -> str:
         """Extract video ID from various YouTube URL formats"""
@@ -50,7 +49,6 @@ class EnhancedTranscriptHandler:
             ("primary_api", self._get_transcript_primary),
             ("alternative_languages", self._get_transcript_alternative_languages),
             ("auto_generated", self._get_transcript_auto_generated),
-            ("debug_method", self._debug_transcript_availability)
         ]
         
         last_error = None
@@ -116,35 +114,15 @@ class EnhancedTranscriptHandler:
                     logger.info(f"Using auto-generated transcript: {transcript.language}")
                     return transcript.fetch()
             
-            raise NoTranscriptFound(video_id)
+            # If no auto-generated found, try any available
+            for transcript in transcript_list:
+                logger.info(f"Using available transcript: {transcript.language}")
+                return transcript.fetch()
+            
+            raise Exception("No transcripts found")
             
         except Exception as e:
             logger.error(f"Auto-generated method failed: {e}")
-            raise
-    
-    def _debug_transcript_availability(self, video_id: str) -> Optional[List[Dict]]:
-        """Debug method to check what transcripts are available"""
-        try:
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            
-            available_transcripts = []
-            for transcript in transcript_list:
-                transcript_info = {
-                    'language': transcript.language,
-                    'language_code': transcript.language_code,
-                    'is_generated': transcript.is_generated,
-                    'is_translatable': transcript.is_translatable
-                }
-                available_transcripts.append(transcript_info)
-                logger.info(f"Available transcript: {transcript_info}")
-            
-            # If we found any transcripts, try the first one
-            if available_transcripts:
-                first_transcript = transcript_list._transcripts[0]
-                return first_transcript.fetch()
-                
-        except Exception as e:
-            logger.error(f"Debug method failed: {e}")
             raise
     
     def check_video_exists(self, video_id: str) -> Dict:
@@ -211,7 +189,6 @@ class EnhancedTranscriptHandler:
 # Create global instance
 transcript_handler = EnhancedTranscriptHandler()
 
-
 # Enhanced error response helper
 def create_error_response(error_type: str, message: str, video_id: str = None, suggestions: List[str] = None) -> Dict:
     """Create standardized error response"""
@@ -219,7 +196,7 @@ def create_error_response(error_type: str, message: str, video_id: str = None, s
         "success": False,
         "error_type": error_type,
         "message": message,
-        "timestamp": "2025-06-17T00:00:00Z"  # You can use datetime.now().isoformat()
+        "detail": message  # For backward compatibility
     }
     
     if video_id:
