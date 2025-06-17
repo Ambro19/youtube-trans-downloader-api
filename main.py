@@ -38,9 +38,7 @@ warnings.filterwarnings("ignore", message=".*bcrypt.*")
 # Import from database.py
 from database import get_db, User, Subscription, TranscriptDownload, create_tables
 
-# ADD THESE IMPORTS at the top of your main.py (after your existing imports)
-from enhanced_transcript_handler import transcript_handler, create_error_response
-from youtube_transcript_api import NoTranscriptFound, TranscriptsDisabled
+#from youtube_transcript_api import NoTranscriptFound, TranscriptsDisabled
 
 
 
