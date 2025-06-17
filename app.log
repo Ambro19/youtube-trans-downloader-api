@@ -519,3 +519,79 @@ AttributeError: module 'bcrypt' has no attribute '__about__'
 2025-06-17 14:12:14,373 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
 2025-06-17 14:12:14,374 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
 2025-06-17 14:12:14,374 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-17 14:15:47,908 - passlib.handlers.bcrypt - WARNING - (trapped) error reading bcrypt version
+Traceback (most recent call last):
+  File "C:\Users\xiggy\YOUTUBE-TRANSCRIPT-APP\venv\Lib\site-packages\passlib\handlers\bcrypt.py", line 620, in _load_backend_mixin
+    version = _bcrypt.__about__.__version__
+              ^^^^^^^^^^^^^^^^^
+AttributeError: module 'bcrypt' has no attribute '__about__'
+2025-06-17 14:15:48,289 - youtube_trans_downloader.main - INFO - User logged in successfully: xiggy
+2025-06-17 14:18:56,053 - youtube_trans_downloader.main - INFO - Extracted video ID: oNu6-VM6UmY
+2025-06-17 14:18:56,057 - enhanced_transcript_handler - INFO - Trying method: direct_http_v1 for video oNu6-VM6UmY
+2025-06-17 14:18:57,350 - enhanced_transcript_handler - ERROR - Direct HTTP v1 method failed: No caption tracks found in video page
+2025-06-17 14:18:57,861 - enhanced_transcript_handler - INFO - Trying method: direct_http_v2 for video oNu6-VM6UmY
+2025-06-17 14:19:00,472 - enhanced_transcript_handler - ERROR - Direct HTTP v2 method failed: Could not extract captions using alternative method
+2025-06-17 14:19:00,984 - enhanced_transcript_handler - INFO - Trying method: api_fallback for video oNu6-VM6UmY
+2025-06-17 14:19:02,233 - enhanced_transcript_handler - ERROR - API fallback method failed: no element found: line 1, column 0
+2025-06-17 14:20:51,943 - youtube_trans_downloader.main - INFO - Extracted video ID: oNu6-VM6UmY
+2025-06-17 14:20:51,947 - enhanced_transcript_handler - INFO - Trying method: direct_http_v1 for video oNu6-VM6UmY
+2025-06-17 14:20:52,619 - enhanced_transcript_handler - ERROR - Direct HTTP v1 method failed: No caption tracks found in video page
+2025-06-17 14:20:53,132 - enhanced_transcript_handler - INFO - Trying method: direct_http_v2 for video oNu6-VM6UmY
+2025-06-17 14:20:55,181 - enhanced_transcript_handler - ERROR - Direct HTTP v2 method failed: Could not extract captions using alternative method
+2025-06-17 14:20:55,693 - enhanced_transcript_handler - INFO - Trying method: api_fallback for video oNu6-VM6UmY
+2025-06-17 14:20:56,519 - enhanced_transcript_handler - ERROR - API fallback method failed: no element found: line 1, column 0
+2025-06-17 14:38:06,575 - youtube_trans_downloader.main - INFO - User logged in successfully: OneTechly
+2025-06-17 14:44:00,112 - youtube_trans_downloader.main - INFO - Extracted video ID: tIc0oNhxL84
+2025-06-17 14:44:00,116 - enhanced_transcript_handler - INFO - Trying method: direct_http_v1 for video tIc0oNhxL84
+2025-06-17 14:44:01,078 - enhanced_transcript_handler - ERROR - Direct HTTP v1 method failed: No caption tracks found in video page
+2025-06-17 14:44:01,591 - enhanced_transcript_handler - INFO - Trying method: direct_http_v2 for video tIc0oNhxL84
+2025-06-17 14:44:04,532 - enhanced_transcript_handler - ERROR - Direct HTTP v2 method failed: Could not extract captions using alternative method
+2025-06-17 14:44:05,040 - enhanced_transcript_handler - INFO - Trying method: api_fallback for video tIc0oNhxL84
+2025-06-17 14:44:06,205 - enhanced_transcript_handler - ERROR - API fallback method failed: no element found: line 1, column 0
+2025-06-17 15:00:58,135 - youtube_trans_downloader - INFO - Environment: development
+2025-06-17 15:00:58,136 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-17 15:00:58,137 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-17 15:00:58,137 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-17 15:04:21,826 - youtube_trans_downloader - INFO - Environment: development
+2025-06-17 15:04:21,826 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-17 15:04:21,827 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-17 15:04:21,827 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-17 15:04:22,063 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-06-17 15:04:22,245 - youtube_trans_downloader - INFO - Environment: development
+2025-06-17 15:04:22,246 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-17 15:04:22,246 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-17 15:04:22,247 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-17 15:04:39,727 - youtube_trans_downloader.main - INFO - Extracted video ID: tIc0oNhxL84
+2025-06-17 15:04:39,737 - enhanced_transcript_handler - INFO - Trying method: direct_http_v1 for video tIc0oNhxL84
+2025-06-17 15:04:40,692 - enhanced_transcript_handler - ERROR - Direct HTTP v1 method failed: No caption tracks found in video page
+2025-06-17 15:04:41,207 - enhanced_transcript_handler - INFO - Trying method: direct_http_v2 for video tIc0oNhxL84
+2025-06-17 15:04:44,024 - enhanced_transcript_handler - ERROR - Direct HTTP v2 method failed: Could not extract captions using alternative method
+2025-06-17 15:04:44,538 - enhanced_transcript_handler - INFO - Trying method: api_fallback for video tIc0oNhxL84
+2025-06-17 15:04:45,657 - enhanced_transcript_handler - ERROR - API fallback method failed: no element found: line 1, column 0
+2025-06-17 15:06:09,992 - youtube_trans_downloader.main - INFO - Extracted video ID: oNu6-VM6UmY
+2025-06-17 15:06:09,995 - enhanced_transcript_handler - INFO - Trying method: direct_http_v1 for video oNu6-VM6UmY
+2025-06-17 15:06:10,743 - enhanced_transcript_handler - ERROR - Direct HTTP v1 method failed: No caption tracks found in video page
+2025-06-17 15:06:11,255 - enhanced_transcript_handler - INFO - Trying method: direct_http_v2 for video oNu6-VM6UmY
+2025-06-17 15:06:13,160 - enhanced_transcript_handler - ERROR - Direct HTTP v2 method failed: Could not extract captions using alternative method
+2025-06-17 15:06:13,674 - enhanced_transcript_handler - INFO - Trying method: api_fallback for video oNu6-VM6UmY
+2025-06-17 15:06:14,717 - enhanced_transcript_handler - ERROR - API fallback method failed: no element found: line 1, column 0
+2025-06-17 15:22:52,824 - youtube_trans_downloader - INFO - Environment: development
+2025-06-17 15:22:52,824 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-17 15:22:52,824 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-17 15:22:52,825 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-17 15:25:14,398 - youtube_trans_downloader - INFO - Environment: development
+2025-06-17 15:25:14,399 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-17 15:25:14,399 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-17 15:25:14,399 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-17 15:33:25,031 - youtube_trans_downloader - INFO - Environment: development
+2025-06-17 15:33:25,032 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-17 15:33:25,032 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-17 15:33:25,033 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-17 15:35:50,666 - youtube_trans_downloader - INFO - Environment: development
+2025-06-17 15:35:50,666 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-17 15:35:50,667 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-17 15:35:50,667 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-17 15:36:12,944 - youtube_trans_downloader - INFO - Environment: development
+2025-06-17 15:36:12,944 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-17 15:36:12,944 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-17 15:36:12,945 - youtube_trans_downloader - INFO - Using SQLite database for development

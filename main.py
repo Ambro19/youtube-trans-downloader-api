@@ -843,69 +843,105 @@ async def login_for_access_token(
 async def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
 
-# Make sure you have this simple endpoint (replace your current one)
+#=====================================================
+
+# Updated download_transcript endpoint for main.py - FIXED VERSION
+
 @app.post("/download_transcript/")
 async def download_transcript(
     request: TranscriptRequest,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Enhanced download transcript endpoint - SIMPLIFIED VERSION"""
+    """Enhanced download transcript endpoint - FIXED VERSION"""
     
     try:
+        logger.info(f"Download request from user: {user.username}")
+        
         # Get video ID from request
         video_identifier = getattr(request, 'video_url', None) or request.youtube_id
         
         if not video_identifier:
-            return create_error_response(
-                "missing_identifier", 
-                "Please provide a YouTube URL or video ID"
-            )
+            return {
+                "success": False,
+                "error_type": "missing_identifier",
+                "message": "Please provide a YouTube URL or video ID"
+            }
         
         # Extract video ID
         try:
             video_id = transcript_handler.extract_video_id(video_identifier)
             logger.info(f"Extracted video ID: {video_id}")
         except ValueError as e:
-            return create_error_response(
-                "invalid_url", 
-                "Please enter a valid YouTube URL or 11-character Video ID"
-            )
+            return {
+                "success": False,
+                "error_type": "invalid_url",
+                "message": "Please enter a valid YouTube URL or 11-character Video ID"
+            }
+        
+        # Check video exists first
+        video_check = transcript_handler.check_video_exists(video_id)
+        if not video_check.get("exists", False):
+            return {
+                "success": False,
+                "error_type": "video_not_found",
+                "message": "Video not found, is private, or doesn't exist"
+            }
+        
+        logger.info(f"Video exists: {video_check.get('title', 'Unknown title')}")
         
         # Check subscription limits
         try:
             transcript_type = "clean_transcripts" if request.clean_transcript else "unclean_transcripts"
-            can_download = check_subscription_limit(user.id, transcript_type, db)
+            can_download = check_user_limits(user, transcript_type, db)
             if not can_download:
-                return create_error_response(
-                    "subscription_limit",
-                    "Monthly limit reached! Please upgrade your plan."
-                )
+                return {
+                    "success": False,
+                    "error_type": "subscription_limit",
+                    "message": "Monthly limit reached! Please upgrade your plan."
+                }
         except Exception as e:
             logger.warning(f"Subscription check error: {e}")
         
-        # Attempt to get transcript using bulletproof method
+        # Attempt to get transcript using improved method
         try:
             transcript_data, method_used = transcript_handler.get_transcript_with_fallbacks(video_id)
             logger.info(f"Successfully retrieved transcript using method: {method_used}")
         except Exception as e:
             error_msg = str(e).lower()
+            logger.error(f"Failed to get transcript for {video_id}: {str(e)}")
             
-            if "no transcript" in error_msg or "caption" in error_msg:
-                return create_error_response(
-                    "no_transcript",
-                    "No captions found for this video. The video may not have subtitles enabled."
-                )
+            # Provide specific error messages based on the error
+            if "no transcript" in error_msg or "caption" in error_msg or "subtitles" in error_msg:
+                return {
+                    "success": False,
+                    "error_type": "no_transcript",
+                    "message": "No captions found for this video. The video may not have subtitles enabled.",
+                    "suggestions": [
+                        "Try a different video with captions enabled",
+                        "Check if the video has closed captions (CC) available",
+                        "Use one of the working example videos provided"
+                    ]
+                }
             elif "video" in error_msg and ("unavailable" in error_msg or "private" in error_msg):
-                return create_error_response(
-                    "video_not_found",
-                    "Video is unavailable, private, or doesn't exist."
-                )
+                return {
+                    "success": False,
+                    "error_type": "video_not_found",
+                    "message": "Video is unavailable, private, or doesn't exist."
+                }
+            elif "disabled" in error_msg:
+                return {
+                    "success": False,
+                    "error_type": "transcripts_disabled",
+                    "message": "Transcripts are disabled for this video."
+                }
             else:
-                return create_error_response(
-                    "retrieval_failed",
-                    "Failed to retrieve transcript. Please try a different video."
-                )
+                return {
+                    "success": False,
+                    "error_type": "retrieval_failed",
+                    "message": "Failed to retrieve transcript. Please try a different video.",
+                    "debug_info": str(e)
+                }
         
         # Format the transcript
         try:
@@ -915,22 +951,24 @@ async def download_transcript(
                 format_type
             )
         except Exception as e:
-            return create_error_response(
-                "formatting_failed",
-                f"Failed to format transcript: {str(e)}"
-            )
+            return {
+                "success": False,
+                "error_type": "formatting_failed",
+                "message": f"Failed to format transcript: {str(e)}"
+            }
         
         # Record successful download in database
         try:
+            transcript_type_db = "clean" if request.clean_transcript else "unclean"
             new_download = TranscriptDownload(
                 user_id=user.id,
                 youtube_id=video_id,
-                transcript_type=transcript_type,
+                transcript_type=transcript_type_db,
                 created_at=datetime.now()
             )
             db.add(new_download)
             db.commit()
-            logger.info(f"✅ Success: {user.username} downloaded {transcript_type} for {video_id}")
+            logger.info(f"SUCCESS: {user.username} downloaded {transcript_type_db} transcript for {video_id}")
         except Exception as e:
             logger.warning(f"Failed to update usage tracking: {e}")
         
@@ -939,15 +977,22 @@ async def download_transcript(
             "success": True,
             "transcript": formatted_result["content"],
             "youtube_id": video_id,
+            "video_title": video_check.get("title", "Unknown"),
+            "method_used": method_used,
+            "entry_count": formatted_result["entry_count"],
             "message": "Transcript downloaded successfully"
         }
         
     except Exception as e:
         logger.error(f"Unexpected error in download_transcript: {str(e)}")
-        return create_error_response(
-            "internal_error",
-            "An unexpected error occurred. Please try again."
-        )
+        return {
+            "success": False,
+            "error_type": "internal_error",
+            "message": "An unexpected error occurred. Please try again.",
+            "debug_info": str(e)
+        }
+
+#================================================
 
 # 🔧 UPDATED: Enhanced payment intent endpoint to match payment.py
 @app.post("/create_payment_intent/")
@@ -1520,6 +1565,7 @@ async def library_info():
             "status": "error"
         }
 
+# FIND: debug_network endpoint at http://localhost:8000/debug_network 
 @app.get("/debug/network")
 async def debug_network():
     """Test network connectivity and identify issues"""
@@ -1571,6 +1617,8 @@ async def debug_network():
     
     return results
 
+
+# FIND: debug_transcript_raw endpoint at http://localhost:8000/debug_transcript_raw 
 @app.get("/debug/transcript_raw/{video_id}")
 async def debug_transcript_raw(video_id: str):
     """Test raw transcript API access"""
@@ -1807,8 +1855,108 @@ async def debug_test_transcript(video_id: str):
             "timestamp": datetime.now().isoformat()
         }
 
-#============================
+#============================================
+# ALSO ADD these test endpoints to help with debugging:
 
+@app.get("/test_working_videos/")
+async def test_working_videos():
+    """Test endpoint with known working video IDs"""
+    working_videos = [
+        {
+            "id": "ZbZSe6N_BXs",
+            "title": "PHP in 100 Seconds",
+            "url": "https://www.youtube.com/watch?v=ZbZSe6N_BXs",
+            "description": "Short tech video with captions"
+        },
+        {
+            "id": "kqtD5dpn9C8", 
+            "title": "Python vs JavaScript",
+            "url": "https://www.youtube.com/watch?v=kqtD5dpn9C8",
+            "description": "Programming comparison video"
+        },
+        {
+            "id": "UBP-ogtJLpg",
+            "title": "How to Build a Simple Calculator",
+            "url": "https://www.youtube.com/watch?v=UBP-ogtJLpg", 
+            "description": "Tutorial video with captions"
+        }
+    ]
+    
+    results = []
+    for video in working_videos:
+        try:
+            check_result = transcript_handler.check_video_exists(video["id"])
+            results.append({
+                "video": video,
+                "exists": check_result.get("exists", False),
+                "status": "OK" if check_result.get("exists", False) else "FAILED"
+            })
+        except Exception as e:
+            results.append({
+                "video": video,
+                "exists": False,
+                "status": "ERROR",
+                "error": str(e)
+            })
+    
+    return {
+        "test_results": results,
+        "recommendation": "Use videos marked as 'OK' for testing"
+    }
+
+@app.get("/debug_transcript/{video_id}")
+async def debug_transcript_detailed(video_id: str):
+    """Detailed debug endpoint for transcript issues"""
+    debug_info = {
+        "video_id": video_id,
+        "timestamp": datetime.now().isoformat()
+    }
+    
+    # Step 1: Check if video exists
+    try:
+        video_check = transcript_handler.check_video_exists(video_id)
+        debug_info["video_check"] = video_check
+    except Exception as e:
+        debug_info["video_check"] = {"error": str(e)}
+    
+    # Step 2: Try each method individually
+    methods_results = {}
+    
+    # Test YouTube Transcript API
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+        methods_results["youtube_transcript_api"] = {
+            "status": "SUCCESS",
+            "segments": len(transcript),
+            "sample": transcript[0] if transcript else None
+        }
+    except Exception as e:
+        methods_results["youtube_transcript_api"] = {
+            "status": "FAILED", 
+            "error": str(e)
+        }
+    
+    # Test our enhanced handler
+    try:
+        transcript_data, method_used = transcript_handler.get_transcript_with_fallbacks(video_id)
+        methods_results["enhanced_handler"] = {
+            "status": "SUCCESS",
+            "method_used": method_used,
+            "segments": len(transcript_data),
+            "sample": transcript_data[0] if transcript_data else None
+        }
+    except Exception as e:
+        methods_results["enhanced_handler"] = {
+            "status": "FAILED",
+            "error": str(e)
+        }
+    
+    debug_info["methods_results"] = methods_results
+    
+    return debug_info
+
+#=========================================
 # NEW: Health check endpoint
 @app.get("/health/")
 async def health_check():
