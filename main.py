@@ -1,7 +1,6 @@
 # main.py - Enhanced with Complete Stripe Payment Integration
 # main.py - Completed all the required modifications including Testing the Debug Endpoints 
 
-# Fixed imports section - Replace lines 1-20 in your main.py
 from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -38,6 +37,11 @@ warnings.filterwarnings("ignore", message=".*bcrypt.*")
 
 # Import from database.py
 from database import get_db, User, Subscription, TranscriptDownload, create_tables
+
+# ADD THESE IMPORTS at the top of your main.py (after your existing imports)
+from enhanced_transcript_handler import transcript_handler, create_error_response
+from youtube_transcript_api import NoTranscriptFound, TranscriptsDisabled
+
 
 # Load environment variables
 load_dotenv()
@@ -212,9 +216,26 @@ class UserResponse(BaseModel):
     class Config:
         from_attributes = True
 
+# class TranscriptRequest(BaseModel):
+#     youtube_id: str
+#     clean_transcript: bool = False
+
+# UPDATE YOUR TranscriptRequest MODEL to support the new format
 class TranscriptRequest(BaseModel):
-    youtube_id: str
+    youtube_id: str = None  # Keep for backward compatibility
+    video_url: str = None   # New field for URLs
     clean_transcript: bool = False
+    format: str = "clean"   # New format field
+    advanced_cleaning: bool = False  # For future Pro features
+    
+    # Add validation to ensure at least one identifier is provided
+    @classmethod
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+    
+    def get_video_identifier(self):
+        """Get video identifier from either youtube_id or video_url"""
+        return self.video_url or self.youtube_id
 
 class PaymentRequest(BaseModel):
     token: str
@@ -821,68 +842,163 @@ async def login_for_access_token(
 async def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
 
-# Updated download endpoint to use the fallback method
+# REPLACE YOUR EXISTING download_transcript ENDPOINT with this enhanced version:
 @app.post("/download_transcript/")
 async def download_transcript(
     request: TranscriptRequest,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    video_id = request.youtube_id.strip()
-    
-    if 'youtube.com' in video_id or 'youtu.be' in video_id:
-        import re
-        patterns = [
-            r'(?:youtube\.com\/watch\?v=)([^&\n?#]+)',
-            r'(?:youtu\.be\/)([^&\n?#]+)',
-            r'(?:youtube\.com\/shorts\/)([^&\n?#]+)',
-            r'(?:youtube\.com\/embed\/)([^&\n?#]+)',
-            r'[?&]v=([^&\n?#]+)'
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, video_id)
-            if match:
-                video_id = match.group(1)[:11]
-                break
-    
-    if not video_id or len(video_id) != 11:
-        raise HTTPException(status_code=400, detail="Invalid video ID")
-    
-    logger.info(f"📹 Processing transcript request for: {video_id}")
-    
-    # Check subscription limits
-    transcript_type = "clean_transcripts" if request.clean_transcript else "unclean_transcripts"
-    can_download = check_subscription_limit(user.id, transcript_type, db)
-    if not can_download:
-        raise HTTPException(status_code=403, detail="Monthly limit reached")
-    
-    # Use the fallback method
-    transcript_text = process_youtube_transcript_with_fallback(
-        video_id,
-        clean=request.clean_transcript
-    )
-    
-    # Record successful download
-    new_download = TranscriptDownload(
-        user_id=user.id,
-        youtube_id=video_id,
-        transcript_type=transcript_type,
-        created_at=datetime.now()
-    )
+    """Enhanced download transcript endpoint with comprehensive error handling"""
     
     try:
-        db.add(new_download)
-        db.commit()
-        logger.info(f"✅ Success: {user.username} downloaded {transcript_type} for {video_id}")
+        # Extract and validate video ID
+        video_identifier = request.get_video_identifier()
+        if not video_identifier:
+            return create_error_response(
+                "missing_identifier", 
+                "Please provide either youtube_id or video_url",
+                suggestions=["Provide a YouTube URL or video ID"]
+            )
+        
+        try:
+            video_id = transcript_handler.extract_video_id(video_identifier)
+            logger.info(f"Extracted video ID: {video_id}")
+        except ValueError as e:
+            return create_error_response(
+                "invalid_url", 
+                str(e),
+                suggestions=["Please provide a valid YouTube URL or video ID"]
+            )
+        
+        # Check if video exists
+        video_check = transcript_handler.check_video_exists(video_id)
+        if not video_check["exists"]:
+            return create_error_response(
+                "video_not_found",
+                f"Video not accessible: {video_check.get('error', 'Unknown error')}",
+                video_id=video_id,
+                suggestions=[
+                    "Check if the video is public",
+                    "Verify the video ID is correct",
+                    "Try a different video"
+                ]
+            )
+        
+        # Determine format (maintain backward compatibility)
+        if hasattr(request, 'format') and request.format:
+            format_type = request.format
+        else:
+            format_type = "clean" if request.clean_transcript else "unclean"
+        
+        # Check user's subscription limits
+        try:
+            transcript_type = "clean_transcripts" if format_type == "clean" else "unclean_transcripts"
+            can_download = check_subscription_limit(user.id, transcript_type, db)
+            if not can_download:
+                return create_error_response(
+                    "subscription_limit",
+                    "Monthly limit reached! Please upgrade your plan.",
+                    suggestions=["Upgrade your plan or wait for next month's reset"]
+                )
+        except Exception as e:
+            logger.warning(f"Subscription check error: {e}")
+            # Continue anyway for now
+        
+        # Attempt to get transcript with multiple fallback methods
+        try:
+            transcript_data, method_used = transcript_handler.get_transcript_with_fallbacks(video_id)
+            logger.info(f"Successfully retrieved transcript using method: {method_used}")
+        except NoTranscriptFound:
+            return create_error_response(
+                "no_transcript",
+                "No captions found for this video. The video may not have subtitles enabled.",
+                video_id=video_id,
+                suggestions=[
+                    "Try a video that has captions/subtitles",
+                    "Check if the video has auto-generated captions",
+                    "Contact the video creator to add captions"
+                ]
+            )
+        except TranscriptsDisabled:
+            return create_error_response(
+                "transcripts_disabled",
+                "Transcripts are disabled for this video.",
+                video_id=video_id,
+                suggestions=["Try a different video with captions enabled"]
+            )
+        except Exception as e:
+            logger.error(f"Transcript retrieval failed: {str(e)}")
+            return create_error_response(
+                "retrieval_failed",
+                f"Failed to retrieve transcript: {str(e)}",
+                video_id=video_id,
+                suggestions=[
+                    "Try again in a few minutes",
+                    "Check if the video is still available",
+                    "Try a different video"
+                ]
+            )
+        
+        # Format the transcript
+        try:
+            formatted_result = transcript_handler.format_transcript_response(
+                transcript_data, 
+                format_type
+            )
+        except Exception as e:
+            return create_error_response(
+                "formatting_failed",
+                f"Failed to format transcript: {str(e)}",
+                video_id=video_id
+            )
+        
+        # Record successful download in database
+        try:
+            new_download = TranscriptDownload(
+                user_id=user.id,
+                youtube_id=video_id,
+                transcript_type=transcript_type,
+                created_at=datetime.now()
+            )
+            db.add(new_download)
+            db.commit()
+            logger.info(f"✅ Success: {user.username} downloaded {transcript_type} for {video_id}")
+        except Exception as e:
+            logger.warning(f"Failed to update usage tracking: {e}")
+            # Don't fail the request for usage tracking issues
+        
+        # Refresh subscription status
+        try:
+            if hasattr(request, 'refresh_subscription') and request.refresh_subscription:
+                # Trigger subscription refresh if requested
+                pass
+        except:
+            pass
+        
+        # Return successful response (compatible with existing frontend)
+        return {
+            "success": True,
+            "transcript": formatted_result["content"],  # For backward compatibility
+            "content": formatted_result["content"],
+            "format": formatted_result["format"],
+            "youtube_id": video_id,
+            "video_id": video_id,
+            "entry_count": formatted_result["entry_count"],
+            "method_used": method_used,
+            "video_info": video_check,
+            "filename": f"transcript_{video_id}_{format_type}.txt",
+            "media_type": "text/plain",
+            "message": "Transcript downloaded successfully"  # For backward compatibility
+        }
+        
     except Exception as e:
-        db.rollback()
-        logger.error(f"Database error: {str(e)}")
-    
-    return {
-        "transcript": transcript_text,
-        "youtube_id": video_id,
-        "message": "Transcript downloaded successfully"
-    }
+        logger.error(f"Unexpected error in download_transcript: {str(e)}")
+        return create_error_response(
+            "internal_error",
+            "An unexpected error occurred. Please try again.",
+            suggestions=["Try again in a few minutes", "Contact support if the issue persists"]
+        )
 
 # 🔧 UPDATED: Enhanced payment intent endpoint to match payment.py
 @app.post("/create_payment_intent/")
@@ -1666,6 +1782,83 @@ async def debug_alternative_method(video_id: str):
             "error": str(e),
             "error_type": type(e).__name__
         }
+
+#===========================
+
+# ADD THESE NEW DEBUG ENDPOINTS (if not already present):
+@app.get("/debug/video_check/{video_id}")
+async def debug_video_check(video_id: str):
+    """Debug endpoint to check video accessibility"""
+    try:
+        video_check = transcript_handler.check_video_exists(video_id)
+        return {
+            "video_id": video_id,
+            "check_result": video_check,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {"error": str(e), "video_id": video_id}
+
+@app.get("/debug/transcript_availability/{video_id}")
+async def debug_transcript_availability(video_id: str):
+    """Debug endpoint to check what transcripts are available"""
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        
+        available_transcripts = []
+        for transcript in transcript_list:
+            transcript_info = {
+                'language': transcript.language,
+                'language_code': transcript.language_code,
+                'is_generated': transcript.is_generated,
+                'is_translatable': transcript.is_translatable
+            }
+            available_transcripts.append(transcript_info)
+        
+        return {
+            "video_id": video_id,
+            "available_transcripts": available_transcripts,
+            "count": len(available_transcripts),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        return {
+            "video_id": video_id,
+            "error": str(e),
+            "available_transcripts": [],
+            "count": 0
+        }
+
+@app.get("/debug/test_transcript/{video_id}")
+async def debug_test_transcript(video_id: str):
+    """Debug endpoint to test transcript retrieval"""
+    try:
+        transcript_data, method_used = transcript_handler.get_transcript_with_fallbacks(video_id)
+        
+        # Return just first few entries for testing
+        sample_data = transcript_data[:3] if len(transcript_data) > 3 else transcript_data
+        
+        return {
+            "video_id": video_id,
+            "success": True,
+            "method_used": method_used,
+            "total_entries": len(transcript_data),
+            "sample_entries": sample_data,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        return {
+            "video_id": video_id,
+            "success": False,
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
+#============================
 
 # NEW: Health check endpoint
 @app.get("/health/")
