@@ -843,7 +843,7 @@ async def login_for_access_token(
 async def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
 
-# REPLACE your existing download_transcript endpoint with this:
+# Make sure you have this simple endpoint (replace your current one)
 @app.post("/download_transcript/")
 async def download_transcript(
     request: TranscriptRequest,
@@ -853,7 +853,7 @@ async def download_transcript(
     """Enhanced download transcript endpoint - SIMPLIFIED VERSION"""
     
     try:
-        # Get video ID from request (support both old and new format)
+        # Get video ID from request
         video_identifier = getattr(request, 'video_url', None) or request.youtube_id
         
         if not video_identifier:
@@ -872,7 +872,7 @@ async def download_transcript(
                 "Please enter a valid YouTube URL or 11-character Video ID"
             )
         
-        # Check subscription limits (keep your existing logic)
+        # Check subscription limits
         try:
             transcript_type = "clean_transcripts" if request.clean_transcript else "unclean_transcripts"
             can_download = check_subscription_limit(user.id, transcript_type, db)
@@ -884,19 +884,19 @@ async def download_transcript(
         except Exception as e:
             logger.warning(f"Subscription check error: {e}")
         
-        # Attempt to get transcript
+        # Attempt to get transcript using bulletproof method
         try:
             transcript_data, method_used = transcript_handler.get_transcript_with_fallbacks(video_id)
             logger.info(f"Successfully retrieved transcript using method: {method_used}")
         except Exception as e:
             error_msg = str(e).lower()
             
-            if "no transcript" in error_msg or "transcript" in error_msg and "disabled" in error_msg:
+            if "no transcript" in error_msg or "caption" in error_msg:
                 return create_error_response(
                     "no_transcript",
                     "No captions found for this video. The video may not have subtitles enabled."
                 )
-            elif "video unavailable" in error_msg or "private" in error_msg:
+            elif "video" in error_msg and ("unavailable" in error_msg or "private" in error_msg):
                 return create_error_response(
                     "video_not_found",
                     "Video is unavailable, private, or doesn't exist."
@@ -920,7 +920,7 @@ async def download_transcript(
                 f"Failed to format transcript: {str(e)}"
             )
         
-        # Record successful download in database (keep your existing logic)
+        # Record successful download in database
         try:
             new_download = TranscriptDownload(
                 user_id=user.id,
@@ -934,10 +934,10 @@ async def download_transcript(
         except Exception as e:
             logger.warning(f"Failed to update usage tracking: {e}")
         
-        # Return response in format compatible with your existing frontend
+        # Return response compatible with your frontend
         return {
             "success": True,
-            "transcript": formatted_result["content"],  # Your frontend expects this field
+            "transcript": formatted_result["content"],
             "youtube_id": video_id,
             "message": "Transcript downloaded successfully"
         }

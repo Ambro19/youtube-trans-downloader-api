@@ -455,3 +455,58 @@ AttributeError: module 'bcrypt' has no attribute '__about__'
 2025-06-15 18:29:46,720 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
 2025-06-15 18:29:46,721 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
 2025-06-15 18:29:46,722 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-17 00:26:37,158 - youtube_trans_downloader - INFO - Environment: development
+2025-06-17 00:26:37,159 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-17 00:26:37,159 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-17 00:26:37,159 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-17 00:26:37,593 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-06-17 00:26:37,770 - youtube_trans_downloader - INFO - Environment: development
+2025-06-17 00:26:37,770 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-17 00:26:37,771 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-17 00:26:37,771 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-17 00:28:33,604 - passlib.handlers.bcrypt - WARNING - (trapped) error reading bcrypt version
+Traceback (most recent call last):
+  File "C:\Users\xiggy\YOUTUBE-TRANSCRIPT-APP\venv\Lib\site-packages\passlib\handlers\bcrypt.py", line 620, in _load_backend_mixin
+    version = _bcrypt.__about__.__version__
+              ^^^^^^^^^^^^^^^^^
+AttributeError: module 'bcrypt' has no attribute '__about__'
+2025-06-17 00:28:33,950 - youtube_trans_downloader.main - INFO - User logged in successfully: xiggy
+2025-06-17 00:29:03,798 - youtube_trans_downloader.main - INFO - Extracted video ID: 2I2LSVRtnHY
+2025-06-17 00:29:03,802 - enhanced_transcript_handler - INFO - Trying method: primary_api for video 2I2LSVRtnHY
+2025-06-17 00:29:04,757 - enhanced_transcript_handler - ERROR - Primary method failed: no element found: line 1, column 0
+2025-06-17 00:29:05,126 - enhanced_transcript_handler - INFO - Trying method: alternative_languages for video 2I2LSVRtnHY
+2025-06-17 00:29:05,732 - enhanced_transcript_handler - INFO - Found auto-generated transcript in language: English (auto-generated)
+2025-06-17 00:29:05,872 - enhanced_transcript_handler - ERROR - Alternative languages method failed: no element found: line 1, column 0
+2025-06-17 00:29:05,884 - enhanced_transcript_handler - INFO - Trying method: auto_generated for video 2I2LSVRtnHY
+2025-06-17 00:29:06,446 - enhanced_transcript_handler - INFO - Using auto-generated transcript: English (auto-generated)
+2025-06-17 00:29:06,590 - enhanced_transcript_handler - ERROR - Auto-generated method failed: no element found: line 1, column 0
+2025-06-17 00:29:22,361 - youtube_trans_downloader.main - INFO - Extracted video ID: 2I2LSVRtnHY
+2025-06-17 00:29:22,365 - enhanced_transcript_handler - INFO - Trying method: primary_api for video 2I2LSVRtnHY
+2025-06-17 00:29:23,280 - enhanced_transcript_handler - ERROR - Primary method failed: no element found: line 1, column 0
+2025-06-17 00:29:23,295 - enhanced_transcript_handler - INFO - Trying method: alternative_languages for video 2I2LSVRtnHY
+2025-06-17 00:29:23,981 - enhanced_transcript_handler - INFO - Found auto-generated transcript in language: English (auto-generated)
+2025-06-17 00:29:24,120 - enhanced_transcript_handler - ERROR - Alternative languages method failed: no element found: line 1, column 0
+2025-06-17 00:29:24,133 - enhanced_transcript_handler - INFO - Trying method: auto_generated for video 2I2LSVRtnHY
+2025-06-17 00:29:24,623 - enhanced_transcript_handler - INFO - Using auto-generated transcript: English (auto-generated)
+2025-06-17 00:29:24,759 - enhanced_transcript_handler - ERROR - Auto-generated method failed: no element found: line 1, column 0
+2025-06-17 00:31:32,034 - youtube_trans_downloader.main - INFO - Extracted video ID: tIc0oNhxL84
+2025-06-17 00:31:32,037 - enhanced_transcript_handler - INFO - Trying method: primary_api for video tIc0oNhxL84
+2025-06-17 00:31:33,407 - enhanced_transcript_handler - ERROR - Primary method failed: no element found: line 1, column 0
+2025-06-17 00:31:33,421 - enhanced_transcript_handler - INFO - Trying method: alternative_languages for video tIc0oNhxL84
+2025-06-17 00:31:34,121 - enhanced_transcript_handler - INFO - Found auto-generated transcript in language: English (auto-generated)
+2025-06-17 00:31:34,275 - enhanced_transcript_handler - ERROR - Alternative languages method failed: no element found: line 1, column 0
+2025-06-17 00:31:34,288 - enhanced_transcript_handler - INFO - Trying method: auto_generated for video tIc0oNhxL84
+2025-06-17 00:31:34,910 - enhanced_transcript_handler - INFO - Using auto-generated transcript: English (auto-generated)
+2025-06-17 00:31:35,056 - enhanced_transcript_handler - ERROR - Auto-generated method failed: no element found: line 1, column 0
+2025-06-17 00:32:02,748 - enhanced_transcript_handler - INFO - Trying method: primary_api for video ZbZSe6N_BXs
+2025-06-17 00:32:03,652 - enhanced_transcript_handler - ERROR - Primary method failed: no element found: line 1, column 0
+2025-06-17 00:32:03,665 - enhanced_transcript_handler - INFO - Trying method: alternative_languages for video ZbZSe6N_BXs
+2025-06-17 00:32:04,456 - enhanced_transcript_handler - INFO - Found manual transcript in language: English - en
+2025-06-17 00:32:04,557 - enhanced_transcript_handler - ERROR - Alternative languages method failed: no element found: line 1, column 0
+2025-06-17 00:32:04,574 - enhanced_transcript_handler - INFO - Trying method: auto_generated for video ZbZSe6N_BXs
+2025-06-17 00:32:05,375 - enhanced_transcript_handler - INFO - Using available transcript: English - en
+2025-06-17 00:32:05,476 - enhanced_transcript_handler - ERROR - Auto-generated method failed: no element found: line 1, column 0
+2025-06-17 00:53:34,801 - youtube_trans_downloader - INFO - Environment: development
+2025-06-17 00:53:34,802 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-17 00:53:34,803 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-17 00:53:34,803 - youtube_trans_downloader - INFO - Using SQLite database for development

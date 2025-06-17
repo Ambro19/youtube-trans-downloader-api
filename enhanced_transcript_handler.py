@@ -1,12 +1,13 @@
-# enhanced_transcript_handler.py - FIXED VERSION
+# enhanced_transcript_handler.py - BULLETPROOF VERSION
 
 import logging
 import re
 from typing import List, Dict, Optional, Tuple
-from youtube_transcript_api import YouTubeTranscriptApi
 import requests
 import json
-from urllib.parse import parse_qs, urlparse
+import xml.etree.ElementTree as ET
+from urllib.parse import unquote
+import time
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -14,7 +15,16 @@ logger = logging.getLogger(__name__)
 
 class EnhancedTranscriptHandler:
     def __init__(self):
-        pass
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        })
         
     def extract_video_id(self, url_or_id: str) -> str:
         """Extract video ID from various YouTube URL formats"""
@@ -42,13 +52,13 @@ class EnhancedTranscriptHandler:
     
     def get_transcript_with_fallbacks(self, video_id: str) -> Tuple[List[Dict], str]:
         """
-        Try multiple methods to get transcript with comprehensive error handling
+        Get transcript using direct HTTP methods - BULLETPROOF VERSION
         Returns: (transcript_data, method_used)
         """
         methods = [
-            ("primary_api", self._get_transcript_primary),
-            ("alternative_languages", self._get_transcript_alternative_languages),
-            ("auto_generated", self._get_transcript_auto_generated),
+            ("direct_http_v1", self._get_transcript_direct_http_v1),
+            ("direct_http_v2", self._get_transcript_direct_http_v2),
+            ("api_fallback", self._get_transcript_api_fallback),
         ]
         
         last_error = None
@@ -63,73 +73,240 @@ class EnhancedTranscriptHandler:
             except Exception as e:
                 logger.warning(f"❌ Method {method_name} failed: {str(e)}")
                 last_error = e
+                # Add small delay between attempts
+                time.sleep(0.5)
                 continue
         
         # If all methods fail, raise the last error with context
         raise Exception(f"All transcript methods failed. Last error: {str(last_error)}")
     
-    def _get_transcript_primary(self, video_id: str) -> List[Dict]:
-        """Primary method using YouTubeTranscriptApi"""
+    def _get_transcript_direct_http_v1(self, video_id: str) -> List[Dict]:
+        """Primary direct HTTP method - bypass youtube-transcript-api entirely"""
         try:
-            # Try to get transcript in preferred languages
-            transcript = YouTubeTranscriptApi.get_transcript(
-                video_id, 
-                languages=['en', 'en-US', 'en-GB']
-            )
-            return transcript
-        except Exception as e:
-            logger.error(f"Primary method failed: {e}")
-            raise
-    
-    def _get_transcript_alternative_languages(self, video_id: str) -> List[Dict]:
-        """Try to get transcript in any available language"""
-        try:
-            # Get list of available transcripts
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            # Step 1: Get the YouTube video page
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            logger.info(f"📡 Fetching video page: {video_url}")
             
-            # Try manually created transcripts first
-            for transcript in transcript_list:
-                if not transcript.is_generated:
-                    logger.info(f"Found manual transcript in language: {transcript.language}")
-                    return transcript.fetch()
+            response = self.session.get(video_url, timeout=15)
             
-            # Fall back to auto-generated transcripts
-            for transcript in transcript_list:
-                if transcript.is_generated:
-                    logger.info(f"Found auto-generated transcript in language: {transcript.language}")
-                    return transcript.fetch()
+            if response.status_code != 200:
+                raise Exception(f"Video page not accessible (Status: {response.status_code})")
+            
+            page_content = response.text
+            logger.info(f"📄 Got page content: {len(page_content)} characters")
+            
+            # Step 2: Extract caption track information using multiple patterns
+            caption_patterns = [
+                r'"captionTracks":\[(.*?)\]',
+                r'"captions".*?"playerCaptionsTracklistRenderer".*?"captionTracks":\[(.*?)\]',
+                r'captionTracks":\[([^\]]+)\]',
+                r'"captionTracks":\[([^}]+)\]'
+            ]
+            
+            caption_data = None
+            for pattern in caption_patterns:
+                match = re.search(pattern, page_content, re.DOTALL)
+                if match:
+                    try:
+                        # Clean up the JSON string
+                        json_str = '[' + match.group(1) + ']'
+                        
+                        # Fix common JSON issues
+                        json_str = re.sub(r'([{,]\s*)([a-zA-Z_$][a-zA-Z0-9_$]*)\s*:', r'\1"\2":', json_str)
+                        json_str = re.sub(r':(\s*)([a-zA-Z_$][^",\]\}]+)', r':"\2"', json_str)
+                        
+                        caption_data = json.loads(json_str)
+                        logger.info(f"✅ Found {len(caption_data)} caption tracks")
+                        break
+                    except (json.JSONDecodeError, ValueError) as e:
+                        logger.warning(f"Failed to parse caption JSON: {e}")
+                        continue
+            
+            if not caption_data:
+                raise Exception("No caption tracks found in video page")
+            
+            # Step 3: Find the best caption track (prefer English manual, then auto)
+            best_caption = None
+            
+            # First try: Manual English captions
+            for caption in caption_data:
+                lang_code = caption.get('languageCode', '').lower()
+                if lang_code.startswith('en') and not caption.get('kind', '').startswith('asr'):
+                    best_caption = caption
+                    logger.info(f"Using manual English caption: {caption.get('name', {}).get('simpleText', 'Unknown')}")
+                    break
+            
+            # Second try: Auto-generated English captions
+            if not best_caption:
+                for caption in caption_data:
+                    lang_code = caption.get('languageCode', '').lower()
+                    if lang_code.startswith('en'):
+                        best_caption = caption
+                        logger.info(f"Using auto-generated English caption: {caption.get('name', {}).get('simpleText', 'Unknown')}")
+                        break
+            
+            # Third try: Any available caption
+            if not best_caption and caption_data:
+                best_caption = caption_data[0]
+                logger.info(f"Using first available caption: {best_caption.get('name', {}).get('simpleText', 'Unknown')}")
+            
+            if not best_caption or 'baseUrl' not in best_caption:
+                raise Exception("No usable caption track found")
+            
+            caption_url = best_caption['baseUrl']
+            logger.info(f"📥 Fetching captions from: {caption_url[:100]}...")
+            
+            # Step 4: Fetch the caption XML
+            caption_response = self.session.get(caption_url, timeout=10)
+            
+            if caption_response.status_code != 200:
+                raise Exception(f"Failed to download caption file (Status: {caption_response.status_code})")
+            
+            # Step 5: Parse the XML caption file
+            try:
+                root = ET.fromstring(caption_response.content)
+                transcript_data = []
+                
+                for text_elem in root.findall('.//text'):
+                    start_time = float(text_elem.get('start', '0'))
+                    duration = float(text_elem.get('dur', '3'))
+                    text_content = text_elem.text or ''
                     
+                    if text_content.strip():
+                        # Decode HTML entities and clean up
+                        text_content = unquote(text_content)
+                        text_content = (text_content
+                                       .replace('&amp;', '&')
+                                       .replace('&lt;', '<')
+                                       .replace('&gt;', '>')
+                                       .replace('&quot;', '"')
+                                       .replace('&#39;', "'")
+                                       .replace('\n', ' ')
+                                       .strip())
+                        
+                        # Remove HTML tags
+                        text_content = re.sub(r'<[^>]+>', '', text_content)
+                        text_content = re.sub(r'\s+', ' ', text_content).strip()
+                        
+                        if text_content:
+                            transcript_data.append({
+                                'text': text_content,
+                                'start': start_time,
+                                'duration': duration
+                            })
+                
+                if not transcript_data:
+                    raise Exception("Transcript file contains no readable text")
+                
+                logger.info(f"✅ Extracted {len(transcript_data)} transcript segments")
+                return transcript_data
+                
+            except ET.ParseError as e:
+                raise Exception(f"Failed to parse caption XML: {str(e)}")
+                
         except Exception as e:
-            logger.error(f"Alternative languages method failed: {e}")
+            logger.error(f"Direct HTTP v1 method failed: {str(e)}")
             raise
     
-    def _get_transcript_auto_generated(self, video_id: str) -> List[Dict]:
-        """Specifically try to get auto-generated transcripts"""
+    def _get_transcript_direct_http_v2(self, video_id: str) -> List[Dict]:
+        """Alternative direct HTTP method with different approach"""
         try:
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            # Try different YouTube URL patterns
+            urls_to_try = [
+                f"https://www.youtube.com/watch?v={video_id}",
+                f"https://m.youtube.com/watch?v={video_id}",
+                f"https://youtube.com/watch?v={video_id}"
+            ]
             
-            # Look for auto-generated transcripts
-            for transcript in transcript_list:
-                if transcript.is_generated:
-                    logger.info(f"Using auto-generated transcript: {transcript.language}")
-                    return transcript.fetch()
+            for video_url in urls_to_try:
+                try:
+                    logger.info(f"📡 Trying URL: {video_url}")
+                    response = self.session.get(video_url, timeout=10)
+                    
+                    if response.status_code == 200:
+                        page_content = response.text
+                        
+                        # Look for different caption patterns
+                        patterns = [
+                            r'player_response":\s*(\{.+?\})\s*[,}]',
+                            r'"player_response":"([^"]+)"',
+                            r'ytInitialPlayerResponse\s*=\s*(\{.+?\});',
+                        ]
+                        
+                        for pattern in patterns:
+                            match = re.search(pattern, page_content, re.DOTALL)
+                            if match:
+                                try:
+                                    player_data = json.loads(match.group(1))
+                                    captions = player_data.get('captions', {}).get('playerCaptionsTracklistRenderer', {}).get('captionTracks', [])
+                                    
+                                    if captions:
+                                        return self._process_caption_tracks(captions)
+                                except:
+                                    continue
+                except:
+                    continue
             
-            # If no auto-generated found, try any available
-            for transcript in transcript_list:
-                logger.info(f"Using available transcript: {transcript.language}")
-                return transcript.fetch()
-            
-            raise Exception("No transcripts found")
+            raise Exception("Could not extract captions using alternative method")
             
         except Exception as e:
-            logger.error(f"Auto-generated method failed: {e}")
+            logger.error(f"Direct HTTP v2 method failed: {str(e)}")
             raise
+    
+    def _get_transcript_api_fallback(self, video_id: str) -> List[Dict]:
+        """Last resort: try youtube-transcript-api with error handling"""
+        try:
+            from youtube_transcript_api import YouTubeTranscriptApi
+            
+            # Try with very basic parameters
+            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+            return transcript
+            
+        except Exception as e:
+            logger.error(f"API fallback method failed: {str(e)}")
+            raise
+    
+    def _process_caption_tracks(self, caption_tracks: List[Dict]) -> List[Dict]:
+        """Process caption tracks and fetch the actual transcript"""
+        for track in caption_tracks:
+            if 'baseUrl' in track:
+                try:
+                    caption_url = track['baseUrl']
+                    response = self.session.get(caption_url, timeout=10)
+                    
+                    if response.status_code == 200:
+                        root = ET.fromstring(response.content)
+                        transcript_data = []
+                        
+                        for text_elem in root.findall('.//text'):
+                            start_time = float(text_elem.get('start', '0'))
+                            duration = float(text_elem.get('dur', '3'))
+                            text_content = text_elem.text or ''
+                            
+                            if text_content.strip():
+                                text_content = unquote(text_content)
+                                text_content = re.sub(r'<[^>]+>', '', text_content)
+                                text_content = re.sub(r'\s+', ' ', text_content).strip()
+                                
+                                if text_content:
+                                    transcript_data.append({
+                                        'text': text_content,
+                                        'start': start_time,
+                                        'duration': duration
+                                    })
+                        
+                        if transcript_data:
+                            return transcript_data
+                except:
+                    continue
+        
+        raise Exception("No processable caption tracks found")
     
     def check_video_exists(self, video_id: str) -> Dict:
         """Check if video exists and has captions available"""
         try:
             # Simple check using YouTube oembed API
-            response = requests.get(
+            response = self.session.get(
                 f"https://www.youtube.com/oembed?url=http://www.youtube.com/watch?v={video_id}&format=json",
                 timeout=10
             )
