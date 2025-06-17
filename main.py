@@ -844,8 +844,8 @@ async def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
 
 #=====================================================
-
-# Updated download_transcript endpoint for main.py - FIXED VERSION
+# Replace your download_transcript endpoint in main.py with this SIMPLE version
+# This goes back to your original working approach with better error messages
 
 @app.post("/download_transcript/")
 async def download_transcript(
@@ -853,11 +853,9 @@ async def download_transcript(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Enhanced download transcript endpoint - FIXED VERSION"""
+    """Simple transcript download - BACK TO WORKING VERSION"""
     
     try:
-        logger.info(f"Download request from user: {user.username}")
-        
         # Get video ID from request
         video_identifier = getattr(request, 'video_url', None) or request.youtube_id
         
@@ -868,27 +866,32 @@ async def download_transcript(
                 "message": "Please provide a YouTube URL or video ID"
             }
         
-        # Extract video ID
-        try:
-            video_id = transcript_handler.extract_video_id(video_identifier)
-            logger.info(f"Extracted video ID: {video_id}")
-        except ValueError as e:
+        # Simple video ID extraction (your original method)
+        video_id = video_identifier.strip()
+        
+        # If it's a URL, extract the ID
+        if 'youtube.com' in video_id or 'youtu.be' in video_id:
+            patterns = [
+                r'(?:youtube\.com\/watch\?v=)([a-zA-Z0-9_-]{11})',
+                r'(?:youtu\.be\/)([a-zA-Z0-9_-]{11})',
+                r'(?:youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})',
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, video_id)
+                if match:
+                    video_id = match.group(1)
+                    break
+        
+        # Validate video ID length
+        if len(video_id) != 11:
             return {
                 "success": False,
                 "error_type": "invalid_url",
                 "message": "Please enter a valid YouTube URL or 11-character Video ID"
             }
         
-        # Check video exists first
-        video_check = transcript_handler.check_video_exists(video_id)
-        if not video_check.get("exists", False):
-            return {
-                "success": False,
-                "error_type": "video_not_found",
-                "message": "Video not found, is private, or doesn't exist"
-            }
-        
-        logger.info(f"Video exists: {video_check.get('title', 'Unknown title')}")
+        logger.info(f"Processing transcript request for video: {video_id}")
         
         # Check subscription limits
         try:
@@ -903,19 +906,70 @@ async def download_transcript(
         except Exception as e:
             logger.warning(f"Subscription check error: {e}")
         
-        # Attempt to get transcript using improved method
+        # Use the SIMPLE YouTube Transcript API approach (your original working method)
         try:
-            transcript_data, method_used = transcript_handler.get_transcript_with_fallbacks(video_id)
-            logger.info(f"Successfully retrieved transcript using method: {method_used}")
-        except Exception as e:
-            error_msg = str(e).lower()
-            logger.error(f"Failed to get transcript for {video_id}: {str(e)}")
+            from youtube_transcript_api import YouTubeTranscriptApi
             
-            # Provide specific error messages based on the error
-            if "no transcript" in error_msg or "caption" in error_msg or "subtitles" in error_msg:
+            logger.info(f"Getting transcript for video: {video_id}")
+            
+            # Simple direct call - this was working for you before
+            transcript_list = YouTubeTranscriptApi.get_transcript(
+                video_id,
+                languages=['en', 'en-US', 'en-GB']
+            )
+            
+            if not transcript_list:
                 return {
                     "success": False,
                     "error_type": "no_transcript",
+                    "message": "No captions found for this video. Try a different video with captions enabled."
+                }
+            
+            logger.info(f"Successfully retrieved {len(transcript_list)} transcript segments")
+            
+            # Format the transcript (your original working method)
+            if request.clean_transcript:
+                # Clean format - text only
+                text_parts = []
+                for item in transcript_list:
+                    if 'text' in item and item['text'].strip():
+                        text = item['text'].strip()
+                        # Remove sound effect markers
+                        if not (text.startswith('[') and text.endswith(']')):
+                            text_parts.append(text)
+                
+                transcript_content = ' '.join(text_parts)
+            else:
+                # Unclean format - with timestamps
+                formatted_transcript = []
+                for item in transcript_list:
+                    if 'text' in item and 'start' in item:
+                        start_time = float(item['start'])
+                        minutes = int(start_time // 60)
+                        seconds = int(start_time % 60)
+                        timestamp = f"[{minutes:02d}:{seconds:02d}]"
+                        text = item['text'].strip()
+                        if text:
+                            formatted_transcript.append(f"{timestamp} {text}")
+                
+                transcript_content = '\n'.join(formatted_transcript)
+            
+            if not transcript_content.strip():
+                return {
+                    "success": False,
+                    "error_type": "no_transcript",
+                    "message": "Transcript is empty or contains no readable content."
+                }
+            
+        except Exception as e:
+            error_msg = str(e).lower()
+            logger.error(f"Transcript extraction failed for {video_id}: {str(e)}")
+            
+            # Better error messages based on the actual error
+            if "no transcript" in error_msg or "could not retrieve" in error_msg:
+                return {
+                    "success": False,
+                    "error_type": "no_transcript", 
                     "message": "No captions found for this video. The video may not have subtitles enabled.",
                     "suggestions": [
                         "Try a different video with captions enabled",
@@ -923,17 +977,17 @@ async def download_transcript(
                         "Use one of the working example videos provided"
                     ]
                 }
-            elif "video" in error_msg and ("unavailable" in error_msg or "private" in error_msg):
-                return {
-                    "success": False,
-                    "error_type": "video_not_found",
-                    "message": "Video is unavailable, private, or doesn't exist."
-                }
             elif "disabled" in error_msg:
                 return {
                     "success": False,
                     "error_type": "transcripts_disabled",
                     "message": "Transcripts are disabled for this video."
+                }
+            elif "video unavailable" in error_msg or "private" in error_msg:
+                return {
+                    "success": False,
+                    "error_type": "video_not_found",
+                    "message": "Video is unavailable, private, or doesn't exist."
                 }
             else:
                 return {
@@ -943,21 +997,7 @@ async def download_transcript(
                     "debug_info": str(e)
                 }
         
-        # Format the transcript
-        try:
-            format_type = "clean" if request.clean_transcript else "unclean"
-            formatted_result = transcript_handler.format_transcript_response(
-                transcript_data, 
-                format_type
-            )
-        except Exception as e:
-            return {
-                "success": False,
-                "error_type": "formatting_failed",
-                "message": f"Failed to format transcript: {str(e)}"
-            }
-        
-        # Record successful download in database
+        # Record successful download in database  
         try:
             transcript_type_db = "clean" if request.clean_transcript else "unclean"
             new_download = TranscriptDownload(
@@ -975,11 +1015,8 @@ async def download_transcript(
         # Return response compatible with your frontend
         return {
             "success": True,
-            "transcript": formatted_result["content"],
+            "transcript": transcript_content,
             "youtube_id": video_id,
-            "video_title": video_check.get("title", "Unknown"),
-            "method_used": method_used,
-            "entry_count": formatted_result["entry_count"],
             "message": "Transcript downloaded successfully"
         }
         
@@ -991,7 +1028,6 @@ async def download_transcript(
             "message": "An unexpected error occurred. Please try again.",
             "debug_info": str(e)
         }
-
 #================================================
 
 # 🔧 UPDATED: Enhanced payment intent endpoint to match payment.py
