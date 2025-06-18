@@ -275,211 +275,363 @@ def get_or_create_stripe_customer(user, db: Session):
             detail="Failed to create payment customer"
         )
 
-# SIMPLE WORKING TRANSCRIPT PROCESSING (Based on your old successful approach)
+# # Replace your process_youtube_transcript function in main.py with this working version
+
 # def process_youtube_transcript(video_id: str, clean: bool = True) -> str:
 #     """
-#     Simple transcript processing - BACK TO YOUR WORKING VERSION
+#     Alternative transcript processing using direct YouTube scraping
+#     This bypasses the broken youtube-transcript-api library
 #     """
 #     try:
-#         logger.info(f"Getting transcript for video: {video_id}")
+#         logger.info(f"Getting transcript for video: {video_id} using alternative method")
         
-#         # Simple direct call to YouTube Transcript API (your original working method)
-#         transcript_list = YouTubeTranscriptApi.get_transcript(
-#             video_id,
-#             languages=['en', 'en-US', 'en-GB']
-#         )
+#         # Step 1: Get the YouTube video page
+#         video_url = f"https://www.youtube.com/watch?v={video_id}"
+#         headers = {
+#             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+#             'Accept-Language': 'en-US,en;q=0.9',
+#             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+#             'Accept-Encoding': 'gzip, deflate, br',
+#             'DNT': '1',
+#             'Connection': 'keep-alive',
+#             'Upgrade-Insecure-Requests': '1'
+#         }
         
-#         if not transcript_list:
+#         logger.info(f"Fetching video page: {video_url}")
+#         response = requests.get(video_url, headers=headers, timeout=15)
+        
+#         if response.status_code != 200:
 #             raise HTTPException(
 #                 status_code=404,
-#                 detail="No transcript data found for this video."
+#                 detail=f"Video page not accessible (Status: {response.status_code})"
 #             )
         
-#         logger.info(f"Retrieved {len(transcript_list)} transcript segments")
+#         page_content = response.text
+#         logger.info(f"Got page content: {len(page_content)} characters")
         
-#         if clean:
-#             # Clean format - text only
-#             text_parts = []
-#             for item in transcript_list:
-#                 if 'text' in item and item['text'].strip():
+#         # Step 2: Extract caption track information using improved patterns
+#         caption_patterns = [
+#             r'"captionTracks":\s*(\[.*?\])',
+#             r'"captions".*?"playerCaptionsTracklistRenderer".*?"captionTracks":\s*(\[.*?\])',
+#             r'captionTracks["\']\s*:\s*(\[.*?\])',
+#         ]
+        
+#         caption_data = None
+#         for pattern in caption_patterns:
+#             matches = re.finditer(pattern, page_content, re.DOTALL)
+#             for match in matches:
+#                 try:
+#                     json_str = match.group(1)
+#                     # Clean up the JSON string more thoroughly
+#                     json_str = re.sub(r'([{,]\s*)([a-zA-Z_$][a-zA-Z0-9_$]*)\s*:', r'\1"\2":', json_str)
+#                     json_str = re.sub(r':(\s*)([a-zA-Z_$][^",\]\}]+)', r':"\2"', json_str)
+                    
+#                     caption_data = json.loads(json_str)
+#                     if caption_data and len(caption_data) > 0:
+#                         logger.info(f"Found {len(caption_data)} caption tracks")
+#                         break
+#                 except (json.JSONDecodeError, ValueError) as e:
+#                     logger.warning(f"Failed to parse caption JSON: {e}")
+#                     continue
+            
+#             if caption_data and len(caption_data) > 0:
+#                 break
+        
+#         if not caption_data or len(caption_data) == 0:
+#             # Try alternative method: look for ytInitialPlayerResponse
+#             player_patterns = [
+#                 r'var ytInitialPlayerResponse = ({.*?});',
+#                 r'ytInitialPlayerResponse["\']\s*[:=]\s*({.+?})(?:[;,]|</script>)',
+#             ]
+            
+#             for pattern in player_patterns:
+#                 matches = re.finditer(pattern, page_content, re.DOTALL)
+#                 for match in matches:
+#                     try:
+#                         player_data = json.loads(match.group(1))
+#                         captions_data = player_data.get('captions', {})
+#                         caption_tracks = captions_data.get('playerCaptionsTracklistRenderer', {}).get('captionTracks', [])
+                        
+#                         if caption_tracks:
+#                             caption_data = caption_tracks
+#                             logger.info(f"Found {len(caption_data)} caption tracks via player response")
+#                             break
+#                     except (json.JSONDecodeError, ValueError) as e:
+#                         logger.warning(f"Failed to parse player response: {e}")
+#                         continue
+                
+#                 if caption_data and len(caption_data) > 0:
+#                     break
+        
+#         if not caption_data or len(caption_data) == 0:
+#             raise HTTPException(
+#                 status_code=404,
+#                 detail="No captions found for this video. The video may not have subtitles enabled."
+#             )
+        
+#         # Step 3: Find the best caption track (prefer English manual, then auto)
+#         best_caption = None
+        
+#         # First try: Manual English captions
+#         for caption in caption_data:
+#             lang_code = caption.get('languageCode', '').lower()
+#             if lang_code.startswith('en') and not caption.get('kind', '').startswith('asr'):
+#                 best_caption = caption
+#                 logger.info(f"Using manual English caption")
+#                 break
+        
+#         # Second try: Auto-generated English captions
+#         if not best_caption:
+#             for caption in caption_data:
+#                 lang_code = caption.get('languageCode', '').lower()
+#                 if lang_code.startswith('en'):
+#                     best_caption = caption
+#                     logger.info(f"Using auto-generated English caption")
+#                     break
+        
+#         # Third try: Any available caption
+#         if not best_caption and caption_data:
+#             best_caption = caption_data[0]
+#             logger.info(f"Using first available caption")
+        
+#         if not best_caption or 'baseUrl' not in best_caption:
+#             raise HTTPException(
+#                 status_code=404,
+#                 detail="No usable caption track found"
+#             )
+        
+#         caption_url = best_caption['baseUrl']
+#         logger.info(f"Fetching captions from URL")
+        
+#         # Step 4: Fetch the caption XML
+#         caption_response = requests.get(caption_url, headers=headers, timeout=10)
+        
+#         if caption_response.status_code != 200:
+#             raise HTTPException(
+#                 status_code=500,
+#                 detail=f"Failed to download caption file (Status: {caption_response.status_code})"
+#             )
+        
+#         # Step 5: Parse the XML caption file
+#         try:
+#             import xml.etree.ElementTree as ET
+#             from urllib.parse import unquote
+            
+#             root = ET.fromstring(caption_response.content)
+#             transcript_data = []
+            
+#             for text_elem in root.findall('.//text'):
+#                 start_time = float(text_elem.get('start', '0'))
+#                 duration = float(text_elem.get('dur', '3'))
+#                 text_content = text_elem.text or ''
+                
+#                 if text_content.strip():
+#                     # Decode HTML entities and clean up
+#                     text_content = unquote(text_content)
+#                     text_content = (text_content
+#                                    .replace('&amp;', '&')
+#                                    .replace('&lt;', '<')
+#                                    .replace('&gt;', '>')
+#                                    .replace('&quot;', '"')
+#                                    .replace('&#39;', "'")
+#                                    .replace('\n', ' ')
+#                                    .strip())
+                    
+#                     # Remove HTML tags
+#                     text_content = re.sub(r'<[^>]+>', '', text_content)
+#                     text_content = re.sub(r'\s+', ' ', text_content).strip()
+                    
+#                     if text_content:
+#                         transcript_data.append({
+#                             'text': text_content,
+#                             'start': start_time,
+#                             'duration': duration
+#                         })
+            
+#             if not transcript_data:
+#                 raise HTTPException(
+#                     status_code=404,
+#                     detail="Transcript file contains no readable text"
+#                 )
+            
+#             logger.info(f"Successfully extracted {len(transcript_data)} transcript segments")
+            
+#             # Step 6: Format the transcript
+#             if clean:
+#                 # Clean format - text only
+#                 text_parts = []
+#                 for item in transcript_data:
 #                     text = item['text'].strip()
-#                     # Remove sound effect markers like [Music], [Applause], etc.
+#                     # Remove music/sound effect markers
 #                     text = text.replace('[Music]', '').replace('[Applause]', '').replace('[Laughter]', '').strip()
 #                     if text and not (text.startswith('[') and text.endswith(']')):
 #                         text_parts.append(text)
-            
-#             if not text_parts:
-#                 raise HTTPException(
-#                     status_code=404,
-#                     detail="Transcript contains no readable text content."
-#                 )
-            
-#             return ' '.join(text_parts)
-#         else:
-#             # Unclean format - with timestamps
-#             formatted_transcript = []
-#             for item in transcript_list:
-#                 if 'text' in item and 'start' in item:
-#                     start_time = float(item['start'])
+                
+#                 if not text_parts:
+#                     raise HTTPException(
+#                         status_code=404,
+#                         detail="Transcript contains no readable text content."
+#                     )
+                
+#                 return ' '.join(text_parts)
+#             else:
+#                 # Unclean format - with timestamps
+#                 formatted_parts = []
+#                 for item in transcript_data:
+#                     start_time = item['start']
 #                     minutes = int(start_time // 60)
 #                     seconds = int(start_time % 60)
 #                     timestamp = f"[{minutes:02d}:{seconds:02d}]"
-#                     text = item['text'].strip()
-#                     if text:
-#                         formatted_transcript.append(f"{timestamp} {text}")
-            
-#             if not formatted_transcript:
-#                 raise HTTPException(
-#                     status_code=404,
-#                     detail="Transcript contains no content with timestamps."
-#                 )
-            
-#             return '\n'.join(formatted_transcript)
-            
-#     except Exception as e:
-#         error_msg = str(e).lower()
-#         logger.error(f"Error getting transcript for {video_id}: {str(e)}")
-        
-#         # Simple error handling based on error message patterns
-#         if "transcript" in error_msg and "disabled" in error_msg:
-#             raise HTTPException(
-#                 status_code=404,
-#                 detail="Transcripts are disabled for this video."
-#             )
-#         elif "no transcript" in error_msg or "not found" in error_msg or "could not retrieve" in error_msg:
-#             raise HTTPException(
-#                 status_code=404,
-#                 detail="No captions found for this video. Try a different video with captions enabled."
-#             )
-#         elif "video unavailable" in error_msg or "private" in error_msg:
-#             raise HTTPException(
-#                 status_code=404,
-#                 detail="Video is unavailable, private, or doesn't exist."
-#             )
-#         else:
+#                     formatted_parts.append(f"{timestamp} {item['text']}")
+                
+#                 if not formatted_parts:
+#                     raise HTTPException(
+#                         status_code=404,
+#                         detail="Transcript contains no content with timestamps."
+#                     )
+                
+#                 return '\n'.join(formatted_parts)
+                
+#         except ET.ParseError as e:
 #             raise HTTPException(
 #                 status_code=500,
-#                 detail=f"Failed to retrieve transcript: {str(e)}"
+#                 detail=f"Failed to parse caption XML: {str(e)}"
 #             )
-#===================
-# Replace your process_youtube_transcript function in main.py with this working version
+            
+#     except HTTPException:
+#         raise  # Re-raise HTTP exceptions
+#     except requests.RequestException as e:
+#         raise HTTPException(
+#             status_code=503,
+#             detail=f"Network error while fetching transcript: {str(e)}"
+#         )
+#     except Exception as e:
+#         logger.error(f"Alternative transcript method failed: {str(e)}")
+#         raise HTTPException(
+#             status_code=500,
+#             detail="Failed to retrieve transcript. Please try a different video."
+#         )
 
-def process_youtube_transcript(video_id: str, clean: bool = True) -> str:
+#=================================================================================================
+
+# Replace your process_youtube_transcript function in main.py with this bulletproof solution
+
+def get_youtube_transcript_direct(video_id: str, clean: bool = True) -> str:
     """
-    Alternative transcript processing using direct YouTube scraping
-    This bypasses the broken youtube-transcript-api library
+    Direct YouTube transcript scraper - bypasses broken youtube-transcript-api
+    This method scrapes YouTube pages directly and extracts caption data
     """
     try:
-        logger.info(f"Getting transcript for video: {video_id} using alternative method")
+        logger.info(f"Using direct scraping method for video: {video_id}")
         
-        # Step 1: Get the YouTube video page
+        # Step 1: Get YouTube video page with proper headers
         video_url = f"https://www.youtube.com/watch?v={video_id}"
+        
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
             'Accept-Encoding': 'gzip, deflate, br',
             'DNT': '1',
             'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0'
         }
         
-        logger.info(f"Fetching video page: {video_url}")
+        logger.info(f"Fetching YouTube page: {video_url}")
         response = requests.get(video_url, headers=headers, timeout=15)
         
         if response.status_code != 200:
             raise HTTPException(
                 status_code=404,
-                detail=f"Video page not accessible (Status: {response.status_code})"
+                detail=f"Video not accessible. Status: {response.status_code}"
             )
         
         page_content = response.text
-        logger.info(f"Got page content: {len(page_content)} characters")
+        logger.info(f"Page content received: {len(page_content)} characters")
         
-        # Step 2: Extract caption track information using improved patterns
-        caption_patterns = [
-            r'"captionTracks":\s*(\[.*?\])',
-            r'"captions".*?"playerCaptionsTracklistRenderer".*?"captionTracks":\s*(\[.*?\])',
-            r'captionTracks["\']\s*:\s*(\[.*?\])',
+        # Step 2: Extract player response data using multiple methods
+        player_response = None
+        
+        # Method 1: Look for ytInitialPlayerResponse
+        patterns = [
+            r'var\s+ytInitialPlayerResponse\s*=\s*({.+?});',
+            r'ytInitialPlayerResponse\s*=\s*({.+?});',
+            r'"playerResponse":"({.+?})"',
+            r'ytInitialPlayerResponse":\s*({.+?})(?=,|\})',
         ]
         
-        caption_data = None
-        for pattern in caption_patterns:
+        for pattern in patterns:
             matches = re.finditer(pattern, page_content, re.DOTALL)
             for match in matches:
                 try:
                     json_str = match.group(1)
-                    # Clean up the JSON string more thoroughly
-                    json_str = re.sub(r'([{,]\s*)([a-zA-Z_$][a-zA-Z0-9_$]*)\s*:', r'\1"\2":', json_str)
-                    json_str = re.sub(r':(\s*)([a-zA-Z_$][^",\]\}]+)', r':"\2"', json_str)
                     
-                    caption_data = json.loads(json_str)
-                    if caption_data and len(caption_data) > 0:
-                        logger.info(f"Found {len(caption_data)} caption tracks")
+                    # Clean up escaped JSON if needed
+                    if json_str.startswith('"') and json_str.endswith('"'):
+                        json_str = json_str[1:-1].replace('\\"', '"')
+                    
+                    player_response = json.loads(json_str)
+                    
+                    # Check if this response has captions
+                    if 'captions' in player_response:
+                        logger.info("Found player response with captions")
                         break
+                        
                 except (json.JSONDecodeError, ValueError) as e:
-                    logger.warning(f"Failed to parse caption JSON: {e}")
                     continue
             
-            if caption_data and len(caption_data) > 0:
+            if player_response and 'captions' in player_response:
                 break
         
-        if not caption_data or len(caption_data) == 0:
-            # Try alternative method: look for ytInitialPlayerResponse
-            player_patterns = [
-                r'var ytInitialPlayerResponse = ({.*?});',
-                r'ytInitialPlayerResponse["\']\s*[:=]\s*({.+?})(?:[;,]|</script>)',
-            ]
-            
-            for pattern in player_patterns:
-                matches = re.finditer(pattern, page_content, re.DOTALL)
-                for match in matches:
-                    try:
-                        player_data = json.loads(match.group(1))
-                        captions_data = player_data.get('captions', {})
-                        caption_tracks = captions_data.get('playerCaptionsTracklistRenderer', {}).get('captionTracks', [])
-                        
-                        if caption_tracks:
-                            caption_data = caption_tracks
-                            logger.info(f"Found {len(caption_data)} caption tracks via player response")
-                            break
-                    except (json.JSONDecodeError, ValueError) as e:
-                        logger.warning(f"Failed to parse player response: {e}")
-                        continue
-                
-                if caption_data and len(caption_data) > 0:
-                    break
-        
-        if not caption_data or len(caption_data) == 0:
+        if not player_response or 'captions' not in player_response:
             raise HTTPException(
                 status_code=404,
                 detail="No captions found for this video. The video may not have subtitles enabled."
             )
         
-        # Step 3: Find the best caption track (prefer English manual, then auto)
+        # Step 3: Extract caption tracks
+        captions_data = player_response.get('captions', {})
+        caption_renderer = captions_data.get('playerCaptionsTracklistRenderer', {})
+        caption_tracks = caption_renderer.get('captionTracks', [])
+        
+        if not caption_tracks:
+            raise HTTPException(
+                status_code=404,
+                detail="No caption tracks found for this video."
+            )
+        
+        logger.info(f"Found {len(caption_tracks)} caption tracks")
+        
+        # Step 4: Find the best caption track (prefer English manual, then auto-generated)
         best_caption = None
         
-        # First try: Manual English captions
-        for caption in caption_data:
+        # First priority: Manual English captions
+        for caption in caption_tracks:
             lang_code = caption.get('languageCode', '').lower()
-            if lang_code.startswith('en') and not caption.get('kind', '').startswith('asr'):
+            is_auto = caption.get('kind', '') == 'asr'  # asr = automatic speech recognition
+            
+            if lang_code.startswith('en') and not is_auto:
                 best_caption = caption
-                logger.info(f"Using manual English caption")
+                logger.info(f"Using manual English caption: {caption.get('name', {}).get('simpleText', 'Unknown')}")
                 break
         
-        # Second try: Auto-generated English captions
+        # Second priority: Auto-generated English captions
         if not best_caption:
-            for caption in caption_data:
+            for caption in caption_tracks:
                 lang_code = caption.get('languageCode', '').lower()
                 if lang_code.startswith('en'):
                     best_caption = caption
-                    logger.info(f"Using auto-generated English caption")
+                    logger.info(f"Using auto-generated English caption: {caption.get('name', {}).get('simpleText', 'Unknown')}")
                     break
         
-        # Third try: Any available caption
-        if not best_caption and caption_data:
-            best_caption = caption_data[0]
-            logger.info(f"Using first available caption")
+        # Third priority: Any available caption
+        if not best_caption and caption_tracks:
+            best_caption = caption_tracks[0]
+            logger.info(f"Using first available caption: {best_caption.get('name', {}).get('simpleText', 'Unknown')}")
         
         if not best_caption or 'baseUrl' not in best_caption:
             raise HTTPException(
@@ -487,25 +639,22 @@ def process_youtube_transcript(video_id: str, clean: bool = True) -> str:
                 detail="No usable caption track found"
             )
         
+        # Step 5: Download caption XML
         caption_url = best_caption['baseUrl']
-        logger.info(f"Fetching captions from URL")
+        logger.info(f"Downloading captions from: {caption_url[:100]}...")
         
-        # Step 4: Fetch the caption XML
         caption_response = requests.get(caption_url, headers=headers, timeout=10)
         
         if caption_response.status_code != 200:
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to download caption file (Status: {caption_response.status_code})"
+                detail=f"Failed to download caption file. Status: {caption_response.status_code}"
             )
         
-        # Step 5: Parse the XML caption file
+        # Step 6: Parse caption XML
         try:
-            import xml.etree.ElementTree as ET
-            from urllib.parse import unquote
-            
             root = ET.fromstring(caption_response.content)
-            transcript_data = []
+            transcript_segments = []
             
             for text_elem in root.findall('.//text'):
                 start_time = float(text_elem.get('start', '0'))
@@ -513,7 +662,7 @@ def process_youtube_transcript(video_id: str, clean: bool = True) -> str:
                 text_content = text_elem.text or ''
                 
                 if text_content.strip():
-                    # Decode HTML entities and clean up
+                    # Decode HTML entities
                     text_content = unquote(text_content)
                     text_content = (text_content
                                    .replace('&amp;', '&')
@@ -529,55 +678,62 @@ def process_youtube_transcript(video_id: str, clean: bool = True) -> str:
                     text_content = re.sub(r'\s+', ' ', text_content).strip()
                     
                     if text_content:
-                        transcript_data.append({
+                        transcript_segments.append({
                             'text': text_content,
                             'start': start_time,
                             'duration': duration
                         })
             
-            if not transcript_data:
+            if not transcript_segments:
                 raise HTTPException(
                     status_code=404,
-                    detail="Transcript file contains no readable text"
+                    detail="Caption file contains no readable text"
                 )
             
-            logger.info(f"Successfully extracted {len(transcript_data)} transcript segments")
+            logger.info(f"Successfully extracted {len(transcript_segments)} transcript segments")
             
-            # Step 6: Format the transcript
+            # Step 7: Format transcript based on user preference
             if clean:
-                # Clean format - text only
+                # Clean format - just text
                 text_parts = []
-                for item in transcript_data:
-                    text = item['text'].strip()
-                    # Remove music/sound effect markers
-                    text = text.replace('[Music]', '').replace('[Applause]', '').replace('[Laughter]', '').strip()
-                    if text and not (text.startswith('[') and text.endswith(']')):
-                        text_parts.append(text)
+                for segment in transcript_segments:
+                    text = segment['text'].strip()
+                    # Remove sound effect markers like [Music], [Applause]
+                    if not (text.startswith('[') and text.endswith(']')) and text:
+                        # Additional cleaning
+                        text = text.replace('[Music]', '').replace('[Applause]', '').replace('[Laughter]', '').strip()
+                        if text:
+                            text_parts.append(text)
                 
                 if not text_parts:
                     raise HTTPException(
                         status_code=404,
-                        detail="Transcript contains no readable text content."
+                        detail="Transcript contains no readable text content after cleaning"
                     )
                 
                 return ' '.join(text_parts)
+            
             else:
                 # Unclean format - with timestamps
-                formatted_parts = []
-                for item in transcript_data:
-                    start_time = item['start']
+                formatted_lines = []
+                for segment in transcript_segments:
+                    start_time = segment['start']
+                    text = segment['text']
+                    
+                    # Convert seconds to MM:SS format
                     minutes = int(start_time // 60)
                     seconds = int(start_time % 60)
                     timestamp = f"[{minutes:02d}:{seconds:02d}]"
-                    formatted_parts.append(f"{timestamp} {item['text']}")
+                    
+                    formatted_lines.append(f"{timestamp} {text}")
                 
-                if not formatted_parts:
+                if not formatted_lines:
                     raise HTTPException(
                         status_code=404,
-                        detail="Transcript contains no content with timestamps."
+                        detail="Transcript contains no content with timestamps"
                     )
                 
-                return '\n'.join(formatted_parts)
+                return '\n'.join(formatted_lines)
                 
         except ET.ParseError as e:
             raise HTTPException(
@@ -586,17 +742,45 @@ def process_youtube_transcript(video_id: str, clean: bool = True) -> str:
             )
             
     except HTTPException:
-        raise  # Re-raise HTTP exceptions
+        raise  # Re-raise HTTP exceptions as-is
     except requests.RequestException as e:
         raise HTTPException(
             status_code=503,
-            detail=f"Network error while fetching transcript: {str(e)}"
+            detail=f"Network error while fetching video data: {str(e)}"
         )
     except Exception as e:
-        logger.error(f"Alternative transcript method failed: {str(e)}")
+        logger.error(f"Direct scraping failed for {video_id}: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail="Failed to retrieve transcript. Please try a different video."
+            detail=f"Failed to extract transcript: {str(e)}"
+        )
+
+# Replace your process_youtube_transcript function with this:
+def process_youtube_transcript(video_id: str, clean: bool = True) -> str:
+    """
+    NEW bulletproof transcript processor using direct scraping
+    """
+    try:
+        logger.info(f"Getting transcript for video: {video_id} (using direct method)")
+        
+        # Use our bulletproof direct scraping method
+        transcript_content = get_youtube_transcript_direct(video_id, clean)
+        
+        if not transcript_content.strip():
+            raise HTTPException(
+                status_code=404,
+                detail="Transcript is empty or contains no readable content."
+            )
+        
+        return transcript_content
+        
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
+    except Exception as e:
+        logger.error(f"Error getting transcript for {video_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve transcript: {str(e)}"
         )
 
 # API Endpoints
