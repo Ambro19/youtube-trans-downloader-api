@@ -639,3 +639,12 @@ AttributeError: module 'bcrypt' has no attribute '__about__'
 2025-06-17 20:23:45,704 - youtube_trans_downloader.main - INFO - Environment: development
 2025-06-17 20:23:45,730 - youtube_trans_downloader.main - INFO - Database initialized successfully
 2025-06-17 20:23:45,730 - youtube_trans_downloader.main - INFO - Application startup complete!
+2025-06-18 01:58:53,077 - youtube_trans_downloader - INFO - Environment: development
+2025-06-18 01:58:53,078 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-18 01:58:53,079 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-18 01:58:53,079 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-18 01:58:53,337 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-06-18 01:58:53,501 - youtube_trans_downloader - INFO - Environment: development
+2025-06-18 01:58:53,501 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-18 01:58:53,502 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-18 01:58:53,502 - youtube_trans_downloader - INFO - Using SQLite database for development
