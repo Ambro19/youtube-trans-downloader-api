@@ -625,3 +625,17 @@ AttributeError: module 'bcrypt' has no attribute '__about__'
 2025-06-17 19:53:17,631 - youtube_trans_downloader.main - INFO - Processing transcript request for video: UfO9K0CtzMg
 2025-06-17 19:53:17,635 - youtube_trans_downloader.main - INFO - Getting transcript for video: UfO9K0CtzMg
 2025-06-17 19:53:18,365 - youtube_trans_downloader.main - ERROR - Error getting transcript for UfO9K0CtzMg: no element found: line 1, column 0
+2025-06-17 20:23:41,359 - youtube_trans_downloader - INFO - Environment: development
+2025-06-17 20:23:41,360 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-17 20:23:41,360 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-17 20:23:41,361 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-17 20:23:41,801 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-06-17 20:23:41,972 - youtube_trans_downloader - INFO - Environment: development
+2025-06-17 20:23:41,972 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-17 20:23:41,972 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-17 20:23:41,973 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-17 20:23:45,663 - youtube_trans_downloader.main - INFO - Development mode - CORS origins: ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:3000']
+2025-06-17 20:23:45,704 - youtube_trans_downloader.main - INFO - Starting YouTube Transcript Downloader API...
+2025-06-17 20:23:45,704 - youtube_trans_downloader.main - INFO - Environment: development
+2025-06-17 20:23:45,730 - youtube_trans_downloader.main - INFO - Database initialized successfully
+2025-06-17 20:23:45,730 - youtube_trans_downloader.main - INFO - Application startup complete!
