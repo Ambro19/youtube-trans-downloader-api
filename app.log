@@ -595,3 +595,33 @@ AttributeError: module 'bcrypt' has no attribute '__about__'
 2025-06-17 15:36:12,944 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
 2025-06-17 15:36:12,944 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
 2025-06-17 15:36:12,945 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-17 19:46:31,088 - youtube_trans_downloader - INFO - Environment: development
+2025-06-17 19:46:31,088 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-17 19:46:31,089 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-17 19:46:31,089 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-17 19:46:31,511 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-06-17 19:46:31,684 - youtube_trans_downloader - INFO - Environment: development
+2025-06-17 19:46:31,684 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-06-17 19:46:31,684 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-06-17 19:46:31,685 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-06-17 19:46:35,220 - youtube_trans_downloader.main - INFO - Development mode - CORS origins: ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:3000']
+2025-06-17 19:46:35,266 - youtube_trans_downloader.main - INFO - Starting YouTube Transcript Downloader API...
+2025-06-17 19:46:35,266 - youtube_trans_downloader.main - INFO - Environment: development
+2025-06-17 19:46:35,278 - youtube_trans_downloader.main - INFO - Database initialized successfully
+2025-06-17 19:46:35,279 - youtube_trans_downloader.main - INFO - Application startup complete!
+2025-06-17 19:52:28,377 - passlib.handlers.bcrypt - WARNING - (trapped) error reading bcrypt version
+Traceback (most recent call last):
+  File "C:\Users\xiggy\YOUTUBE-TRANSCRIPT-APP\venv\Lib\site-packages\passlib\handlers\bcrypt.py", line 620, in _load_backend_mixin
+    version = _bcrypt.__about__.__version__
+              ^^^^^^^^^^^^^^^^^
+AttributeError: module 'bcrypt' has no attribute '__about__'
+2025-06-17 19:52:28,721 - youtube_trans_downloader.main - INFO - User logged in successfully: xiggy
+2025-06-17 19:53:00,936 - youtube_trans_downloader.main - INFO - Processing transcript request for video: UfO9K0CtzMg
+2025-06-17 19:53:00,940 - youtube_trans_downloader.main - INFO - Getting transcript for video: UfO9K0CtzMg
+2025-06-17 19:53:01,664 - youtube_trans_downloader.main - ERROR - Error getting transcript for UfO9K0CtzMg: no element found: line 1, column 0
+2025-06-17 19:53:07,188 - youtube_trans_downloader.main - INFO - Processing transcript request for video: UfO9K0CtzMg
+2025-06-17 19:53:07,191 - youtube_trans_downloader.main - INFO - Getting transcript for video: UfO9K0CtzMg
+2025-06-17 19:53:07,862 - youtube_trans_downloader.main - ERROR - Error getting transcript for UfO9K0CtzMg: no element found: line 1, column 0
+2025-06-17 19:53:17,631 - youtube_trans_downloader.main - INFO - Processing transcript request for video: UfO9K0CtzMg
+2025-06-17 19:53:17,635 - youtube_trans_downloader.main - INFO - Getting transcript for video: UfO9K0CtzMg
+2025-06-17 19:53:18,365 - youtube_trans_downloader.main - ERROR - Error getting transcript for UfO9K0CtzMg: no element found: line 1, column 0

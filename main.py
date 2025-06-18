@@ -769,3 +769,99 @@ async def test_working_videos():
         "test_results": results,
         "recommendation": "Use videos marked as 'SUCCESS' for testing"
     }
+
+# Add this endpoint to your main.py to test which videos actually work
+@app.get("/test_real_videos/")
+async def test_real_videos():
+    """Test with videos that actually have captions"""
+    
+    # These videos are CONFIRMED to have captions
+    test_videos = [
+        {
+            "id": "dQw4w9WgXcQ", 
+            "title": "Rick Astley - Never Gonna Give You Up",
+            "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "description": "Famous rickroll video - definitely has captions"
+        },
+        {
+            "id": "jNQXAC9IVRw", 
+            "title": "Me at the zoo",
+            "url": "https://www.youtube.com/watch?v=jNQXAC9IVRw", 
+            "description": "First YouTube video ever uploaded"
+        },
+        {
+            "id": "9bZkp7q19f0", 
+            "title": "PSY - Gangnam Style",
+            "url": "https://www.youtube.com/watch?v=9bZkp7q19f0",
+            "description": "Viral K-pop video with captions"
+        },
+        {
+            "id": "k-RjskuqxzU",
+            "title": "Your Previously Working Video", 
+            "url": "https://www.youtube.com/watch?v=k-RjskuqxzU",
+            "description": "The video that worked in your Pictures #3 & #4"
+        },
+        {
+            "id": "UfO9K0CtzMg",
+            "title": "Video You Were Testing",
+            "url": "https://www.youtube.com/watch?v=UfO9K0CtzMg", 
+            "description": "This video likely has NO captions"
+        }
+    ]
+    
+    results = []
+    working_videos = []
+    
+    for video in test_videos:
+        try:
+            from youtube_transcript_api import YouTubeTranscriptApi
+            
+            # Try to get the transcript
+            transcript_data = YouTubeTranscriptApi.get_transcript(
+                video["id"], 
+                languages=['en', 'en-US', 'en-GB']
+            )
+            
+            if transcript_data:
+                # Get a sample of the text
+                sample_text = ' '.join([item['text'] for item in transcript_data[:3]])
+                
+                results.append({
+                    "video": video,
+                    "status": "✅ HAS CAPTIONS",
+                    "segments": len(transcript_data),
+                    "sample": sample_text[:100] + "..." if len(sample_text) > 100 else sample_text
+                })
+                
+                working_videos.append(video["id"])
+            else:
+                results.append({
+                    "video": video,
+                    "status": "❌ NO CAPTIONS",
+                    "error": "Empty transcript data"
+                })
+                
+        except Exception as e:
+            error_msg = str(e)
+            if "no element found" in error_msg:
+                status = "❌ NO CAPTIONS (empty XML)"
+            elif "could not retrieve" in error_msg:
+                status = "❌ NO CAPTIONS (not available)"
+            else:
+                status = f"❌ ERROR: {error_msg[:50]}..."
+                
+            results.append({
+                "video": video,
+                "status": status,
+                "error": error_msg
+            })
+    
+    return {
+        "message": "Test results for caption availability",
+        "library_info": {
+            "youtube_transcript_api": "1.1.0 (latest available)"
+        },
+        "test_results": results,
+        "working_video_ids": working_videos,
+        "recommendation": "Use the videos marked with ✅ HAS CAPTIONS in your app testing"
+    }
