@@ -26,7 +26,7 @@ import xml.etree.ElementTree as ET  # ✅ FIXED
 from urllib.parse import unquote  # ✅ FIXED
 
 # Add these imports to your main.py
-from youtube_transcript_api.exceptions import TranscriptsDisabled, NoTranscriptFound, VideoUnavailable, NoTranscriptAvailable, TooManyRequests
+#from youtube_transcript_api.exceptions import TranscriptsDisabled, NoTranscriptFound, VideoUnavailable, NoTranscriptAvailable, TooManyRequests
 
 import warnings
 warnings.filterwarnings("ignore", message=".*bcrypt.*")
@@ -252,7 +252,7 @@ class SubscriptionResponse(BaseModel):
     
     class Config:
         from_attributes = True
-        
+
 #=====================================
 # HELPING FUNCTIONS OF THE main.py FILE
 #======================================
