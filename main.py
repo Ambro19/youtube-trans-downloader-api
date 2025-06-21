@@ -31,6 +31,9 @@ warnings.filterwarnings("ignore", message=".*bcrypt.*")
 # Import from database.py
 from database import get_db, User, Subscription, TranscriptDownload, create_tables
 
+# Import html module at the top of your main.py
+import html
+
 # Load environment variables
 load_dotenv()
 
@@ -422,27 +425,33 @@ def check_subscription_limit(user_id: int, transcript_type: str, db: Session):
         return False
     return True
 
-def get_transcript_working_alternative(video_id: str, clean: bool = True) -> str:
+# Enhanced transcript extraction system - Replace your existing functions with these
+
+def get_transcript_working_alternative_enhanced(video_id: str, clean: bool = True) -> str:
     """
-    Working alternative transcript method - extracts from YouTube HTML
+    ENHANCED working alternative transcript method with multiple extraction strategies
     """
     try:
-        logger.info(f"🔄 Using working alternative method for video: {video_id}")
+        logger.info(f"🔄 Enhanced alternative method for video: {video_id}")
         
-        # Step 1: Get YouTube video page
+        # Strategy 1: Direct YouTube page scraping with multiple patterns
         video_url = f"https://www.youtube.com/watch?v={video_id}"
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
             'Accept-Encoding': 'gzip, deflate, br',
             'DNT': '1',
             'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0'
         }
         
         logger.info(f"📡 Fetching video page: {video_url}")
-        response = requests.get(video_url, headers=headers, timeout=20)
+        response = requests.get(video_url, headers=headers, timeout=30)
         
         if response.status_code != 200:
             raise HTTPException(
@@ -453,77 +462,112 @@ def get_transcript_working_alternative(video_id: str, clean: bool = True) -> str
         page_content = response.text
         logger.info(f"📄 Page content length: {len(page_content)} characters")
         
-        # Step 2: Extract caption track information using multiple patterns
+        # Enhanced caption extraction with multiple strategies
+        caption_url = None
+        
+        # Strategy 1: Look for captionTracks in multiple formats
         caption_patterns = [
             r'"captionTracks":\s*(\[.*?\])',
             r'"captions".*?"playerCaptionsTracklistRenderer".*?"captionTracks":\s*(\[.*?\])',
             r'captionTracks":\s*(\[.*?\])',
-            r'"captionTracks":\s*(\[[^\]]*\])'
+            r'"captionTracks":\s*(\[[^\]]*\])',
+            r',"captionTracks":\[([^\]]+)\]',
+            r'"captionTracks":\[([^\]]+)\]'
         ]
         
         caption_data = None
         for i, pattern in enumerate(caption_patterns):
-            matches = re.finditer(pattern, page_content, re.DOTALL)
-            for match in matches:
-                try:
+            try:
+                matches = re.finditer(pattern, page_content, re.DOTALL)
+                for match in matches:
                     json_str = match.group(1)
-                    # Clean up the JSON string
-                    json_str = re.sub(r'([{,]\s*)([a-zA-Z_$][a-zA-Z0-9_$]*)\s*:', r'\1"\2":', json_str)
                     
-                    caption_data = json.loads(json_str)
-                    logger.info(f"✅ Found {len(caption_data)} caption tracks using pattern {i+1}")
+                    # Clean and fix the JSON
+                    json_str = re.sub(r'([{,]\s*)([a-zA-Z_$][a-zA-Z0-9_$]*)\s*:', r'\1"\2":', json_str)
+                    json_str = json_str.replace('\\"', '"').replace('\\/', '/')
+                    
+                    try:
+                        if not json_str.startswith('['):
+                            json_str = '[' + json_str + ']'
+                        
+                        caption_data = json.loads(json_str)
+                        logger.info(f"✅ Found caption tracks using pattern {i+1}: {len(caption_data)} tracks")
+                        break
+                    except json.JSONDecodeError:
+                        continue
+                
+                if caption_data:
                     break
-                except (json.JSONDecodeError, ValueError) as e:
-                    logger.warning(f"Failed to parse caption JSON with pattern {i+1}: {e}")
-                    continue
-            
-            if caption_data:
-                break
+                    
+            except Exception as e:
+                logger.warning(f"Pattern {i+1} failed: {e}")
+                continue
         
+        # Strategy 2: If no structured caption data, look for direct baseUrl patterns
         if not caption_data:
-            # Try a more aggressive search
-            logger.info("🔍 Trying aggressive caption search...")
+            logger.info("🔍 Trying direct baseUrl extraction...")
+            baseurl_patterns = [
+                r'"baseUrl":\s*"([^"]*timedtext[^"]*)"',
+                r'baseUrl":\s*"([^"]*timedtext[^"]*)"',
+                r'"baseUrl":"([^"]*timedtext[^"]*)"'
+            ]
             
-            # Look for any baseUrl in the page
-            baseurl_pattern = r'"baseUrl":\s*"([^"]*timedtext[^"]*)"'
-            baseurl_matches = re.findall(baseurl_pattern, page_content)
+            for pattern in baseurl_patterns:
+                matches = re.findall(pattern, page_content)
+                if matches:
+                    caption_url = matches[0].replace('\\u0026', '&').replace('\\/', '/')
+                    logger.info(f"✅ Found direct caption URL: {caption_url[:100]}...")
+                    break
+        
+        # Strategy 3: Extract from structured caption data
+        if caption_data and not caption_url:
+            # Find the best caption track (prefer English)
+            best_caption = None
+            for caption in caption_data:
+                if isinstance(caption, dict):
+                    lang_code = caption.get('languageCode', '').lower()
+                    if lang_code.startswith('en'):
+                        best_caption = caption
+                        logger.info(f"✅ Found English caption track: {lang_code}")
+                        break
             
-            if baseurl_matches:
-                caption_url = baseurl_matches[0].replace('\\u0026', '&').replace('\\/', '/')
-                logger.info(f"✅ Found caption URL directly: {caption_url[:100]}...")
-                return fetch_and_parse_captions(caption_url, clean, headers)
+            if not best_caption and caption_data:
+                best_caption = caption_data[0] if isinstance(caption_data[0], dict) else None
+                logger.info(f"✅ Using first available caption track")
             
-            raise HTTPException(
-                status_code=404,
-                detail="No captions found for this video. The video may not have subtitles enabled."
-            )
+            if best_caption and 'baseUrl' in best_caption:
+                caption_url = best_caption['baseUrl']
+                caption_url = caption_url.replace('\\u0026', '&').replace('\\/', '/')
         
-        # Step 3: Find the best caption track (prefer English)
-        best_caption = None
-        for caption in caption_data:
-            lang_code = caption.get('languageCode', '').lower()
-            if lang_code.startswith('en'):
-                best_caption = caption
-                logger.info(f"✅ Found English caption track: {lang_code}")
-                break
+        # Strategy 4: If still no URL, try alternative extraction methods
+        if not caption_url:
+            logger.info("🔍 Trying alternative URL extraction methods...")
+            
+            # Look for any timedtext URLs in the page
+            timedtext_patterns = [
+                r'(https://www\.youtube\.com/api/timedtext[^"]*)',
+                r'(https://www\.youtube\.com/timedtext[^"]*)',
+                r'"(https://[^"]*timedtext[^"]*)"'
+            ]
+            
+            for pattern in timedtext_patterns:
+                matches = re.findall(pattern, page_content)
+                if matches:
+                    caption_url = matches[0].replace('\\u0026', '&').replace('\\/', '/')
+                    logger.info(f"✅ Found timedtext URL: {caption_url[:100]}...")
+                    break
         
-        if not best_caption and caption_data:
-            best_caption = caption_data[0]  # Use first available
-            logger.info(f"✅ Using first available caption track")
+        # If we found a caption URL, fetch and parse it
+        if caption_url:
+            logger.info(f"📥 Fetching captions from: {caption_url[:150]}...")
+            return fetch_and_parse_captions_enhanced(caption_url, clean, headers)
         
-        if not best_caption or 'baseUrl' not in best_caption:
-            raise HTTPException(
-                status_code=404,
-                detail="No usable caption track found"
-            )
-        
-        # Step 4: Get the caption URL and fetch
-        caption_url = best_caption['baseUrl']
-        caption_url = caption_url.replace('\\u0026', '&').replace('\\/', '/')
-        
-        logger.info(f"📥 Fetching captions from: {caption_url[:100]}...")
-        
-        return fetch_and_parse_captions(caption_url, clean, headers)
+        # If no captions found, fall back to demo
+        logger.warning(f"⚠️ No caption URL found for video {video_id}")
+        raise HTTPException(
+            status_code=404,
+            detail="No captions found for this video. The video may not have subtitles enabled."
+        )
         
     except HTTPException:
         raise  # Re-raise HTTP exceptions
@@ -533,12 +577,11 @@ def get_transcript_working_alternative(video_id: str, clean: bool = True) -> str
             detail=f"Network error while fetching transcript: {str(e)}"
         )
     except Exception as e:
-        logger.error(f"💥 Alternative method failed: {str(e)}")
+        logger.error(f"💥 Enhanced alternative method failed: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Transcript extraction failed: {str(e)}"
         )
-
 #  Updated main transcript processor with fallback
 def process_youtube_transcript_with_fallback(video_id: str, clean: bool = True) -> str:
     """
@@ -577,45 +620,34 @@ def process_youtube_transcript_with_fallback(video_id: str, clean: bool = True) 
         # Fallback to alternative method
         return get_transcript_alternative_method(video_id, clean)
 
-# Add this enhanced debugging to your process_youtube_transcript_final function
-def process_youtube_transcript_final(video_id: str, clean: bool = True) -> str:
+# Update your main processing function to use the enhanced method
+def process_youtube_transcript_final_enhanced(video_id: str, clean: bool = True) -> str:
     """
-    Final transcript processor - ENHANCED WITH COMPREHENSIVE DEBUG LOGGING
+    FINAL enhanced transcript processor with better real extraction
     """
-    logger.info(f"🔍 process_youtube_transcript_final called with video_id: {video_id}, clean: {clean}")
+    logger.info(f"🔍 Enhanced processing for video_id: {video_id}, clean: {clean}")
     
-    # STEP 1: Validate video ID first
-    if not video_id or len(video_id) != 11:
-        logger.error(f"❌ Invalid video ID format: {video_id}")
-        return get_demo_transcript_simple(video_id, clean)
-    
-    # STEP 2: Try the working alternative method first
+    # Step 1: Try enhanced alternative method first (for real transcripts)
     try:
-        logger.info("🚀 Trying working alternative method...")
-        result = get_transcript_working_alternative(video_id, clean)
+        logger.info("🚀 Trying enhanced alternative method...")
+        result = get_transcript_working_alternative_enhanced(video_id, clean)
         
-        # DEBUG: Check what we actually got
-        logger.info(f"✅ Alternative method returned {len(result)} characters")
-        logger.info(f"🔍 First 100 chars: {result[:100]}...")
-        
-        # SAFETY CHECK: If result contains unexpected content, fall back to demo
-        if "dark chosen" in result.lower() or "dense, coiled, magnetic" in result.lower():
-            logger.warning(f"⚠️ Alternative method returned unexpected content for {video_id}")
-            logger.warning(f"⚠️ Content preview: {result[:200]}...")
-            logger.info("🔄 Falling back to demo content due to content mismatch")
-            return get_demo_transcript_simple(video_id, clean)
-        
-        return result
-        
+        # Validate the result
+        if result and len(result.strip()) > 50:
+            logger.info(f"✅ Enhanced alternative method succeeded: {len(result)} characters")
+            return result
+        else:
+            logger.warning("⚠️ Enhanced alternative method returned minimal content")
+            
     except HTTPException as e:
         if e.status_code == 404:
-            logger.warning(f"⚠️ Alternative method: {e.detail}")
+            logger.warning(f"⚠️ Enhanced alternative method: {e.detail}")
         else:
-            logger.error(f"❌ Alternative method failed: {e.detail}")
+            logger.error(f"❌ Enhanced alternative method failed: {e.detail}")
     except Exception as e:
-        logger.error(f"❌ Alternative method error: {e}")
+        logger.error(f"❌ Enhanced alternative method error: {e}")
     
-    # STEP 3: Try the library as fallback
+    # Step 2: Try the original library method
     try:
         logger.info("🔄 Trying YouTube Transcript API as fallback...")
         from youtube_transcript_api import YouTubeTranscriptApi
@@ -625,17 +657,17 @@ def process_youtube_transcript_final(video_id: str, clean: bool = True) -> str:
         if transcript_list:
             logger.info(f"✅ Library method worked: {len(transcript_list)} segments")
             result = format_transcript_simple(transcript_list, clean)
-            logger.info(f"✅ Library method returning {len(result)} characters")
-            return result
+            if result and len(result.strip()) > 50:
+                logger.info(f"✅ Library method returning {len(result)} characters")
+                return result
             
     except Exception as e:
-        logger.warning(f"⚠️ Library method failed (expected): {e}")
+        logger.warning(f"⚠️ Library method failed: {e}")
     
-    # STEP 4: Demo transcript with detailed logging
+    # Step 3: Fall back to demo transcript
     logger.info(f"📋 Falling back to demo transcript for video: {video_id}")
     result = get_demo_transcript_simple(video_id, clean)
     logger.info(f"📋 Demo transcript returning {len(result)} characters")
-    logger.info(f"🔍 Demo content preview: {result[:100]}...")
     return result
 
 def process_single_video_transcript(video_id: str, clean: bool = True) -> str:
@@ -716,102 +748,133 @@ def format_transcript_simple(transcript_list: list, clean: bool = True) -> str:
                 formatted_lines.append(f"{timestamp} {text}")
         return '\n'.join(formatted_lines) if formatted_lines else "No transcript with timestamps found."
 
-# Replace the fetch_and_parse_captions function in your main.py with this enhanced version
-def fetch_and_parse_captions(caption_url: str, clean: bool, headers: dict) -> str:
+def fetch_and_parse_captions_enhanced(caption_url: str, clean: bool, headers: dict) -> str:
     """
-    Enhanced caption fetcher with better URL handling and fallback
+    Enhanced caption fetcher with better error handling and multiple formats
     """
     try:
         # Clean and enhance the caption URL
         caption_url = caption_url.replace('\\u0026', '&').replace('\\/', '/')
         
-        # Add additional parameters that might be needed
-        if '&' in caption_url:
-            # Add format parameter if not present
-            if 'fmt=' not in caption_url:
-                caption_url += '&fmt=srv3'
+        # Ensure proper format parameters
+        if 'fmt=' not in caption_url:
+            separator = '&' if '?' in caption_url else '?'
+            caption_url += f"{separator}fmt=srv3"
         
-        # Enhanced headers for timedtext API
-        caption_headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Referer': 'https://www.youtube.com/',
-            'Origin': 'https://www.youtube.com',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-origin'
-        }
+        # Add language parameter if missing
+        if 'lang=' not in caption_url and 'tlang=' not in caption_url:
+            separator = '&' if '?' in caption_url else '?'
+            caption_url += f"{separator}lang=en"
         
-        logger.info(f"📥 Attempting to fetch captions from: {caption_url[:150]}...")
+        logger.info(f"📥 Enhanced caption fetch from: {caption_url[:150]}...")
         
-        # Try multiple approaches to fetch captions
-        approaches = [
-            ("Enhanced headers", caption_headers),
-            ("Original headers", headers),
-            ("Minimal headers", {'User-Agent': caption_headers['User-Agent']})
+        # Try multiple request strategies
+        strategies = [
+            ("Standard headers", headers),
+            ("Minimal headers", {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': '*/*',
+                'Referer': 'https://www.youtube.com/'
+            }),
+            ("Simple request", {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
         ]
         
-        for approach_name, request_headers in approaches:
+        for strategy_name, request_headers in strategies:
             try:
-                logger.info(f"🔄 Trying {approach_name}...")
-                caption_response = requests.get(caption_url, headers=request_headers, timeout=15)
+                logger.info(f"🔄 Trying {strategy_name}...")
+                caption_response = requests.get(caption_url, headers=request_headers, timeout=20)
                 
-                logger.info(f"📄 Response: {caption_response.status_code}, Size: {len(caption_response.content)} bytes")
+                logger.info(f"📄 {strategy_name} Response: {caption_response.status_code}, Size: {len(caption_response.content)} bytes")
                 
-                if caption_response.status_code == 200 and len(caption_response.content) > 0:
-                    return parse_caption_xml(caption_response.content, clean)
+                if caption_response.status_code == 200 and len(caption_response.content) > 50:
+                    # Try to parse the content
+                    result = parse_caption_xml_enhanced(caption_response.content, clean)
+                    if result and len(result.strip()) > 50:  # Ensure we got meaningful content
+                        logger.info(f"✅ {strategy_name} succeeded with {len(result)} characters")
+                        return result
+                    else:
+                        logger.warning(f"⚠️ {strategy_name}: Parsed but got minimal content")
                 elif caption_response.status_code == 200:
-                    logger.warning(f"⚠️ {approach_name}: Got 200 but empty content")
+                    logger.warning(f"⚠️ {strategy_name}: Got 200 but minimal content ({len(caption_response.content)} bytes)")
                 else:
-                    logger.warning(f"⚠️ {approach_name}: Status {caption_response.status_code}")
+                    logger.warning(f"⚠️ {strategy_name}: Status {caption_response.status_code}")
                     
             except Exception as e:
-                logger.warning(f"⚠️ {approach_name} failed: {e}")
+                logger.warning(f"⚠️ {strategy_name} failed: {e}")
                 continue
         
-        # If all approaches fail, return demo content but indicate it's working
-        logger.warning("⚠️ All caption fetching approaches failed, but system is functional")
-        return generate_working_demo_transcript(clean)
+        # If all strategies failed
+        logger.error("❌ All caption fetching strategies failed")
+        raise HTTPException(
+            status_code=404,
+            detail="Failed to fetch caption content from all available methods"
+        )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Caption fetching completely failed: {e}")
-        return generate_working_demo_transcript(clean)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Caption fetching error: {str(e)}"
+        )
 
-def parse_caption_xml(xml_content: bytes, clean: bool) -> str:
+def parse_caption_xml_enhanced(xml_content: bytes, clean: bool) -> str:
     """
-    Parse caption XML content
+    Enhanced XML parser with multiple format support
     """
     try:
-        root = ET.fromstring(xml_content)
+        # Try to decode the content
+        try:
+            content_str = xml_content.decode('utf-8')
+        except UnicodeDecodeError:
+            content_str = xml_content.decode('utf-8', errors='ignore')
+        
+        logger.info(f"📝 Parsing XML content ({len(content_str)} chars)")
+        
+        # Check if it's JSON format (some YouTube captions come as JSON)
+        if content_str.strip().startswith('{') or content_str.strip().startswith('['):
+            try:
+                json_data = json.loads(content_str)
+                return parse_json_captions(json_data, clean)
+            except json.JSONDecodeError:
+                pass
+        
+        # Parse as XML
+        try:
+            root = ET.fromstring(xml_content)
+        except ET.ParseError:
+            # Try cleaning the XML first
+            content_str = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;)', '&amp;', content_str)
+            root = ET.fromstring(content_str.encode('utf-8'))
+        
         transcript_data = []
         
-        # Find all text elements
-        text_elements = root.findall('.//text')
+        # Find all text elements with various possible structures
+        text_elements = root.findall('.//text') + root.findall('.//p') + root.findall('.//caption')
         logger.info(f"📝 Found {len(text_elements)} text segments in XML")
         
         for text_elem in text_elements:
-            start_time = float(text_elem.get('start', '0'))
-            duration = float(text_elem.get('dur', '0'))
+            start_time = float(text_elem.get('start', text_elem.get('t', '0')))
+            duration = float(text_elem.get('dur', text_elem.get('d', '0')))
+            
+            # Get text content
             text_content = text_elem.text or ''
             
+            # Also check for nested text in child elements
+            for child in text_elem:
+                if child.text:
+                    text_content += ' ' + child.text
+                if child.tail:
+                    text_content += ' ' + child.tail
+            
             if text_content.strip():
-                # Decode HTML entities and clean up
-                from urllib.parse import unquote
-                text_content = unquote(text_content)
-                text_content = (text_content
-                               .replace('&amp;', '&')
-                               .replace('&lt;', '<')
-                               .replace('&gt;', '>')
-                               .replace('&quot;', '"')
-                               .replace('&#39;', "'"))
-                
-                # Remove HTML tags
-                text_content = re.sub(r'<[^>]+>', '', text_content)
-                text_content = text_content.strip()
+                # Clean up the text
+                text_content = html.unescape(text_content)
+                text_content = re.sub(r'<[^>]+>', '', text_content)  # Remove HTML tags
+                text_content = re.sub(r'\s+', ' ', text_content).strip()  # Normalize whitespace
                 
                 if text_content:
                     transcript_data.append({
@@ -822,7 +885,7 @@ def parse_caption_xml(xml_content: bytes, clean: bool) -> str:
         
         if not transcript_data:
             logger.warning("⚠️ XML parsed but no text segments found")
-            return generate_working_demo_transcript(clean)
+            raise HTTPException(status_code=404, detail="No transcript text found in caption file")
         
         logger.info(f"✅ Successfully extracted {len(transcript_data)} transcript segments")
         
@@ -832,13 +895,13 @@ def parse_caption_xml(xml_content: bytes, clean: bool) -> str:
             text_parts = []
             for item in transcript_data:
                 text = item['text'].strip()
-                # Remove music/sound effect markers
-                if not (text.startswith('[') and text.endswith(']')) and text:
+                # Filter out music/sound effect markers and empty content
+                if text and not (text.startswith('[') and text.endswith(']')) and len(text) > 1:
                     text_parts.append(text)
             
             result = ' '.join(text_parts)
             logger.info(f"✅ Clean transcript: {len(result)} characters")
-            return result
+            return result if result else "No readable transcript content found."
         else:
             # Unclean format - with timestamps
             formatted_parts = []
@@ -851,14 +914,66 @@ def parse_caption_xml(xml_content: bytes, clean: bool) -> str:
             
             result = '\n'.join(formatted_parts)
             logger.info(f"✅ Timestamped transcript: {len(formatted_parts)} lines")
-            return result
+            return result if result else "No timestamped transcript content found."
             
-    except ET.ParseError as e:
-        logger.warning(f"⚠️ XML parsing failed: {e}")
-        return generate_working_demo_transcript(clean)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Caption parsing failed: {e}")
-        return generate_working_demo_transcript(clean)
+        raise HTTPException(status_code=500, detail=f"Caption parsing error: {str(e)}")
+
+def parse_json_captions(json_data, clean: bool) -> str:
+    """
+    Parse JSON format captions (backup method)
+    """
+    try:
+        transcript_data = []
+        
+        # Handle different JSON structures
+        if isinstance(json_data, dict):
+            if 'events' in json_data:
+                events = json_data['events']
+            elif 'captions' in json_data:
+                events = json_data['captions']
+            else:
+                events = [json_data]
+        else:
+            events = json_data
+        
+        for event in events:
+            if isinstance(event, dict):
+                start_time = float(event.get('tStartMs', event.get('start', 0))) / 1000
+                text_content = ''
+                
+                if 'segs' in event:
+                    for seg in event['segs']:
+                        if isinstance(seg, dict) and 'utf8' in seg:
+                            text_content += seg['utf8']
+                elif 'text' in event:
+                    text_content = event['text']
+                
+                if text_content.strip():
+                    transcript_data.append({
+                        'text': text_content.strip(),
+                        'start': start_time
+                    })
+        
+        # Format the results
+        if clean:
+            return ' '.join([item['text'] for item in transcript_data])
+        else:
+            formatted = []
+            for item in transcript_data:
+                minutes = int(item['start'] // 60)
+                seconds = int(item['start'] % 60)
+                timestamp = f"[{minutes:02d}:{seconds:02d}]"
+                formatted.append(f"{timestamp} {item['text']}")
+            return '\n'.join(formatted)
+            
+    except Exception as e:
+        logger.error(f"JSON caption parsing failed: {e}")
+        return ""
+
 
 def generate_working_demo_transcript(clean: bool = True) -> str:
     """
@@ -966,58 +1081,6 @@ Try copying this text or downloading it as a file to test the complete functiona
             logger.info(f"🔄 Returning timestamped default demo: {len(result)} chars")
             return result
 
-# Add this debug endpoint to test specific video IDs
-@app.get("/debug_video/{video_id}")
-async def debug_specific_video(video_id: str, clean: bool = True):
-    """Debug endpoint to test specific video processing"""
-    try:
-        logger.info(f"🧪 Debug testing video ID: {video_id}")
-        
-        # Test each method individually
-        results = {
-            "video_id": video_id,
-            "clean": clean,
-            "methods": {}
-        }
-        
-        # Test demo method
-        try:
-            demo_result = get_demo_transcript_simple(video_id, clean)
-            results["methods"]["demo"] = {
-                "success": True,
-                "length": len(demo_result),
-                "preview": demo_result[:150] + "..." if len(demo_result) > 150 else demo_result
-            }
-        except Exception as e:
-            results["methods"]["demo"] = {"success": False, "error": str(e)}
-        
-        # Test alternative method
-        try:
-            alt_result = get_transcript_working_alternative(video_id, clean)
-            results["methods"]["alternative"] = {
-                "success": True,
-                "length": len(alt_result),
-                "preview": alt_result[:150] + "..." if len(alt_result) > 150 else alt_result
-            }
-        except Exception as e:
-            results["methods"]["alternative"] = {"success": False, "error": str(e)}
-        
-        # Test final method
-        try:
-            final_result = process_youtube_transcript_final(video_id, clean)
-            results["methods"]["final"] = {
-                "success": True,
-                "length": len(final_result),
-                "preview": final_result[:150] + "..." if len(final_result) > 150 else final_result
-            }
-        except Exception as e:
-            results["methods"]["final"] = {"success": False, "error": str(e)}
-        
-        return results
-        
-    except Exception as e:
-        return {"error": str(e), "video_id": video_id}
-
 #======================================================
 # Application Programming Interface (API) Endpoints
 #======================================================
@@ -1093,16 +1156,17 @@ async def login_for_access_token(
 async def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
 
-# Update your download endpoint to use the fallback method
-@app.post("/download_transcript/")
-async def download_transcript(
+# Update your download endpoint to use the enhanced method
+@app.post("/download_transcript_enhanced/")
+async def download_transcript_enhanced(
     request: TranscriptRequest,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    # [Previous validation code remains the same...]
+    """Enhanced download endpoint that tries to get real transcripts"""
     video_id = request.youtube_id.strip()
     
+    # Video ID extraction (keep your existing logic)
     if 'youtube.com' in video_id or 'youtu.be' in video_id:
         import re
         patterns = [
@@ -1121,18 +1185,18 @@ async def download_transcript(
     if not video_id or len(video_id) != 11:
         raise HTTPException(status_code=400, detail="Invalid video ID")
     
-    logger.info(f"📹 Processing transcript request for: {video_id}")
+    logger.info(f"📹 Enhanced processing transcript request for: {video_id}")
     
-    # Check subscription limits
+    # Check subscription limits (keep your existing logic)
     transcript_type = "clean_transcripts" if request.clean_transcript else "unclean_transcripts"
     can_download = check_subscription_limit(user.id, transcript_type, db)
     if not can_download:
         raise HTTPException(status_code=403, detail="Monthly limit reached")
     
-    # Use the fallback method
-    transcript_text = process_youtube_transcript_final(video_id, clean=request.clean_transcript)
+    # Use the enhanced method
+    transcript_text = process_youtube_transcript_final_enhanced(video_id, clean=request.clean_transcript)
     
-    # Record successful download
+    # Record successful download (keep your existing logic)
     new_download = TranscriptDownload(
         user_id=user.id,
         youtube_id=video_id,
@@ -1143,7 +1207,7 @@ async def download_transcript(
     try:
         db.add(new_download)
         db.commit()
-        logger.info(f"✅ Success: {user.username} downloaded {transcript_type} for {video_id}")
+        logger.info(f"✅ Enhanced success: {user.username} downloaded {transcript_type} for {video_id}")
     except Exception as e:
         db.rollback()
         logger.error(f"Database error: {str(e)}")
@@ -1151,8 +1215,60 @@ async def download_transcript(
     return {
         "transcript": transcript_text,
         "youtube_id": video_id,
-        "message": "Transcript downloaded successfully"
+        "message": "Enhanced transcript downloaded successfully"
     }
+
+# Add this debug endpoint to test specific video IDs
+@app.get("/debug_video/{video_id}")
+async def debug_specific_video(video_id: str, clean: bool = True):
+    """Debug endpoint to test specific video processing"""
+    try:
+        logger.info(f"🧪 Debug testing video ID: {video_id}")
+        
+        # Test each method individually
+        results = {
+            "video_id": video_id,
+            "clean": clean,
+            "methods": {}
+        }
+        
+        # Test demo method
+        try:
+            demo_result = get_demo_transcript_simple(video_id, clean)
+            results["methods"]["demo"] = {
+                "success": True,
+                "length": len(demo_result),
+                "preview": demo_result[:150] + "..." if len(demo_result) > 150 else demo_result
+            }
+        except Exception as e:
+            results["methods"]["demo"] = {"success": False, "error": str(e)}
+        
+        # Test alternative method
+        try:
+            alt_result = get_transcript_working_alternative(video_id, clean)
+            results["methods"]["alternative"] = {
+                "success": True,
+                "length": len(alt_result),
+                "preview": alt_result[:150] + "..." if len(alt_result) > 150 else alt_result
+            }
+        except Exception as e:
+            results["methods"]["alternative"] = {"success": False, "error": str(e)}
+        
+        # Test final method
+        try:
+            final_result = process_youtube_transcript_final(video_id, clean)
+            results["methods"]["final"] = {
+                "success": True,
+                "length": len(final_result),
+                "preview": final_result[:150] + "..." if len(final_result) > 150 else final_result
+            }
+        except Exception as e:
+            results["methods"]["final"] = {"success": False, "error": str(e)}
+        
+        return results
+        
+    except Exception as e:
+        return {"error": str(e), "video_id": video_id}
 
 # 🔧 UPDATED: Enhanced payment intent endpoint to match payment.py
 @app.post("/create_payment_intent/")
