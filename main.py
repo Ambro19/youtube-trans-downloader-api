@@ -366,68 +366,97 @@ def check_subscription_limit(user_id: int, transcript_type: str, db: Session):
 # TRANSCRIPT EXTRACTION - ONLY WORKING FUNCTIONS
 #================================================
 
-def get_transcript_simple_working(video_id: str, clean: bool = True) -> str:
+# Replace these functions in your main.py - Bypass SRTFormatter completely
+
+def get_transcript_manual_working(video_id: str, clean: bool = True) -> str:
     """
-    EXACT copy of your working class method adapted for FastAPI
+    Manual transcript extraction that bypasses SRTFormatter
+    Creates SRT and clean formats manually
     """
-    logger.info(f"🎯 Using your proven working approach for: {video_id}")
+    logger.info(f"🎯 Manual transcript extraction for: {video_id}")
     
     try:
-        # Step 1: Fetch transcript using your EXACT approach
-        logger.info("🚀 Fetching transcript using your working method...")
-        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+        # Step 1: Get transcript data directly from API
+        logger.info("🚀 Fetching transcript using direct API...")
+        transcript_data = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
         
-        if not transcript:
+        if not transcript_data:
             raise Exception("No transcript data returned")
         
-        logger.info(f"✅ Got transcript with {len(transcript)} segments")
-        
-        # Step 2: Format as SRT using your EXACT approach
-        logger.info("📝 Formatting with SRTFormatter...")
-        formatter = SRTFormatter()
-        srt_captions = formatter.format_transcript(transcript)
-        
-        if not srt_captions:
-            raise Exception("SRTFormatter returned empty content")
-        
-        logger.info(f"✅ SRT formatted: {len(srt_captions)} characters")
+        logger.info(f"✅ Got transcript with {len(transcript_data)} segments")
         
         if clean:
-            # Step 3: Clean the SRT using your EXACT regex approach
-            logger.info("🧹 Cleaning SRT metadata...")
-            cleaned_text = remove_srt_metadata_working(srt_captions)
-            logger.info(f"✅ Cleaned transcript: {len(cleaned_text)} characters")
-            return cleaned_text
+            # Clean format - extract text only
+            logger.info("🧹 Creating clean format manually...")
+            text_parts = []
+            for item in transcript_data:
+                text = item.get('text', '').strip()
+                if text and not (text.startswith('[') and text.endswith(']')):
+                    text_parts.append(text)
+            
+            result = ' '.join(text_parts)
+            logger.info(f"✅ Manual clean format: {len(result)} characters")
+            return result
+            
         else:
-            # Return unclean (SRT format with timestamps)
-            logger.info("✅ Returning unclean SRT format")
-            return srt_captions
+            # Unclean format - create SRT manually
+            logger.info("📝 Creating SRT format manually...")
+            srt_lines = []
+            
+            for i, item in enumerate(transcript_data, 1):
+                start_time = item.get('start', 0)
+                duration = item.get('duration', 3)  # Default 3 seconds if no duration
+                text = item.get('text', '').strip()
+                
+                if text:
+                    # Convert to SRT time format
+                    start_srt = seconds_to_srt_format(start_time)
+                    end_srt = seconds_to_srt_format(start_time + duration)
+                    
+                    # SRT format: sequence number, timestamps, text, blank line
+                    srt_lines.append(str(i))
+                    srt_lines.append(f"{start_srt} --> {end_srt}")
+                    srt_lines.append(text)
+                    srt_lines.append("")  # Blank line
+            
+            result = "\n".join(srt_lines)
+            logger.info(f"✅ Manual SRT format: {len(srt_lines)} lines")
+            return result
             
     except Exception as e:
-        logger.error(f"❌ Working method failed for {video_id}: {str(e)}")
+        logger.error(f"❌ Manual extraction failed for {video_id}: {str(e)}")
         raise Exception(f"Failed to get transcript: {str(e)}")
 
-def remove_srt_metadata_working(srt_content: str) -> str:
+
+def seconds_to_srt_format(seconds: float) -> str:
     """
-    EXACT copy of your working remove_srt_metadata function
+    Convert seconds to SRT timestamp format: HH:MM:SS,mmm
     """
-    lines = srt_content.split('\n')
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millisecs = int((seconds % 1) * 1000)
     
-    # Your EXACT regex pattern
-    pattern = re.compile(r"^\d+\s*$|^\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}$")
-    cleaned_lines = []
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millisecs:03d}"
+
+# def remove_srt_metadata_manual(srt_content: str) -> str:
+#     """
+#     Manual SRT cleaning - same logic as your working function
+#     """
+#     lines = srt_content.split('\n')
     
-    for line in lines:
-        if not pattern.match(line) and not line.strip().startswith("["):
-            cleaned_lines.append(line.strip())
+#     # Your exact regex pattern
+#     pattern = re.compile(r"^\d+\s*$|^\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}$")
+#     cleaned_lines = []
     
-    # Your EXACT joining approach
-    result = ""
-    for line in cleaned_lines:
-        if line:
-            result += line + " "
+#     for line in lines:
+#         line = line.strip()
+#         if line and not pattern.match(line) and not line.startswith("["):
+#             cleaned_lines.append(line)
     
-    return result.strip()
+#     # Join with spaces like your original
+#     return " ".join(cleaned_lines)
+
 
 #===============================================
 # API ENDPOINTS - Route handlers for HTTP requests
@@ -505,25 +534,26 @@ async def read_users_me(current_user: User = Depends(get_current_user)):
     """Get current authenticated user information"""
     return current_user
 
+# UPDATED DOWNLOAD ENDPOINT - Replace your existing one
 @app.post("/download_transcript/")
-async def download_transcript_working(
+async def download_transcript_manual(
     request: TranscriptRequest,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Working transcript download using your EXACT proven approach
+    Manual transcript download - bypasses SRTFormatter completely
     """
     video_id = request.youtube_id.strip()
     
-    # KEEP existing URL parsing logic
+    # Extract video ID from URLs (keep existing logic)
     if 'youtube.com' in video_id or 'youtu.be' in video_id:
         patterns = [
-            r'(?:youtube\.com\/shorts\/)([^&\n?#]+)',      # YouTube Shorts
-            r'(?:youtube\.com\/watch\?v=)([^&\n?#]+)',     # Regular YouTube
-            r'(?:youtu\.be\/)([^&\n?#]+)',                 # Short URLs
-            r'(?:youtube\.com\/embed\/)([^&\n?#]+)',       # Embed URLs
-            r'[?&]v=([^&\n?#]+)'                           # Any URL with v= parameter
+            r'(?:youtube\.com\/shorts\/)([^&\n?#]+)',
+            r'(?:youtube\.com\/watch\?v=)([^&\n?#]+)',
+            r'(?:youtu\.be\/)([^&\n?#]+)',
+            r'(?:youtube\.com\/embed\/)([^&\n?#]+)',
+            r'[?&]v=([^&\n?#]+)'
         ]
         
         for pattern in patterns:
@@ -537,17 +567,17 @@ async def download_transcript_working(
     if not video_id or len(video_id) != 11:
         raise HTTPException(status_code=400, detail="Invalid YouTube video ID")
     
-    logger.info(f"🎯 Working approach for: {video_id}")
+    logger.info(f"🎯 Manual extraction for: {video_id}")
     
-    # KEEP existing subscription limit check
+    # Check subscription limits
     transcript_type = "clean" if request.clean_transcript else "unclean"
     can_download = check_subscription_limit(user.id, transcript_type, db)
     if not can_download:
         raise HTTPException(status_code=403, detail="Monthly limit reached")
     
-    # Use your working approach
+    # Use manual extraction (no SRTFormatter)
     try:
-        transcript_text = get_transcript_simple_working(video_id, clean=request.clean_transcript)
+        transcript_text = get_transcript_manual_working(video_id, clean=request.clean_transcript)
         
         # Validate content
         if not transcript_text or len(transcript_text.strip()) < 10:
@@ -556,7 +586,7 @@ async def download_transcript_working(
                 detail=f"No meaningful transcript content found for video {video_id}"
             )
         
-        # KEEP existing database recording
+        # Record download in database
         new_download = TranscriptDownload(
             user_id=user.id,
             youtube_id=video_id,
@@ -567,19 +597,19 @@ async def download_transcript_working(
         db.add(new_download)
         db.commit()
         
-        logger.info(f"✅ SUCCESS using working method: {len(transcript_text)} chars for {video_id}")
+        logger.info(f"✅ MANUAL SUCCESS: {len(transcript_text)} chars for {video_id}")
         
         return {
             "transcript": transcript_text,
             "youtube_id": video_id,
-            "message": "Transcript downloaded successfully using working method"
+            "message": "Transcript downloaded successfully using manual method"
         }
         
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
-        logger.error(f"❌ Working method failed: {str(e)}")
+        logger.error(f"❌ Manual method failed: {str(e)}")
         raise HTTPException(
             status_code=404,
             detail=f"No transcript available for video {video_id}. This video may not have captions enabled."
