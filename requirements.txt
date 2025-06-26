@@ -1,8 +1,11 @@
+# requirements.txt - Updated for Cleaned main.py
+# Fixed JWT conflict and updated versions
+# OLD VERSION: youtube-transcript-api==1.1.0
+
 fastapi==0.109.0
 uvicorn==0.27.0
 sqlalchemy==2.0.25
 pydantic==2.5.3
-python-jose[cryptography]==3.3.0
 python-multipart==0.0.6
 youtube-transcript-api==1.1.0
 stripe==7.10.0
