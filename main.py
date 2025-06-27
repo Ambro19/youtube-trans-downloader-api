@@ -439,23 +439,23 @@ def seconds_to_srt_format(seconds: float) -> str:
     
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millisecs:03d}"
 
-# def remove_srt_metadata_manual(srt_content: str) -> str:
-#     """
-#     Manual SRT cleaning - same logic as your working function
-#     """
-#     lines = srt_content.split('\n')
+def remove_srt_metadata_manual(srt_content: str) -> str:
+    """
+    Manual SRT cleaning - same logic as your working function
+    """
+    lines = srt_content.split('\n')
     
-#     # Your exact regex pattern
-#     pattern = re.compile(r"^\d+\s*$|^\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}$")
-#     cleaned_lines = []
+    # Your exact regex pattern
+    pattern = re.compile(r"^\d+\s*$|^\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}$")
+    cleaned_lines = []
     
-#     for line in lines:
-#         line = line.strip()
-#         if line and not pattern.match(line) and not line.startswith("["):
-#             cleaned_lines.append(line)
+    for line in lines:
+        line = line.strip()
+        if line and not pattern.match(line) and not line.startswith("["):
+            cleaned_lines.append(line)
     
-#     # Join with spaces like your original
-#     return " ".join(cleaned_lines)
+    # Join with spaces like your original
+    return " ".join(cleaned_lines)
 
 
 #===============================================
