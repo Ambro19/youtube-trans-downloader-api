@@ -1,8 +1,8 @@
-===============
-MAIN.PY
-======
+# ======
+#MAIN.PY
+#======
 
-This is my actual main.py file with "completed all the required modifications including Testing the Debug Endpoint functions" from backend folder.
+# This is my actual main.py file with "completed all the required modifications including Testing the Debug Endpoint functions" for the backend folder.
 
 # main.py - Enhanced with Complete Stripe Payment Integration
 # main.py - Completed all the required modifications including Testing the Debug Endpoints 
@@ -1474,6 +1474,7 @@ async def test_transcript(video_id: str):
             "error": str(e),
             "error_type": type(e).__name__
         }
+
 #Visit: http://localhost:8000/library_info - should show version 1.1.0
 @app.get("/library_info")
 async def library_info():
