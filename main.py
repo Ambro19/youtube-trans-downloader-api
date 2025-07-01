@@ -334,17 +334,38 @@ def format_transcript_simple(transcript_list: list, clean: bool = True) -> str:
 
 def get_youtube_transcript_corrected(video_id: str, clean: bool = True) -> str:
     """
-    CORRECTED YouTube transcript extraction using the proper API methods
+    CORRECTED YouTube transcript extraction with anti-blocking measures
     """
     logger.info(f"🎯 CORRECTED transcript extraction for: {video_id}")
     
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
+        import requests
         
-        # Method 1: Direct get_transcript (most common)
+        # Add custom headers to bypass YouTube blocking
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        })
+        
+        # Method 1: Direct get_transcript with custom session
         try:
-            logger.info("🔄 Trying direct get_transcript...")
+            logger.info("🔄 Trying direct get_transcript with browser headers...")
+            # Monkey patch the session into the API
+            import youtube_transcript_api._transcripts as transcripts
+            original_get = transcripts.requests.get
+            transcripts.requests.get = session.get
+            
             transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+            
+            # Restore original
+            transcripts.requests.get = original_get
             
             if transcript_list and len(transcript_list) > 0:
                 logger.info(f"✅ DIRECT API SUCCESS: {len(transcript_list)} segments")
@@ -353,19 +374,20 @@ def get_youtube_transcript_corrected(video_id: str, clean: bool = True) -> str:
         except Exception as e:
             logger.info(f"📝 Direct API failed: {str(e)}")
         
-        # Method 2: List transcripts and find English (more robust)
+        # Method 2: List transcripts approach
         try:
             logger.info("🔄 Trying list_transcripts method...")
             transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
             
-            # Try to find English transcript (manual or auto-generated)
+            # Try to find English transcript
             try:
                 logger.info("🔍 Looking for English transcript...")
                 transcript = transcript_list.find_transcript(['en'])
                 transcript_data = transcript.fetch()
                 logger.info(f"✅ LIST API SUCCESS: {len(transcript_data)} segments")
                 return format_transcript_simple(transcript_data, clean)
-            except:
+            except Exception as inner_e:
+                logger.info(f"📝 English transcript failed: {str(inner_e)}")
                 # Try any available transcript
                 logger.info("🔍 Looking for any available transcript...")
                 for transcript in transcript_list:
@@ -379,28 +401,19 @@ def get_youtube_transcript_corrected(video_id: str, clean: bool = True) -> str:
         except Exception as e:
             logger.info(f"📝 List API failed: {str(e)}")
         
-        # Method 3: Try with different languages explicitly
+        # Method 3: Try with a delay (sometimes helps with rate limiting)
         try:
-            logger.info("🔄 Trying multiple languages...")
-            languages = ['en', 'en-US', 'en-GB', 'auto']
-            for lang in languages:
-                try:
-                    logger.info(f"🔍 Trying language: {lang}")
-                    if lang == 'auto':
-                        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-                    else:
-                        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[lang])
-                    
-                    if transcript_list and len(transcript_list) > 0:
-                        logger.info(f"✅ LANGUAGE API SUCCESS: {len(transcript_list)} segments ({lang})")
-                        return format_transcript_simple(transcript_list, clean)
-                        
-                except Exception as lang_error:
-                    logger.info(f"📝 Language {lang} failed: {str(lang_error)}")
-                    continue
-                    
+            import time
+            logger.info("🔄 Trying with delay...")
+            time.sleep(2)  # 2 second delay
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+            
+            if transcript_list and len(transcript_list) > 0:
+                logger.info(f"✅ DELAYED API SUCCESS: {len(transcript_list)} segments")
+                return format_transcript_simple(transcript_list, clean)
+                
         except Exception as e:
-            logger.info(f"📝 Language API failed: {str(e)}")
+            logger.info(f"📝 Delayed API failed: {str(e)}")
         
         # Method 4: Demo content (still works for testing)
         logger.info("🎭 Using demo content for testing")
@@ -787,7 +800,6 @@ async def get_test_videos():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
-
 
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #=========================================================================================================
