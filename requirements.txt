@@ -15,6 +15,9 @@ pydantic==2.5.3
 # YouTube transcript extraction (LATEST VERSION)
 youtube-transcript-api==1.1.0
 
+# YouTube downloader (more robust against blocking)
+yt-dlp==2024.12.6
+
 # Payment processing
 stripe==7.10.0
 

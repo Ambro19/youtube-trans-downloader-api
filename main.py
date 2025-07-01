@@ -334,47 +334,85 @@ def format_transcript_simple(transcript_list: list, clean: bool = True) -> str:
 
 def get_youtube_transcript_corrected(video_id: str, clean: bool = True) -> str:
     """
-    CORRECTED YouTube transcript extraction with anti-blocking measures
+    CORRECTED YouTube transcript extraction with yt-dlp fallback
     """
     logger.info(f"🎯 CORRECTED transcript extraction for: {video_id}")
     
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
-        import requests
         
-        # Add custom headers to bypass YouTube blocking
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
-        })
-        
-        # Method 1: Direct get_transcript with custom session
+        # Method 1: Try youtube-transcript-api first
         try:
-            logger.info("🔄 Trying direct get_transcript with browser headers...")
-            # Monkey patch the session into the API
-            import youtube_transcript_api._transcripts as transcripts
-            original_get = transcripts.requests.get
-            transcripts.requests.get = session.get
-            
+            logger.info("🔄 Trying youtube-transcript-api...")
             transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
             
-            # Restore original
-            transcripts.requests.get = original_get
-            
             if transcript_list and len(transcript_list) > 0:
-                logger.info(f"✅ DIRECT API SUCCESS: {len(transcript_list)} segments")
+                logger.info(f"✅ YOUTUBE-TRANSCRIPT-API SUCCESS: {len(transcript_list)} segments")
                 return format_transcript_simple(transcript_list, clean)
                 
         except Exception as e:
-            logger.info(f"📝 Direct API failed: {str(e)}")
+            logger.info(f"📝 youtube-transcript-api failed: {str(e)}")
         
-        # Method 2: List transcripts approach
+        # Method 2: Try yt-dlp (more robust against blocking)
+        try:
+            logger.info("🔄 Trying yt-dlp method...")
+            import yt_dlp
+            import tempfile
+            import json
+            
+            ydl_opts = {
+                'writesubtitles': True,
+                'writeautomaticsub': True,
+                'subtitleslangs': ['en', 'en-US', 'en-GB'],
+                'skip_download': True,
+                'quiet': True,
+                'no_warnings': True,
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                url = f"https://www.youtube.com/watch?v={video_id}"
+                info = ydl.extract_info(url, download=False)
+                
+                # Try to get subtitles from the info
+                if 'subtitles' in info and info['subtitles']:
+                    # Look for English subtitles
+                    for lang in ['en', 'en-US', 'en-GB']:
+                        if lang in info['subtitles']:
+                            subtitle_entries = info['subtitles'][lang]
+                            for entry in subtitle_entries:
+                                if entry.get('ext') == 'vtt' or entry.get('ext') == 'srv3':
+                                    # Download and parse the subtitle file
+                                    subtitle_url = entry['url']
+                                    subtitle_content = ydl.urlopen(subtitle_url).read().decode('utf-8')
+                                    
+                                    # Parse VTT or SRV3 content
+                                    transcript_data = parse_subtitle_content(subtitle_content, entry.get('ext', 'vtt'))
+                                    
+                                    if transcript_data:
+                                        logger.info(f"✅ YT-DLP SUCCESS: {len(transcript_data)} segments")
+                                        return format_transcript_simple(transcript_data, clean)
+                
+                # Try automatic subtitles if manual ones don't exist
+                if 'automatic_captions' in info and info['automatic_captions']:
+                    for lang in ['en', 'en-US', 'en-GB']:
+                        if lang in info['automatic_captions']:
+                            subtitle_entries = info['automatic_captions'][lang]
+                            for entry in subtitle_entries:
+                                if entry.get('ext') == 'vtt' or entry.get('ext') == 'srv3':
+                                    subtitle_url = entry['url']
+                                    subtitle_content = ydl.urlopen(subtitle_url).read().decode('utf-8')
+                                    transcript_data = parse_subtitle_content(subtitle_content, entry.get('ext', 'vtt'))
+                                    
+                                    if transcript_data:
+                                        logger.info(f"✅ YT-DLP AUTO SUCCESS: {len(transcript_data)} segments")
+                                        return format_transcript_simple(transcript_data, clean)
+                
+        except ImportError:
+            logger.info("📝 yt-dlp not installed, skipping...")
+        except Exception as e:
+            logger.info(f"📝 yt-dlp failed: {str(e)}")
+        
+        # Method 3: List transcripts approach (last try with original API)
         try:
             logger.info("🔄 Trying list_transcripts method...")
             transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
@@ -388,32 +426,9 @@ def get_youtube_transcript_corrected(video_id: str, clean: bool = True) -> str:
                 return format_transcript_simple(transcript_data, clean)
             except Exception as inner_e:
                 logger.info(f"📝 English transcript failed: {str(inner_e)}")
-                # Try any available transcript
-                logger.info("🔍 Looking for any available transcript...")
-                for transcript in transcript_list:
-                    try:
-                        transcript_data = transcript.fetch()
-                        logger.info(f"✅ FALLBACK API SUCCESS: {len(transcript_data)} segments ({transcript.language_code})")
-                        return format_transcript_simple(transcript_data, clean)
-                    except:
-                        continue
-                        
-        except Exception as e:
-            logger.info(f"📝 List API failed: {str(e)}")
-        
-        # Method 3: Try with a delay (sometimes helps with rate limiting)
-        try:
-            import time
-            logger.info("🔄 Trying with delay...")
-            time.sleep(2)  # 2 second delay
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-            
-            if transcript_list and len(transcript_list) > 0:
-                logger.info(f"✅ DELAYED API SUCCESS: {len(transcript_list)} segments")
-                return format_transcript_simple(transcript_list, clean)
                 
         except Exception as e:
-            logger.info(f"📝 Delayed API failed: {str(e)}")
+            logger.info(f"📝 List API failed: {str(e)}")
         
         # Method 4: Demo content (still works for testing)
         logger.info("🎭 Using demo content for testing")
@@ -443,6 +458,63 @@ def get_youtube_transcript_corrected(video_id: str, clean: bool = True) -> str:
             status_code=404,
             detail=f"Unable to extract transcript for video {video_id}. The video may not have captions enabled or may be private/unavailable."
         )
+
+def parse_subtitle_content(content: str, format_type: str) -> list:
+    """Parse VTT or SRV3 subtitle content into transcript format"""
+    transcript_data = []
+    
+    if format_type == 'vtt':
+        # Parse WebVTT format
+        lines = content.split('\n')
+        current_start = 0
+        current_text = ""
+        
+        for line in lines:
+            line = line.strip()
+            if '-->' in line:
+                # Timestamp line
+                try:
+                    start_time = line.split(' --> ')[0]
+                    # Convert timestamp to seconds
+                    time_parts = start_time.split(':')
+                    if len(time_parts) == 3:
+                        hours, minutes, seconds = time_parts
+                        current_start = int(hours) * 3600 + int(minutes) * 60 + float(seconds.replace(',', '.'))
+                except:
+                    current_start = 0
+            elif line and not line.startswith('WEBVTT') and not line.isdigit():
+                # Text line
+                clean_text = line.replace('<c>', '').replace('</c>', '').replace('<i>', '').replace('</i>', '')
+                if clean_text:
+                    transcript_data.append({
+                        'text': clean_text,
+                        'start': current_start,
+                        'duration': 3.0  # Default duration
+                    })
+    
+    elif format_type == 'srv3':
+        # Parse SRV3/JSON format
+        try:
+            import json
+            data = json.loads(content)
+            if 'events' in data:
+                for event in data['events']:
+                    if 'segs' in event:
+                        text_segments = []
+                        for seg in event['segs']:
+                            if 'utf8' in seg:
+                                text_segments.append(seg['utf8'])
+                        
+                        if text_segments:
+                            transcript_data.append({
+                                'text': ''.join(text_segments),
+                                'start': event.get('tStartMs', 0) / 1000.0,
+                                'duration': event.get('dDurationMs', 3000) / 1000.0
+                            })
+        except:
+            pass
+    
+    return transcript_data
 
 #===============
 # API ENDPOINTS
