@@ -297,10 +297,42 @@ def check_subscription_limit(user_id: int, transcript_type: str, db: Session):
     return True
 
 #=====================================
-# SIMPLE TRANSCRIPT FUNCTIONS
+# CORRECTED TRANSCRIPT FUNCTIONS
 #=====================================
 
-def get_youtube_transcript_simple(video_id: str, clean: bool = True) -> str:
+def format_transcript_simple(transcript_list: list, clean: bool = True) -> str:
+    """Format transcript data from YouTube API"""
+    if not transcript_list:
+        raise Exception("Empty transcript data")
+    
+    if clean:
+        # Clean format - just text
+        texts = []
+        for item in transcript_list:
+            text = item.get('text', '').strip()
+            if text:
+                texts.append(text)
+        
+        result = ' '.join(texts)
+        logger.info(f"✅ Clean transcript formatted: {len(result)} characters")
+        return result
+    else:
+        # Timestamped format
+        lines = []
+        for item in transcript_list:
+            start = item.get('start', 0)
+            text = item.get('text', '').strip()
+            if text:
+                minutes = int(start // 60)
+                seconds = int(start % 60)
+                timestamp = f"[{minutes:02d}:{seconds:02d}]"
+                lines.append(f"{timestamp} {text}")
+        
+        result = '\n'.join(lines)
+        logger.info(f"✅ Timestamped transcript formatted: {len(lines)} lines")
+        return result
+
+def get_youtube_transcript_corrected(video_id: str, clean: bool = True) -> str:
     """
     CORRECTED YouTube transcript extraction using the proper API methods
     """
@@ -398,38 +430,6 @@ def get_youtube_transcript_simple(video_id: str, clean: bool = True) -> str:
             status_code=404,
             detail=f"Unable to extract transcript for video {video_id}. The video may not have captions enabled or may be private/unavailable."
         )
-
-def format_transcript_simple(transcript_list: list, clean: bool = True) -> str:
-    """Format transcript data from YouTube API"""
-    if not transcript_list:
-        raise Exception("Empty transcript data")
-    
-    if clean:
-        # Clean format - just text
-        texts = []
-        for item in transcript_list:
-            text = item.get('text', '').strip()
-            if text:
-                texts.append(text)
-        
-        result = ' '.join(texts)
-        logger.info(f"✅ Clean transcript formatted: {len(result)} characters")
-        return result
-    else:
-        # Timestamped format
-        lines = []
-        for item in transcript_list:
-            start = item.get('start', 0)
-            text = item.get('text', '').strip()
-            if text:
-                minutes = int(start // 60)
-                seconds = int(start % 60)
-                timestamp = f"[{minutes:02d}:{seconds:02d}]"
-                lines.append(f"{timestamp} {text}")
-        
-        result = '\n'.join(lines)
-        logger.info(f"✅ Timestamped transcript formatted: {len(lines)} lines")
-        return result
 
 #===============
 # API ENDPOINTS
@@ -538,9 +538,9 @@ async def download_transcript_corrected(
             detail=f"You've reached your monthly limit for {transcript_type} transcripts. Please upgrade your plan."
         )
     
-    # Extract transcript using simple method
+    # Extract transcript using corrected method
     try:
-        transcript_text = get_youtube_transcript_simple(video_id, clean=request.clean_transcript)
+        transcript_text = get_youtube_transcript_corrected(video_id, clean=request.clean_transcript)
         
         # Validate content
         if not transcript_text or len(transcript_text.strip()) < 10:
@@ -787,6 +787,7 @@ async def get_test_videos():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+
 
 #+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #=========================================================================================================
