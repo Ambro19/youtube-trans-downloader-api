@@ -244,33 +244,83 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         raise credentials_exception
     return user
 
+# def get_or_create_stripe_customer(user, db: Session):
+#     """Get or create a Stripe customer for the user"""
+#     try:
+#         if hasattr(user, 'stripe_customer_id') and user.stripe_customer_id:
+#             try:
+#                 customer = stripe.Customer.retrieve(user.stripe_customer_id)
+#                 return customer
+#             except stripe.error.InvalidRequestError:
+#                 pass
+        
+#         customer = stripe.Customer.create(
+#             email=user.email,
+#             name=user.username,
+#             metadata={'user_id': str(user.id)}
+#         )
+        
+#         if hasattr(user, 'stripe_customer_id'):
+#             user.stripe_customer_id = customer.id
+#             db.commit()
+        
+#         return customer
+        
+#     except Exception as e:
+#         logger.error(f"Error creating Stripe customer: {str(e)}")
+#         raise HTTPException(
+#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+#             detail="Failed to create payment customer"
+#       
+#====================================================================
+# Enhanced Stripe integration functions for main.py
+# Add these enhanced functions to replace the existing ones
+
 def get_or_create_stripe_customer(user, db: Session):
-    """Get or create a Stripe customer for the user"""
+    """
+    Enhanced Stripe customer creation with better tracking
+    This ensures customers appear in your Stripe dashboard automatically
+    """
     try:
+        # Check if user already has a Stripe customer ID
         if hasattr(user, 'stripe_customer_id') and user.stripe_customer_id:
             try:
+                # Verify the customer still exists in Stripe
                 customer = stripe.Customer.retrieve(user.stripe_customer_id)
+                logger.info(f"✅ Found existing Stripe customer: {customer.id} for user {user.username}")
                 return customer
             except stripe.error.InvalidRequestError:
+                logger.info(f"📝 Stripe customer {user.stripe_customer_id} not found, creating new one")
                 pass
         
+        # Create new Stripe customer
+        logger.info(f"🔄 Creating new Stripe customer for user: {user.username}")
         customer = stripe.Customer.create(
             email=user.email,
             name=user.username,
-            metadata={'user_id': str(user.id)}
+            description=f"YouTube Transcript Downloader user: {user.username}",
+            metadata={
+                'user_id': str(user.id),
+                'username': user.username,
+                'signup_date': user.created_at.isoformat() if user.created_at else None,
+                'app_name': 'YouTube Transcript Downloader'
+            }
         )
         
+        # Save the Stripe customer ID to our database
         if hasattr(user, 'stripe_customer_id'):
             user.stripe_customer_id = customer.id
             db.commit()
+            db.refresh(user)
+            logger.info(f"✅ Stripe customer created and saved: {customer.id}")
         
         return customer
         
     except Exception as e:
-        logger.error(f"Error creating Stripe customer: {str(e)}")
+        logger.error(f"❌ Error creating Stripe customer for user {user.username}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create payment customer"
+            detail="Failed to create payment customer. Please try again."
         )
 
 def check_subscription_limit(user_id: int, transcript_type: str, db: Session):
@@ -1149,6 +1199,70 @@ async def download_transcript_corrected(
             detail=f"Failed to extract transcript for video {video_id}. Error: {str(e)}"
         )
 
+# @app.get("/subscription_status/")
+# async def get_subscription_status_enhanced(
+#     current_user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db)
+# ):
+#     """Enhanced subscription status with detailed usage information"""
+#     try:
+#         subscription = db.query(Subscription).filter(
+#             Subscription.user_id == current_user.id
+#         ).first()
+        
+#         # Determine current subscription tier
+#         if not subscription or subscription.expiry_date < datetime.now():
+#             tier = "free"
+#             status = "inactive"
+#         else:
+#             tier = subscription.tier
+#             status = "active"
+        
+#         # Calculate usage for current month
+#         month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        
+#         clean_usage = db.query(TranscriptDownload).filter(
+#             TranscriptDownload.user_id == current_user.id,
+#             TranscriptDownload.transcript_type == "clean",
+#             TranscriptDownload.created_at >= month_start
+#         ).count()
+        
+#         unclean_usage = db.query(TranscriptDownload).filter(
+#             TranscriptDownload.user_id == current_user.id,
+#             TranscriptDownload.transcript_type == "unclean",
+#             TranscriptDownload.created_at >= month_start
+#         ).count()
+        
+#         # Get limits based on current tier
+#         limits = SUBSCRIPTION_LIMITS[tier]
+        
+#         # Convert infinity to string for JSON serialization
+#         json_limits = {}
+#         for key, value in limits.items():
+#             if value == float('inf'):
+#                 json_limits[key] = 'unlimited'
+#             else:
+#                 json_limits[key] = value
+        
+#         return {
+#             "tier": tier,
+#             "status": status,
+#             "usage": {
+#                 "clean_transcripts": clean_usage,
+#                 "unclean_transcripts": unclean_usage,
+#             },
+#             "limits": json_limits,
+#             "subscription_id": subscription.payment_id if subscription else None,
+#             "current_period_end": subscription.expiry_date.isoformat() if subscription and subscription.expiry_date else None
+#         }
+        
+#     except Exception as e:
+#         logger.error(f"Error getting subscription status: {str(e)}")
+#         raise HTTPException(status_code=500, detail="Failed to get subscription status")
+
+#==========================================================================
+
+# 🔧 ADDED: Enhanced subscription status endpoint
 @app.get("/subscription_status/")
 async def get_subscription_status_enhanced(
     current_user: User = Depends(get_current_user),
@@ -1171,6 +1285,7 @@ async def get_subscription_status_enhanced(
         # Calculate usage for current month
         month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         
+        # Get detailed usage statistics
         clean_usage = db.query(TranscriptDownload).filter(
             TranscriptDownload.user_id == current_user.id,
             TranscriptDownload.transcript_type == "clean",
@@ -1179,7 +1294,19 @@ async def get_subscription_status_enhanced(
         
         unclean_usage = db.query(TranscriptDownload).filter(
             TranscriptDownload.user_id == current_user.id,
-            TranscriptDownload.transcript_type == "unclean",
+            TranscriptDownload.transcript_type == "unclean", 
+            TranscriptDownload.created_at >= month_start
+        ).count()
+        
+        audio_usage = db.query(TranscriptDownload).filter(
+            TranscriptDownload.user_id == current_user.id,
+            TranscriptDownload.transcript_type == "audio",
+            TranscriptDownload.created_at >= month_start
+        ).count()
+        
+        video_usage = db.query(TranscriptDownload).filter(
+            TranscriptDownload.user_id == current_user.id,
+            TranscriptDownload.transcript_type == "video",
             TranscriptDownload.created_at >= month_start
         ).count()
         
@@ -1200,14 +1327,17 @@ async def get_subscription_status_enhanced(
             "usage": {
                 "clean_transcripts": clean_usage,
                 "unclean_transcripts": unclean_usage,
+                "audio_downloads": audio_usage,
+                "video_downloads": video_usage,
             },
             "limits": json_limits,
             "subscription_id": subscription.payment_id if subscription else None,
+            "stripe_customer_id": getattr(current_user, 'stripe_customer_id', None),
             "current_period_end": subscription.expiry_date.isoformat() if subscription and subscription.expiry_date else None
         }
         
     except Exception as e:
-        logger.error(f"Error getting subscription status: {str(e)}")
+        logger.error(f"❌ Error getting subscription status: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get subscription status")
 
 #=============================================================
@@ -1220,41 +1350,147 @@ async def create_payment_intent_endpoint(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Create payment intent for subscription upgrade"""
+    """Enhanced payment intent creation with better customer tracking"""
     try:
+        # Validate price ID
         valid_price_ids = [os.getenv("PRO_PRICE_ID"), os.getenv("PREMIUM_PRICE_ID")]
         
         if request.price_id not in valid_price_ids:
             raise HTTPException(status_code=400, detail=f"Invalid price ID: {request.price_id}")
 
+        # Get price details from Stripe
         price = stripe.Price.retrieve(request.price_id)
         plan_type = 'pro' if request.price_id == os.getenv("PRO_PRICE_ID") else 'premium'
+        
+        # Create or get Stripe customer (this makes them appear in your dashboard)
         customer = get_or_create_stripe_customer(current_user, db)
         
+        # Create payment intent
         intent = stripe.PaymentIntent.create(
             amount=price.unit_amount,
             currency=price.currency,
-            customer=customer.id,
+            customer=customer.id,  # This links the payment to the customer
             automatic_payment_methods={'enabled': True, 'allow_redirects': 'never'},
+            description=f"YouTube Transcript Downloader - {plan_type.title()} Plan",
             metadata={
                 'user_id': str(current_user.id),
                 'user_email': current_user.email,
+                'username': current_user.username,
                 'price_id': request.price_id,
-                'plan_type': plan_type
-            }
+                'plan_type': plan_type,
+                'app_name': 'YouTube Transcript Downloader'
+            },
+            receipt_email=current_user.email  # Send receipt to user
         )
+
+        logger.info(f"💳 Payment intent created: {intent.id} for user {current_user.username}")
 
         return {
             'client_secret': intent.client_secret,
             'payment_intent_id': intent.id,
             'amount': price.unit_amount,
             'currency': price.currency,
-            'plan_type': plan_type
+            'plan_type': plan_type,
+            'customer_id': customer.id  # Return customer ID for reference
         }
 
     except Exception as e:
-        logger.error(f"Payment intent creation error: {str(e)}")
+        logger.error(f"❌ Payment intent creation error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to create payment intent: {str(e)}")
+
+#===========================================================
+# @app.post("/create_payment_intent/")
+# async def create_payment_intent_endpoint(
+#     request: CreatePaymentIntentRequest,
+#     current_user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db)
+# ):
+#     """Create payment intent for subscription upgrade"""
+#     try:
+#         valid_price_ids = [os.getenv("PRO_PRICE_ID"), os.getenv("PREMIUM_PRICE_ID")]
+        
+#         if request.price_id not in valid_price_ids:
+#             raise HTTPException(status_code=400, detail=f"Invalid price ID: {request.price_id}")
+
+#         price = stripe.Price.retrieve(request.price_id)
+#         plan_type = 'pro' if request.price_id == os.getenv("PRO_PRICE_ID") else 'premium'
+#         customer = get_or_create_stripe_customer(current_user, db)
+        
+#         intent = stripe.PaymentIntent.create(
+#             amount=price.unit_amount,
+#             currency=price.currency,
+#             customer=customer.id,
+#             automatic_payment_methods={'enabled': True, 'allow_redirects': 'never'},
+#             metadata={
+#                 'user_id': str(current_user.id),
+#                 'user_email': current_user.email,
+#                 'price_id': request.price_id,
+#                 'plan_type': plan_type
+#             }
+#         )
+
+#         return {
+#             'client_secret': intent.client_secret,
+#             'payment_intent_id': intent.id,
+#             'amount': price.unit_amount,
+#             'currency': price.currency,
+#             'plan_type': plan_type
+#         }
+
+#     except Exception as e:
+#         logger.error(f"Payment intent creation error: {str(e)}")
+#         raise HTTPException(status_code=500, detail=f"Failed to create payment intent: {str(e)}")
+
+# @app.post("/confirm_payment/")
+# async def confirm_payment_endpoint(
+#     request: ConfirmPaymentRequest,
+#     current_user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db)
+# ):
+#     """Confirm payment and update subscription status"""
+#     try:
+#         intent = stripe.PaymentIntent.retrieve(request.payment_intent_id)
+        
+#         if intent.status != 'succeeded':
+#             raise HTTPException(status_code=400, detail=f"Payment not completed. Status: {intent.status}")
+
+#         user_subscription = db.query(Subscription).filter(
+#             Subscription.user_id == current_user.id
+#         ).first()
+
+#         plan_type = intent.metadata.get('plan_type', 'pro')
+
+#         if not user_subscription:
+#             user_subscription = Subscription(
+#                 user_id=current_user.id,
+#                 tier=plan_type,
+#                 start_date=datetime.utcnow(),
+#                 expiry_date=datetime.utcnow() + timedelta(days=30),
+#                 payment_id=request.payment_intent_id,
+#                 auto_renew=True
+#             )
+#             db.add(user_subscription)
+#         else:
+#             user_subscription.tier = plan_type
+#             user_subscription.start_date = datetime.utcnow()
+#             user_subscription.expiry_date = datetime.utcnow() + timedelta(days=30)
+#             user_subscription.payment_id = request.payment_intent_id
+#             user_subscription.auto_renew = True
+
+#         db.commit()
+#         db.refresh(user_subscription)
+
+#         return {
+#             'success': True,
+#             'subscription_tier': user_subscription.tier,
+#             'expires_at': user_subscription.expiry_date.isoformat(),
+#             'status': 'active'
+#         }
+
+#     except Exception as e:
+#         logger.error(f"Payment confirmation error: {str(e)}")
+#         raise HTTPException(status_code=500, detail=f"Failed to confirm payment: {str(e)}")
+#========================================
 
 @app.post("/confirm_payment/")
 async def confirm_payment_endpoint(
@@ -1262,18 +1498,22 @@ async def confirm_payment_endpoint(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Confirm payment and update subscription status"""
+    """Enhanced payment confirmation with complete Stripe integration"""
     try:
+        # Retrieve payment intent from Stripe
         intent = stripe.PaymentIntent.retrieve(request.payment_intent_id)
         
         if intent.status != 'succeeded':
             raise HTTPException(status_code=400, detail=f"Payment not completed. Status: {intent.status}")
 
+        # Get plan details
+        plan_type = intent.metadata.get('plan_type', 'pro')
+        price_id = intent.metadata.get('price_id')
+        
+        # Create or update subscription record
         user_subscription = db.query(Subscription).filter(
             Subscription.user_id == current_user.id
         ).first()
-
-        plan_type = intent.metadata.get('plan_type', 'pro')
 
         if not user_subscription:
             user_subscription = Subscription(
@@ -1282,7 +1522,11 @@ async def confirm_payment_endpoint(
                 start_date=datetime.utcnow(),
                 expiry_date=datetime.utcnow() + timedelta(days=30),
                 payment_id=request.payment_intent_id,
-                auto_renew=True
+                auto_renew=True,
+                stripe_price_id=price_id,
+                status='active',
+                current_period_start=datetime.utcnow(),
+                current_period_end=datetime.utcnow() + timedelta(days=30)
             )
             db.add(user_subscription)
         else:
@@ -1291,19 +1535,45 @@ async def confirm_payment_endpoint(
             user_subscription.expiry_date = datetime.utcnow() + timedelta(days=30)
             user_subscription.payment_id = request.payment_intent_id
             user_subscription.auto_renew = True
+            user_subscription.stripe_price_id = price_id
+            user_subscription.status = 'active'
+            user_subscription.current_period_start = datetime.utcnow()
+            user_subscription.current_period_end = datetime.utcnow() + timedelta(days=30)
+
+        # Record payment history
+        payment_record = PaymentHistory(
+            user_id=current_user.id,
+            stripe_payment_intent_id=request.payment_intent_id,
+            stripe_customer_id=intent.customer,
+            amount=intent.amount,
+            currency=intent.currency,
+            status='succeeded',
+            subscription_tier=plan_type,
+            created_at=datetime.utcnow(),
+            metadata=str(intent.metadata)
+        )
+        db.add(payment_record)
+
+        # Update user's Stripe customer ID if not already set
+        if hasattr(current_user, 'stripe_customer_id') and not current_user.stripe_customer_id:
+            current_user.stripe_customer_id = intent.customer
 
         db.commit()
         db.refresh(user_subscription)
+
+        logger.info(f"🎉 Payment confirmed: User {current_user.username} upgraded to {plan_type}")
 
         return {
             'success': True,
             'subscription_tier': user_subscription.tier,
             'expires_at': user_subscription.expiry_date.isoformat(),
-            'status': 'active'
+            'status': 'active',
+            'payment_id': request.payment_intent_id,
+            'customer_id': intent.customer
         }
 
     except Exception as e:
-        logger.error(f"Payment confirmation error: {str(e)}")
+        logger.error(f"❌ Payment confirmation error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to confirm payment: {str(e)}")
 
 #========================
