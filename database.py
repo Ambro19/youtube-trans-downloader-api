@@ -1,11 +1,9 @@
 #=========================================== NEW VERSION OF database.py ================================
+# Fixed database.py - Corrected imports and structure
 
-# Enhanced database.py - Add this to your User model
-
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import create_database, text
 import os
 from dotenv import load_dotenv
 
@@ -81,16 +79,14 @@ class PaymentHistory(Base):
     status = Column(String(20), nullable=False)  # succeeded, failed, pending
     subscription_tier = Column(String(20), nullable=False)
     created_at = Column(DateTime, nullable=False)
-    metadata = Column(Text, nullable=True)  # JSON string for additional data
+    payment_metadata = Column(Text, nullable=True)  # JSON string for additional data
 
-# Database setup functions remain the same
+# Database setup functions
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./youtube_transcript.db")
 
 if DATABASE_URL.startswith("sqlite"):
-    from sqlalchemy import create_engine
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 else:
-    from sqlalchemy import create_engine
     engine = create_engine(DATABASE_URL)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
