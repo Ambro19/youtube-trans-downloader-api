@@ -27,7 +27,7 @@ def check_bcrypt():
 
 def check_users_in_db():
     """Check what users exist in the database"""
-    db_path = "instance/youtube_trans_downloader.db"
+    db_path = "youtube_trans_downloader.db"
     
     if not Path(db_path).exists():
         print(f"❌ Database not found at {db_path}")
@@ -73,7 +73,7 @@ def check_users_in_db():
 
 def test_password_verification():
     """Test password verification for existing users"""
-    db_path = "instance/youtube_trans_downloader.db"
+    db_path = "youtube_trans_downloader.db"
     
     if not Path(db_path).exists():
         print(f"❌ Database not found at {db_path}")
@@ -116,7 +116,7 @@ def test_password_verification():
 
 def delete_test_users():
     """Delete any test users to start fresh"""
-    db_path = "instance/youtube_trans_downloader.db"
+    db_path = "youtube_trans_downloader.db"
     
     if not Path(db_path).exists():
         print(f"❌ Database not found at {db_path}")
@@ -143,7 +143,7 @@ def delete_test_users():
 
 def create_test_user():
     """Create a test user with known credentials"""
-    db_path = "instance/youtube_trans_downloader.db"
+    db_path = "youtube_trans_downloader.db"
     
     if not Path(db_path).exists():
         print(f"❌ Database not found at {db_path}")
