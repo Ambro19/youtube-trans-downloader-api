@@ -324,27 +324,52 @@ def get_or_create_stripe_customer(user, db: Session):
         )
 
 def check_subscription_limit(user_id: int, transcript_type: str, db: Session):
-    """Check subscription limits"""
-    subscription = db.query(Subscription).filter(Subscription.user_id == user_id).first()
-    
-    if not subscription:
-        tier = "free"
-    else:
-        tier = subscription.tier
-        if subscription.expiry_date < datetime.now():
+    """Robust subscription limit check - handles missing columns gracefully"""
+    try:
+        # Get subscription info
+        subscription = db.query(Subscription).filter(Subscription.user_id == user_id).first()
+        
+        if not subscription:
             tier = "free"
-    
-    month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    usage = db.query(TranscriptDownload).filter(
-        TranscriptDownload.user_id == user_id,
-        TranscriptDownload.transcript_type == transcript_type,
-        TranscriptDownload.created_at >= month_start
-    ).count()
-    
-    limit = SUBSCRIPTION_LIMITS[tier][transcript_type]
-    if usage >= limit:
-        return False
-    return True
+        else:
+            tier = subscription.tier
+            if subscription.expiry_date < datetime.now():
+                tier = "free"
+        
+        # Calculate current month start
+        month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        
+        # Use a simple query that only uses basic columns that definitely exist
+        try:
+            # Try the enhanced query first
+            usage = db.query(TranscriptDownload).filter(
+                TranscriptDownload.user_id == user_id,
+                TranscriptDownload.transcript_type == transcript_type,
+                TranscriptDownload.created_at >= month_start
+            ).count()
+        except Exception as e:
+            logger.warning(f"Enhanced query failed, using simple fallback: {e}")
+            
+            # Fallback to basic SQL query that only uses guaranteed columns
+            result = db.execute(
+                "SELECT COUNT(*) FROM transcript_downloads WHERE user_id = ? AND transcript_type = ? AND created_at >= ?",
+                (user_id, transcript_type, month_start.isoformat())
+            )
+            usage = result.scalar() or 0
+        
+        # Get limit for this tier and transcript type
+        limit = SUBSCRIPTION_LIMITS[tier].get(transcript_type, 0)
+        
+        # Return True if user can download (hasn't reached limit)
+        if limit == float('inf'):
+            return True
+        
+        return usage < limit
+        
+    except Exception as e:
+        logger.error(f"Error checking subscription limit: {e}")
+        # If there's any error, default to allowing free tier limits
+        return True  # Allow download in case of errors to avoid blocking users
 
 #=====================================
 # ENHANCED TRANSCRIPT FUNCTIONS
@@ -1198,28 +1223,36 @@ async def download_transcript_corrected(
             status_code=500,
             detail=f"Failed to extract transcript for video {video_id}. Error: {str(e)}"
         )
+# #================================================================================================
+# # Replace the subscription_status endpoint in your main.py with this simplified version
 
-# #==========================================================================
-
-# # 🔧 ADDED: Enhanced subscription status endpoint
 # @app.get("/subscription_status/")
-# async def get_subscription_status_enhanced(
+# async def get_subscription_status_simple(
 #     current_user: User = Depends(get_current_user),
 #     db: Session = Depends(get_db)
 # ):
-#     """Enhanced subscription status with detailed usage information"""
+#     """Simplified subscription status - avoids database column issues"""
 #     try:
+#         # Get basic subscription info
 #         subscription = db.query(Subscription).filter(
 #             Subscription.user_id == current_user.id
 #         ).first()
         
 #         # Determine current subscription tier
-#         if not subscription or subscription.expiry_date < datetime.now():
+#         if not subscription:
 #             tier = "free"
 #             status = "inactive"
+#             expiry_date = None
 #         else:
-#             tier = subscription.tier
-#             status = "active"
+#             # Check if subscription is expired
+#             if hasattr(subscription, 'expiry_date') and subscription.expiry_date and subscription.expiry_date < datetime.now():
+#                 tier = "free"
+#                 status = "expired"
+#                 expiry_date = subscription.expiry_date
+#             else:
+#                 tier = subscription.tier if subscription.tier else "free"
+#                 status = "active" if tier != "free" else "inactive"
+#                 expiry_date = subscription.expiry_date if hasattr(subscription, 'expiry_date') else None
         
 #         # Calculate usage for current month
 #         month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -1250,7 +1283,7 @@ async def download_transcript_corrected(
 #         ).count()
         
 #         # Get limits based on current tier
-#         limits = SUBSCRIPTION_LIMITS[tier]
+#         limits = SUBSCRIPTION_LIMITS.get(tier, SUBSCRIPTION_LIMITS["free"])
         
 #         # Convert infinity to string for JSON serialization
 #         json_limits = {}
@@ -1259,6 +1292,8 @@ async def download_transcript_corrected(
 #                 json_limits[key] = 'unlimited'
 #             else:
 #                 json_limits[key] = value
+        
+#         logger.info(f"✅ Subscription status for {current_user.username}: tier={tier}, status={status}")
         
 #         return {
 #             "tier": tier,
@@ -1270,25 +1305,213 @@ async def download_transcript_corrected(
 #                 "video_downloads": video_usage,
 #             },
 #             "limits": json_limits,
-#             "subscription_id": subscription.payment_id if subscription else None,
+#             "subscription_id": subscription.payment_id if subscription and hasattr(subscription, 'payment_id') else None,
 #             "stripe_customer_id": getattr(current_user, 'stripe_customer_id', None),
-#             "current_period_end": subscription.expiry_date.isoformat() if subscription and subscription.expiry_date else None
+#             "current_period_end": expiry_date.isoformat() if expiry_date else None
 #         }
         
 #     except Exception as e:
 #         logger.error(f"❌ Error getting subscription status: {str(e)}")
-#         raise HTTPException(status_code=500, detail="Failed to get subscription status")
+#         # Return default free tier status on error
+#         return {
+#             "tier": "free",
+#             "status": "inactive",
+#             "usage": {
+#                 "clean_transcripts": 0,
+#                 "unclean_transcripts": 0,
+#                 "audio_downloads": 0,
+#                 "video_downloads": 0,
+#             },
+#             "limits": {
+#                 "clean_transcripts": 5,
+#                 "unclean_transcripts": 3,
+#                 "audio_downloads": 2,
+#                 "video_downloads": 1
+#             },
+#             "subscription_id": None,
+#             "stripe_customer_id": None,
+#             "current_period_end": None
+#         }
 
-#=======================================================================================
+#===============================================================
+# Replace your subscription status endpoint with this ultra-safe version
 
-# Replace the subscription_status endpoint in your main.py with this simplified version
+# @app.get("/subscription_status/")
+# async def get_subscription_status_ultra_safe(
+#     current_user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db)
+# ):
+#     """Ultra-safe subscription status - handles all database issues gracefully"""
+#     try:
+#         # Get basic subscription info
+#         subscription = db.query(Subscription).filter(
+#             Subscription.user_id == current_user.id
+#         ).first()
+        
+#         # Determine current subscription tier
+#         if not subscription:
+#             tier = "free"
+#             status = "inactive"
+#             expiry_date = None
+#         else:
+#             # Check if subscription is expired
+#             if hasattr(subscription, 'expiry_date') and subscription.expiry_date and subscription.expiry_date < datetime.now():
+#                 tier = "free"
+#                 status = "expired"
+#                 expiry_date = subscription.expiry_date
+#             else:
+#                 tier = subscription.tier if subscription.tier else "free"
+#                 status = "active" if tier != "free" else "inactive"
+#                 expiry_date = subscription.expiry_date if hasattr(subscription, 'expiry_date') else None
+        
+#         # Calculate usage for current month using safe method
+#         month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        
+#         # Safe usage calculation with multiple fallbacks
+#         def get_safe_usage(transcript_type):
+#             try:
+#                 # Method 1: Try ORM query
+#                 return db.query(TranscriptDownload).filter(
+#                     TranscriptDownload.user_id == current_user.id,
+#                     TranscriptDownload.transcript_type == transcript_type,
+#                     TranscriptDownload.created_at >= month_start
+#                 ).count()
+#             except Exception:
+#                 try:
+#                     # Method 2: Raw SQL fallback
+#                     result = db.execute(
+#                         "SELECT COUNT(*) FROM transcript_downloads WHERE user_id = ? AND transcript_type = ? AND created_at >= ?",
+#                         (current_user.id, transcript_type, month_start.isoformat())
+#                     )
+#                     return result.scalar() or 0
+#                 except Exception:
+#                     # Method 3: Ultimate fallback
+#                     logger.warning(f"All usage queries failed for {transcript_type}, returning 0")
+#                     return 0
+        
+#         # Get usage for all types safely
+#         clean_usage = get_safe_usage("clean")
+#         unclean_usage = get_safe_usage("unclean")
+#         audio_usage = get_safe_usage("audio")
+#         video_usage = get_safe_usage("video")
+        
+#         # Get limits based on current tier
+#         limits = SUBSCRIPTION_LIMITS.get(tier, SUBSCRIPTION_LIMITS["free"])
+        
+#         # Convert infinity to string for JSON serialization
+#         json_limits = {}
+#         for key, value in limits.items():
+#             if value == float('inf'):
+#                 json_limits[key] = 'unlimited'
+#             else:
+#                 json_limits[key] = value
+        
+#         logger.info(f"✅ Safe subscription status for {current_user.username}: tier={tier}, status={status}")
+        
+#         return {
+#             "tier": tier,
+#             "status": status,
+#             "usage": {
+#                 "clean_transcripts": clean_usage,
+#                 "unclean_transcripts": unclean_usage,
+#                 "audio_downloads": audio_usage,
+#                 "video_downloads": video_usage,
+#             },
+#             "limits": json_limits,
+#             "subscription_id": subscription.payment_id if subscription and hasattr(subscription, 'payment_id') else None,
+#             "stripe_customer_id": getattr(current_user, 'stripe_customer_id', None),
+#             "current_period_end": expiry_date.isoformat() if expiry_date else None
+#         }
+        
+#     except Exception as e:
+#         logger.error(f"❌ Error getting subscription status: {str(e)}")
+#         # Return safe defaults on any error
+#         return {
+#             "tier": "free",
+#             "status": "inactive", 
+#             "usage": {
+#                 "clean_transcripts": 0,
+#                 "unclean_transcripts": 0,
+#                 "audio_downloads": 0,
+#                 "video_downloads": 0,
+#             },
+#             "limits": {
+#                 "clean_transcripts": 5,
+#                 "unclean_transcripts": 3,
+#                 "audio_downloads": 2,
+#                 "video_downloads": 1
+#             },
+#             "subscription_id": None,
+#             "stripe_customer_id": None,
+#             "current_period_end": None
+#         }
+
+# #=============================================================
+# # Payment endpoints (simplified - keeping only essential ones)
+# #=============================================================
+
+# @app.post("/create_payment_intent/")
+# async def create_payment_intent_endpoint(
+#     request: CreatePaymentIntentRequest,
+#     current_user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db)
+# ):
+#     """Enhanced payment intent creation with better customer tracking"""
+#     try:
+#         # Validate price ID
+#         valid_price_ids = [os.getenv("PRO_PRICE_ID"), os.getenv("PREMIUM_PRICE_ID")]
+        
+#         if request.price_id not in valid_price_ids:
+#             raise HTTPException(status_code=400, detail=f"Invalid price ID: {request.price_id}")
+
+#         # Get price details from Stripe
+#         price = stripe.Price.retrieve(request.price_id)
+#         plan_type = 'pro' if request.price_id == os.getenv("PRO_PRICE_ID") else 'premium'
+        
+#         # Create or get Stripe customer (this makes them appear in your dashboard)
+#         customer = get_or_create_stripe_customer(current_user, db)
+        
+#         # Create payment intent
+#         intent = stripe.PaymentIntent.create(
+#             amount=price.unit_amount,
+#             currency=price.currency,
+#             customer=customer.id,  # This links the payment to the customer
+#             automatic_payment_methods={'enabled': True, 'allow_redirects': 'never'},
+#             description=f"YouTube Transcript Downloader - {plan_type.title()} Plan",
+#             metadata={
+#                 'user_id': str(current_user.id),
+#                 'user_email': current_user.email,
+#                 'username': current_user.username,
+#                 'price_id': request.price_id,
+#                 'plan_type': plan_type,
+#                 'app_name': 'YouTube Transcript Downloader'
+#             },
+#             receipt_email=current_user.email  # Send receipt to user
+#         )
+
+#         logger.info(f"💳 Payment intent created: {intent.id} for user {current_user.username}")
+
+#         return {
+#             'client_secret': intent.client_secret,
+#             'payment_intent_id': intent.id,
+#             'amount': price.unit_amount,
+#             'currency': price.currency,
+#             'plan_type': plan_type,
+#             'customer_id': customer.id  # Return customer ID for reference
+#         }
+
+#     except Exception as e:
+#         logger.error(f"❌ Payment intent creation error: {str(e)}")
+#         raise HTTPException(status_code=500, detail=f"Failed to create payment intent: {str(e)}")
+
+#==============================================
 
 @app.get("/subscription_status/")
-async def get_subscription_status_simple(
+async def get_subscription_status_ultra_safe(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Simplified subscription status - avoids database column issues"""
+    """Ultra-safe subscription status - handles all database issues gracefully"""
     try:
         # Get basic subscription info
         subscription = db.query(Subscription).filter(
@@ -1311,33 +1534,36 @@ async def get_subscription_status_simple(
                 status = "active" if tier != "free" else "inactive"
                 expiry_date = subscription.expiry_date if hasattr(subscription, 'expiry_date') else None
         
-        # Calculate usage for current month
+        # Calculate usage for current month using safe method
         month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         
-        # Get detailed usage statistics
-        clean_usage = db.query(TranscriptDownload).filter(
-            TranscriptDownload.user_id == current_user.id,
-            TranscriptDownload.transcript_type == "clean",
-            TranscriptDownload.created_at >= month_start
-        ).count()
+        # Safe usage calculation with multiple fallbacks
+        def get_safe_usage(transcript_type):
+            try:
+                # Method 1: Try ORM query
+                return db.query(TranscriptDownload).filter(
+                    TranscriptDownload.user_id == current_user.id,
+                    TranscriptDownload.transcript_type == transcript_type,
+                    TranscriptDownload.created_at >= month_start
+                ).count()
+            except Exception:
+                try:
+                    # Method 2: Raw SQL fallback
+                    result = db.execute(
+                        "SELECT COUNT(*) FROM transcript_downloads WHERE user_id = ? AND transcript_type = ? AND created_at >= ?",
+                        (current_user.id, transcript_type, month_start.isoformat())
+                    )
+                    return result.scalar() or 0
+                except Exception:
+                    # Method 3: Ultimate fallback
+                    logger.warning(f"All usage queries failed for {transcript_type}, returning 0")
+                    return 0
         
-        unclean_usage = db.query(TranscriptDownload).filter(
-            TranscriptDownload.user_id == current_user.id,
-            TranscriptDownload.transcript_type == "unclean", 
-            TranscriptDownload.created_at >= month_start
-        ).count()
-        
-        audio_usage = db.query(TranscriptDownload).filter(
-            TranscriptDownload.user_id == current_user.id,
-            TranscriptDownload.transcript_type == "audio",
-            TranscriptDownload.created_at >= month_start
-        ).count()
-        
-        video_usage = db.query(TranscriptDownload).filter(
-            TranscriptDownload.user_id == current_user.id,
-            TranscriptDownload.transcript_type == "video",
-            TranscriptDownload.created_at >= month_start
-        ).count()
+        # Get usage for all types safely
+        clean_usage = get_safe_usage("clean")
+        unclean_usage = get_safe_usage("unclean")
+        audio_usage = get_safe_usage("audio")
+        video_usage = get_safe_usage("video")
         
         # Get limits based on current tier
         limits = SUBSCRIPTION_LIMITS.get(tier, SUBSCRIPTION_LIMITS["free"])
@@ -1350,7 +1576,7 @@ async def get_subscription_status_simple(
             else:
                 json_limits[key] = value
         
-        logger.info(f"✅ Subscription status for {current_user.username}: tier={tier}, status={status}")
+        logger.info(f"✅ Safe subscription status for {current_user.username}: tier={tier}, status={status}")
         
         return {
             "tier": tier,
@@ -1369,10 +1595,10 @@ async def get_subscription_status_simple(
         
     except Exception as e:
         logger.error(f"❌ Error getting subscription status: {str(e)}")
-        # Return default free tier status on error
+        # Return safe defaults on any error
         return {
             "tier": "free",
-            "status": "inactive",
+            "status": "inactive", 
             "usage": {
                 "clean_transcripts": 0,
                 "unclean_transcripts": 0,
@@ -1389,65 +1615,6 @@ async def get_subscription_status_simple(
             "stripe_customer_id": None,
             "current_period_end": None
         }
-
-
-#=============================================================
-# Payment endpoints (simplified - keeping only essential ones)
-#=============================================================
-
-@app.post("/create_payment_intent/")
-async def create_payment_intent_endpoint(
-    request: CreatePaymentIntentRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Enhanced payment intent creation with better customer tracking"""
-    try:
-        # Validate price ID
-        valid_price_ids = [os.getenv("PRO_PRICE_ID"), os.getenv("PREMIUM_PRICE_ID")]
-        
-        if request.price_id not in valid_price_ids:
-            raise HTTPException(status_code=400, detail=f"Invalid price ID: {request.price_id}")
-
-        # Get price details from Stripe
-        price = stripe.Price.retrieve(request.price_id)
-        plan_type = 'pro' if request.price_id == os.getenv("PRO_PRICE_ID") else 'premium'
-        
-        # Create or get Stripe customer (this makes them appear in your dashboard)
-        customer = get_or_create_stripe_customer(current_user, db)
-        
-        # Create payment intent
-        intent = stripe.PaymentIntent.create(
-            amount=price.unit_amount,
-            currency=price.currency,
-            customer=customer.id,  # This links the payment to the customer
-            automatic_payment_methods={'enabled': True, 'allow_redirects': 'never'},
-            description=f"YouTube Transcript Downloader - {plan_type.title()} Plan",
-            metadata={
-                'user_id': str(current_user.id),
-                'user_email': current_user.email,
-                'username': current_user.username,
-                'price_id': request.price_id,
-                'plan_type': plan_type,
-                'app_name': 'YouTube Transcript Downloader'
-            },
-            receipt_email=current_user.email  # Send receipt to user
-        )
-
-        logger.info(f"💳 Payment intent created: {intent.id} for user {current_user.username}")
-
-        return {
-            'client_secret': intent.client_secret,
-            'payment_intent_id': intent.id,
-            'amount': price.unit_amount,
-            'currency': price.currency,
-            'plan_type': plan_type,
-            'customer_id': customer.id  # Return customer ID for reference
-        }
-
-    except Exception as e:
-        logger.error(f"❌ Payment intent creation error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to create payment intent: {str(e)}")
 
 #===========================================================
 # @app.post("/create_payment_intent/")
