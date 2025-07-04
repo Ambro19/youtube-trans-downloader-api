@@ -1199,6 +1199,9 @@ async def download_transcript_corrected(
             detail=f"Failed to extract transcript for video {video_id}. Error: {str(e)}"
         )
 
+# #==========================================================================
+
+# # 🔧 ADDED: Enhanced subscription status endpoint
 # @app.get("/subscription_status/")
 # async def get_subscription_status_enhanced(
 #     current_user: User = Depends(get_current_user),
@@ -1221,6 +1224,7 @@ async def download_transcript_corrected(
 #         # Calculate usage for current month
 #         month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         
+#         # Get detailed usage statistics
 #         clean_usage = db.query(TranscriptDownload).filter(
 #             TranscriptDownload.user_id == current_user.id,
 #             TranscriptDownload.transcript_type == "clean",
@@ -1229,7 +1233,19 @@ async def download_transcript_corrected(
         
 #         unclean_usage = db.query(TranscriptDownload).filter(
 #             TranscriptDownload.user_id == current_user.id,
-#             TranscriptDownload.transcript_type == "unclean",
+#             TranscriptDownload.transcript_type == "unclean", 
+#             TranscriptDownload.created_at >= month_start
+#         ).count()
+        
+#         audio_usage = db.query(TranscriptDownload).filter(
+#             TranscriptDownload.user_id == current_user.id,
+#             TranscriptDownload.transcript_type == "audio",
+#             TranscriptDownload.created_at >= month_start
+#         ).count()
+        
+#         video_usage = db.query(TranscriptDownload).filter(
+#             TranscriptDownload.user_id == current_user.id,
+#             TranscriptDownload.transcript_type == "video",
 #             TranscriptDownload.created_at >= month_start
 #         ).count()
         
@@ -1250,37 +1266,50 @@ async def download_transcript_corrected(
 #             "usage": {
 #                 "clean_transcripts": clean_usage,
 #                 "unclean_transcripts": unclean_usage,
+#                 "audio_downloads": audio_usage,
+#                 "video_downloads": video_usage,
 #             },
 #             "limits": json_limits,
 #             "subscription_id": subscription.payment_id if subscription else None,
+#             "stripe_customer_id": getattr(current_user, 'stripe_customer_id', None),
 #             "current_period_end": subscription.expiry_date.isoformat() if subscription and subscription.expiry_date else None
 #         }
         
 #     except Exception as e:
-#         logger.error(f"Error getting subscription status: {str(e)}")
+#         logger.error(f"❌ Error getting subscription status: {str(e)}")
 #         raise HTTPException(status_code=500, detail="Failed to get subscription status")
 
-#==========================================================================
+#=======================================================================================
 
-# 🔧 ADDED: Enhanced subscription status endpoint
+# Replace the subscription_status endpoint in your main.py with this simplified version
+
 @app.get("/subscription_status/")
-async def get_subscription_status_enhanced(
+async def get_subscription_status_simple(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Enhanced subscription status with detailed usage information"""
+    """Simplified subscription status - avoids database column issues"""
     try:
+        # Get basic subscription info
         subscription = db.query(Subscription).filter(
             Subscription.user_id == current_user.id
         ).first()
         
         # Determine current subscription tier
-        if not subscription or subscription.expiry_date < datetime.now():
+        if not subscription:
             tier = "free"
             status = "inactive"
+            expiry_date = None
         else:
-            tier = subscription.tier
-            status = "active"
+            # Check if subscription is expired
+            if hasattr(subscription, 'expiry_date') and subscription.expiry_date and subscription.expiry_date < datetime.now():
+                tier = "free"
+                status = "expired"
+                expiry_date = subscription.expiry_date
+            else:
+                tier = subscription.tier if subscription.tier else "free"
+                status = "active" if tier != "free" else "inactive"
+                expiry_date = subscription.expiry_date if hasattr(subscription, 'expiry_date') else None
         
         # Calculate usage for current month
         month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -1311,7 +1340,7 @@ async def get_subscription_status_enhanced(
         ).count()
         
         # Get limits based on current tier
-        limits = SUBSCRIPTION_LIMITS[tier]
+        limits = SUBSCRIPTION_LIMITS.get(tier, SUBSCRIPTION_LIMITS["free"])
         
         # Convert infinity to string for JSON serialization
         json_limits = {}
@@ -1320,6 +1349,8 @@ async def get_subscription_status_enhanced(
                 json_limits[key] = 'unlimited'
             else:
                 json_limits[key] = value
+        
+        logger.info(f"✅ Subscription status for {current_user.username}: tier={tier}, status={status}")
         
         return {
             "tier": tier,
@@ -1331,14 +1362,34 @@ async def get_subscription_status_enhanced(
                 "video_downloads": video_usage,
             },
             "limits": json_limits,
-            "subscription_id": subscription.payment_id if subscription else None,
+            "subscription_id": subscription.payment_id if subscription and hasattr(subscription, 'payment_id') else None,
             "stripe_customer_id": getattr(current_user, 'stripe_customer_id', None),
-            "current_period_end": subscription.expiry_date.isoformat() if subscription and subscription.expiry_date else None
+            "current_period_end": expiry_date.isoformat() if expiry_date else None
         }
         
     except Exception as e:
         logger.error(f"❌ Error getting subscription status: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to get subscription status")
+        # Return default free tier status on error
+        return {
+            "tier": "free",
+            "status": "inactive",
+            "usage": {
+                "clean_transcripts": 0,
+                "unclean_transcripts": 0,
+                "audio_downloads": 0,
+                "video_downloads": 0,
+            },
+            "limits": {
+                "clean_transcripts": 5,
+                "unclean_transcripts": 3,
+                "audio_downloads": 2,
+                "video_downloads": 1
+            },
+            "subscription_id": None,
+            "stripe_customer_id": None,
+            "current_period_end": None
+        }
+
 
 #=============================================================
 # Payment endpoints (simplified - keeping only essential ones)
