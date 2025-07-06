@@ -333,17 +333,16 @@ def get_or_create_stripe_customer(user, db: Session):
             detail="Failed to create payment customer. Please try again."
         )
 
-#===========================================================
-# ENHANCED SUBSCRIPTION FUNCTIONS
-#===========================================================
+#=================================#
+# ENHANCED SUBSCRIPTION FUNCTIONS #
+#=================================#
 
+# FIXED SUBSCRIPTION FUNCTION - Resolves datetime timezone issues
 def check_subscription_limit(user_id: int, transcript_type: str = None, db: Session = None) -> dict:
     """
-    Enhanced subscription limit checker with detailed analytics
-    Returns comprehensive subscription status and usage data
+    FIXED: Enhanced subscription limit checker with timezone handling
     """
     try:
-        # Use SQLAlchemy session if provided, otherwise get subscription via ORM
         if db:
             # Get user with subscription details
             user = db.query(User).filter(User.id == user_id).first()
@@ -380,29 +379,34 @@ def check_subscription_limit(user_id: int, transcript_type: str = None, db: Sess
             subscription_tier, subscription_status, start_date, end_date = user_data
             conn.close()
         
-        # Parse subscription dates
+        # FIXED: Parse subscription dates with proper timezone handling
+        now = datetime.now()  # Use naive datetime consistently
         start_dt = None
         end_dt = None
+        
         if start_date:
             try:
                 if isinstance(start_date, str):
-                    start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                    # Remove timezone info to make it naive
+                    start_dt = datetime.fromisoformat(start_date.replace('Z', '').replace('+00:00', ''))
                 else:
-                    start_dt = start_date
+                    # Convert datetime to naive if needed
+                    start_dt = start_date.replace(tzinfo=None) if start_date.tzinfo else start_date
             except:
                 start_dt = None
         
         if end_date:
             try:
                 if isinstance(end_date, str):
-                    end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                    # Remove timezone info to make it naive
+                    end_dt = datetime.fromisoformat(end_date.replace('Z', '').replace('+00:00', ''))
                 else:
-                    end_dt = end_date
+                    # Convert datetime to naive if needed
+                    end_dt = end_date.replace(tzinfo=None) if end_date.tzinfo else end_date
             except:
                 end_dt = None
         
-        # Check if subscription is active
-        now = datetime.now(timezone.utc)
+        # Check if subscription is active (all naive datetimes now)
         is_subscription_active = (
             subscription_status == 'active' and 
             start_dt and start_dt <= now and 
@@ -461,6 +465,8 @@ def check_subscription_limit(user_id: int, transcript_type: str = None, db: Sess
         else:
             allowed = downloads_this_month < monthly_limit or monthly_limit == float('inf')
             reason = "Subscription active" if allowed else "Monthly limit exceeded"
+        
+        logger.info(f"✅ Subscription check: {subscription_tier} tier, {downloads_this_month}/{monthly_limit} downloads, allowed={allowed}")
         
         return {
             "allowed": allowed,
@@ -718,158 +724,84 @@ def get_subscription_status_enhanced(user_id: int, db: Session = None) -> dict:
 # ENHANCED TRANSCRIPT FUNCTIONS
 #===========================================================
 
-def format_transcript_enhanced(transcript_list: list, clean: bool = True) -> str:
-    """
-    Enhanced transcript formatting with better text processing
-    
-    This function takes raw transcript data and formats it into either:
-    - Clean format: Plain text with proper spacing and punctuation
-    - Timestamped format: Text with [MM:SS] timestamps for each segment
-    
-    Args:
-        transcript_list: List of transcript segments with 'text' and 'start' keys
-        clean: If True, returns clean text; if False, returns timestamped format
-    
-    Returns:
-        Formatted transcript string
-    """
-    if not transcript_list:
-        raise Exception("Empty transcript data")
-    
-    if clean:
-        # Enhanced clean format - create readable paragraph text
-        texts = []
-        for item in transcript_list:
-            text = item.get('text', '').strip()
-            if text:
-                # Clean and normalize the text
-                text = clean_transcript_text(text)
-                if text:  # Only add if text remains after cleaning
-                    texts.append(text)
-        
-        # Join all text segments into one continuous string
-        result = ' '.join(texts)
-        
-        # Final cleanup for better readability
-        result = ' '.join(result.split())  # Normalize whitespace
-        result = result.replace(' .', '.').replace(' ,', ',')  # Fix punctuation spacing
-        
-        # Validate that we have meaningful content
-        if len(result) < 20:  # Too short, likely invalid
-            raise Exception("Transcript too short or invalid")
-            
-        logger.info(f"✅ Enhanced clean transcript: {len(result)} characters")
-        return result
-    else:
-        # Enhanced timestamped format - each line has [MM:SS] timestamp
-        lines = []
-        for item in transcript_list:
-            start = item.get('start', 0)
-            text = item.get('text', '').strip()
-            if text:
-                # Clean the text but preserve timestamps
-                text = clean_transcript_text(text)
-                if text:
-                    # Convert seconds to MM:SS format
-                    minutes = int(start // 60)
-                    seconds = int(start % 60)
-                    timestamp = f"[{minutes:02d}:{seconds:02d}]"
-                    lines.append(f"{timestamp} {text}")
-        
-        # Validate that we have enough content
-        if len(lines) < 5:  # Too few lines, likely invalid
-            raise Exception("Transcript has too few valid segments")
-            
-        result = '\n'.join(lines)
-        logger.info(f"✅ Enhanced timestamped transcript: {len(lines)} lines")
-        return result
-
+# FIXED TRANSCRIPT EXTRACTION - Simplified and more reliable
 def get_youtube_transcript_corrected(video_id: str, clean: bool = True) -> str:
     """
-    ENHANCED YouTube transcript extraction with robust error handling
-    
-    This function tries multiple methods in order of reliability:
-    1. youtube-transcript-api (fastest, but often blocked)
-    2. list_transcripts (better language detection)
-    3. yt-dlp (most robust, works when others fail)
-    4. Direct API (fallback for edge cases)
-    5. Demo content (last resort for testing)
-    
-    Args:
-        video_id: 11-character YouTube video ID
-        clean: If True, returns clean text; if False, returns timestamped format
-    
-    Returns:
-        Formatted transcript text
+    FIXED: Simplified YouTube transcript extraction focusing on reliability
     """
-    logger.info(f"🎯 ENHANCED transcript extraction for: {video_id}")
+    logger.info(f"🎯 FIXED transcript extraction for: {video_id}")
     
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
         
-        # Method 1: Try youtube-transcript-api first (fastest when it works)
+        # METHOD 1: Simple direct extraction with just English
         try:
-            logger.info("🔄 Trying youtube-transcript-api...")
+            logger.info("🔄 Trying simple English extraction...")
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
             
-            # Try multiple English language variants for better success rate
-            language_codes = ['en', 'en-US', 'en-GB', 'en-CA', 'en-AU']
-            transcript_list = None
-            
-            for lang in language_codes:
-                try:
-                    transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[lang])
-                    if transcript_list and len(transcript_list) > 0:
-                        logger.info(f"✅ SUCCESS with language {lang}: {len(transcript_list)} segments")
-                        break
-                except Exception as lang_error:
-                    logger.info(f"📝 Language {lang} failed: {str(lang_error)}")
-                    continue
-            
-            # If we found a transcript, format and return it
             if transcript_list and len(transcript_list) > 0:
+                logger.info(f"✅ SUCCESS: Got {len(transcript_list)} transcript segments")
                 return format_transcript_enhanced(transcript_list, clean)
                 
         except Exception as e:
-            logger.info(f"📝 youtube-transcript-api failed: {str(e)}")
+            logger.info(f"📝 Direct English extraction failed: {str(e)}")
         
-        # Method 2: Try list_transcripts approach for better language detection
+        # METHOD 2: List transcripts and find English
         try:
-            logger.info("🔄 Trying list_transcripts method...")
+            logger.info("🔄 Trying transcript list method...")
             transcript_list_obj = YouTubeTranscriptApi.list_transcripts(video_id)
             
-            # Try to find any English transcript (manual or auto-generated)
+            # Find English transcript (manual or auto-generated)
             english_transcript = None
-            try:
-                # Prefer manual transcripts over auto-generated ones
-                for transcript in transcript_list_obj:
-                    if transcript.language_code.startswith('en'):
-                        english_transcript = transcript
-                        logger.info(f"🎯 Found manual English transcript: {transcript.language_code}")
-                        break
-                
-                # If no manual English transcript, try auto-generated
-                if not english_transcript:
-                    try:
-                        english_transcript = transcript_list_obj.find_generated_transcript(['en'])
-                        logger.info("🤖 Found auto-generated English transcript")
-                    except:
-                        pass
-                
-                # If we found any English transcript, fetch and format it
-                if english_transcript:
-                    transcript_data = english_transcript.fetch()
-                    if transcript_data and len(transcript_data) > 0:
-                        logger.info(f"✅ LIST API SUCCESS: {len(transcript_data)} segments")
-                        return format_transcript_enhanced(transcript_data, clean)
+            
+            # Look for manual English transcript first
+            for transcript in transcript_list_obj:
+                if transcript.language_code == 'en':
+                    english_transcript = transcript
+                    logger.info(f"🎯 Found manual English transcript")
+                    break
+            
+            # If no manual transcript, try auto-generated
+            if not english_transcript:
+                try:
+                    english_transcript = transcript_list_obj.find_generated_transcript(['en'])
+                    logger.info("🤖 Found auto-generated English transcript")
+                except:
+                    pass
+            
+            # Fetch and format the transcript
+            if english_transcript:
+                transcript_data = english_transcript.fetch()
+                if transcript_data and len(transcript_data) > 0:
+                    logger.info(f"✅ LIST SUCCESS: Got {len(transcript_data)} segments")
+                    return format_transcript_enhanced(transcript_data, clean)
                         
-            except Exception as inner_e:
-                logger.info(f"📝 English transcript lookup failed: {str(inner_e)}")
-                
         except Exception as e:
-            logger.info(f"📝 List API failed: {str(e)}")
+            logger.info(f"📝 List method failed: {str(e)}")
         
-        # Final fallback: Demo content for testing (only when all methods fail)
-        logger.warning(f"⚠️ All extraction methods failed for {video_id}, falling back to demo content")
+        # METHOD 3: Try any available language and translate
+        try:
+            logger.info("🔄 Trying any available transcript...")
+            transcript_list_obj = YouTubeTranscriptApi.list_transcripts(video_id)
+            
+            # Get any available transcript
+            for transcript in transcript_list_obj:
+                try:
+                    logger.info(f"🔄 Trying transcript in: {transcript.language_code}")
+                    transcript_data = transcript.fetch()
+                    if transcript_data and len(transcript_data) > 0:
+                        logger.info(f"✅ SUCCESS with {transcript.language_code}: {len(transcript_data)} segments")
+                        return format_transcript_enhanced(transcript_data, clean)
+                except Exception as inner_e:
+                    logger.info(f"📝 Failed with {transcript.language_code}: {str(inner_e)}")
+                    continue
+                        
+        except Exception as e:
+            logger.info(f"📝 Any language method failed: {str(e)}")
+        
+        # If all methods fail, log the video ID and return demo content
+        logger.warning(f"⚠️ All extraction methods failed for {video_id}")
+        logger.info(f"🔄 Falling back to demo content for testing")
         return get_demo_content(clean)
         
     except Exception as e:
@@ -879,55 +811,143 @@ def get_youtube_transcript_corrected(video_id: str, clean: bool = True) -> str:
             detail=f"Unable to extract transcript for video {video_id}. The video may not have captions enabled, be private, or be unavailable."
         )
 
+# FIXED FORMAT FUNCTION - Better error handling
+def format_transcript_enhanced(transcript_list: list, clean: bool = True) -> str:
+    """
+    FIXED: Enhanced transcript formatting with better error handling
+    """
+    if not transcript_list:
+        logger.warning("📝 Empty transcript list received")
+        raise Exception("Empty transcript data")
+    
+    logger.info(f"🔄 Formatting {len(transcript_list)} transcript segments (clean={clean})")
+    
+    try:
+        if clean:
+            # Enhanced clean format - create readable paragraph text
+            texts = []
+            for item in transcript_list:
+                text = item.get('text', '').strip()
+                if text:
+                    # Clean and normalize the text
+                    text = clean_transcript_text(text)
+                    if text and len(text) > 1:  # Only add meaningful text
+                        texts.append(text)
+            
+            if not texts:
+                logger.warning("📝 No valid text found in transcript segments")
+                raise Exception("No valid text content found")
+            
+            # Join all text segments into one continuous string
+            result = ' '.join(texts)
+            
+            # Final cleanup for better readability
+            result = ' '.join(result.split())  # Normalize whitespace
+            result = result.replace(' .', '.').replace(' ,', ',')  # Fix punctuation spacing
+            
+            # Validate that we have meaningful content
+            if len(result) < 10:  # Too short, likely invalid
+                logger.warning(f"📝 Transcript too short: {len(result)} characters")
+                raise Exception("Transcript too short or invalid")
+                
+            logger.info(f"✅ Clean transcript formatted: {len(result)} characters")
+            return result
+        else:
+            # Enhanced timestamped format - each line has [MM:SS] timestamp
+            lines = []
+            for item in transcript_list:
+                start = item.get('start', 0)
+                text = item.get('text', '').strip()
+                if text:
+                    # Clean the text but preserve timestamps
+                    text = clean_transcript_text(text)
+                    if text and len(text) > 1:
+                        # Convert seconds to MM:SS format
+                        minutes = int(start // 60)
+                        seconds = int(start % 60)
+                        timestamp = f"[{minutes:02d}:{seconds:02d}]"
+                        lines.append(f"{timestamp} {text}")
+            
+            if not lines:
+                logger.warning("📝 No valid timestamped lines created")
+                raise Exception("No valid timestamped content")
+            
+            # Validate that we have enough content
+            if len(lines) < 3:  # Too few lines, likely invalid
+                logger.warning(f"📝 Too few transcript lines: {len(lines)}")
+                # Don't fail completely, just warn
+            
+            result = '\n'.join(lines)
+            logger.info(f"✅ Timestamped transcript formatted: {len(lines)} lines")
+            return result
+            
+    except Exception as e:
+        logger.error(f"❌ Error formatting transcript: {str(e)}")
+        raise Exception(f"Failed to format transcript: {str(e)}")
+
+# IMPROVED CLEAN FUNCTION
 def clean_transcript_text(text: str) -> str:
     """
-    Clean transcript text from common artifacts and formatting issues
+    IMPROVED: Clean transcript text with better handling
     """
     if not text:
         return ""
     
-    # Fix common HTML entities
-    text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
-    text = text.replace('\n', ' ').replace('\r', ' ')
-    
-    # Remove HTML/XML tags (like <c>, <i>, etc.)
-    text = re.sub(r'<[^>]+>', '', text)
-    
-    # Normalize whitespace (replace multiple spaces with single space)
-    text = ' '.join(text.split())
-    
-    # Remove leading/trailing punctuation artifacts that don't belong
-    text = text.strip('.,!?;: ')
-    
-    return text.strip()
+    try:
+        # Fix common HTML entities
+        text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+        text = text.replace('\n', ' ').replace('\r', ' ')
+        
+        # Remove HTML/XML tags (like <c>, <i>, etc.)
+        import re
+        text = re.sub(r'<[^>]+>', '', text)
+        
+        # Remove common transcript artifacts
+        text = re.sub(r'\[.*?\]', '', text)  # Remove [Music], [Applause], etc.
+        text = re.sub(r'\(.*?\)', '', text)  # Remove (inaudible), etc.
+        
+        # Normalize whitespace (replace multiple spaces with single space)
+        text = ' '.join(text.split())
+        
+        # Remove leading/trailing punctuation artifacts that don't belong
+        text = text.strip('.,!?;: -')
+        
+        return text.strip()
+    except Exception as e:
+        logger.warning(f"📝 Error cleaning text: {str(e)}")
+        return text.strip() if text else ""
 
+# SIMPLIFIED DEMO CONTENT
 def get_demo_content(clean: bool) -> str:
     """
-    Fallback demo content for testing and when extraction fails
+    IMPROVED: Better demo content that clearly indicates it's a fallback
     """
-    demo_text = """Hello everyone, welcome to this video. Today we're going to be talking 
-    about some really interesting topics. We'll cover various aspects of the subject matter 
-    and provide you with valuable insights. This is sample transcript content for demonstration 
-    purposes. The actual transcript would contain the real audio content from the YouTube video. 
-    Thank you for watching, and don't forget to subscribe to our channel for more great content like this."""
+    demo_text = """[DEMO CONTENT - Transcript extraction failed] 
+    
+    This is demonstration content because the actual YouTube transcript could not be extracted. 
+    The video may not have captions available, may be private, or there might be a temporary issue with YouTube's transcript service.
+    
+    Please try:
+    1. A different video with confirmed captions
+    2. One of the working example videos provided
+    3. Checking if the video has captions enabled on YouTube
+    
+    If you continue to see this message, please contact support."""
     
     if clean:
         return demo_text
     else:
-        # Add timestamps for unclean format demonstration
-        words = demo_text.split()
-        timestamped_lines = []
-        current_time = 0
-        
-        for i in range(0, len(words), 8):  # Group words into 8-word chunks
-            chunk = ' '.join(words[i:i+8])
-            minutes = current_time // 60
-            seconds = current_time % 60
-            timestamp = f"[{minutes:02d}:{seconds:02d}]"
-            timestamped_lines.append(f"{timestamp} {chunk}")
-            current_time += 6  # Add 6 seconds per chunk
-        
-        return '\n'.join(timestamped_lines)
+        # Add timestamps for demonstration
+        lines = [
+            "[00:00] [DEMO CONTENT - Transcript extraction failed]",
+            "[00:05] This is demonstration content because the actual YouTube transcript",
+            "[00:10] could not be extracted. The video may not have captions available,",
+            "[00:15] may be private, or there might be a temporary issue",
+            "[00:20] with YouTube's transcript service.",
+            "[00:25] Please try a different video with confirmed captions",
+            "[00:30] or one of the working example videos provided."
+        ]
+        return '\n'.join(lines)
 
 #=======================================================================
 # API ENDPOINTS: ALL THE ENDPOINTS OF THE YOUTUBE TRANS DOWNLOADER API #
