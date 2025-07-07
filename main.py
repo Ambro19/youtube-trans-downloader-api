@@ -13,6 +13,9 @@ import os
 import logging
 from dotenv import load_dotenv
 import re
+import time
+import asyncio
+from collections import defaultdict
 
 import warnings
 warnings.filterwarnings("ignore", message=".*bcrypt.*")
@@ -26,6 +29,11 @@ load_dotenv()
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("youtube_trans_downloader.main")
+
+# Rate limiting storage (in production, use Redis)
+rate_limit_storage = defaultdict(list)
+RATE_LIMIT_WINDOW = 60  # 1 minute
+RATE_LIMIT_MAX_REQUESTS = 5  # Max 5 requests per minute
 
 # Stripe configuration
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
@@ -330,6 +338,29 @@ def get_or_create_stripe_customer(user, db: Session):
         )
 
 #=================================#
+# RATE LIMITING FUNCTIONS         #
+#=================================#
+
+def check_rate_limit(user_ip: str) -> bool:
+    """Check if user has exceeded rate limit"""
+    now = time.time()
+    user_requests = rate_limit_storage[user_ip]
+    
+    # Remove old requests outside the window
+    user_requests[:] = [req_time for req_time in user_requests if now - req_time < RATE_LIMIT_WINDOW]
+    
+    # Check if under limit
+    if len(user_requests) < RATE_LIMIT_MAX_REQUESTS:
+        user_requests.append(now)
+        return True
+    
+    return False
+
+def get_client_ip(request: Request) -> str:
+    """Get client IP address"""
+    return request.client.host
+
+#=================================#
 # SIMPLE SUBSCRIPTION FUNCTIONS   #
 #=================================#
 
@@ -408,83 +439,92 @@ def check_subscription_limit(user_id: int, transcript_type: str = None, db: Sess
         }
 
 #===========================================================
-# SIMPLE TRANSCRIPT FUNCTIONS - NO XML COMPLICATIONS      #
+# RATE-LIMITED TRANSCRIPT FUNCTIONS                        #
 #===========================================================
 
-def get_youtube_transcript_corrected(video_id: str, clean: bool = True) -> str:
+async def get_youtube_transcript_with_retry(video_id: str, clean: bool = True, max_retries: int = 3) -> str:
     """
-    SIMPLE YouTube transcript extraction - no XML complications
+    YouTube transcript extraction with retry logic and rate limiting
     """
-    logger.info(f"🎯 Simple transcript extraction for: {video_id}")
+    logger.info(f"🎯 Rate-limited transcript extraction for: {video_id}")
     
-    try:
-        from youtube_transcript_api import YouTubeTranscriptApi
-        
-        # Method 1: Direct simple approach
+    for attempt in range(max_retries):
         try:
-            logger.info("🔄 Trying direct simple method...")
-            transcript = YouTubeTranscriptApi.get_transcript(video_id)
+            # Add delay between attempts to respect YouTube's rate limits
+            if attempt > 0:
+                delay = min(10 * (2 ** (attempt - 1)), 30)  # Exponential backoff, max 30s
+                logger.info(f"⏳ Waiting {delay}s before retry {attempt + 1}/{max_retries}")
+                await asyncio.sleep(delay)
             
-            if transcript and len(transcript) > 0:
-                logger.info(f"✅ SUCCESS: Got {len(transcript)} transcript segments")
-                return format_transcript_simple(transcript, clean)
+            from youtube_transcript_api import YouTubeTranscriptApi
+            
+            # Method 1: Direct simple approach
+            try:
+                logger.info(f"🔄 Attempt {attempt + 1}: Direct method...")
+                transcript = YouTubeTranscriptApi.get_transcript(video_id)
                 
-        except Exception as e:
-            logger.info(f"📝 Direct method failed: {str(e)}")
-        
-        # Method 2: Try with language specified
-        try:
-            logger.info("🔄 Trying with English language...")
-            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+                if transcript and len(transcript) > 0:
+                    logger.info(f"✅ SUCCESS on attempt {attempt + 1}: {len(transcript)} segments")
+                    return format_transcript_simple(transcript, clean)
+                    
+            except Exception as e:
+                error_msg = str(e)
+                if "429" in error_msg or "Too Many Requests" in error_msg:
+                    logger.warning(f"⚠️ Rate limited on attempt {attempt + 1}")
+                    if attempt < max_retries - 1:
+                        continue  # Try again with delay
+                    else:
+                        raise HTTPException(
+                            status_code=429,
+                            detail="YouTube is temporarily rate limiting requests. Please wait a few minutes and try again. This happens when too many requests are made in a short time."
+                        )
+                else:
+                    logger.info(f"📝 Attempt {attempt + 1} failed: {error_msg}")
             
-            if transcript and len(transcript) > 0:
-                logger.info(f"✅ SUCCESS: Got {len(transcript)} transcript segments")
-                return format_transcript_simple(transcript, clean)
+            # Method 2: Try with English language
+            try:
+                logger.info(f"🔄 Attempt {attempt + 1}: English method...")
+                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
                 
-        except Exception as e:
-            logger.info(f"📝 English method failed: {str(e)}")
-        
-        # Method 3: List available and try first one
-        try:
-            logger.info("🔄 Trying list transcripts method...")
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                if transcript and len(transcript) > 0:
+                    logger.info(f"✅ SUCCESS on attempt {attempt + 1}: {len(transcript)} segments")
+                    return format_transcript_simple(transcript, clean)
+                    
+            except Exception as e:
+                error_msg = str(e)
+                if "429" in error_msg or "Too Many Requests" in error_msg:
+                    logger.warning(f"⚠️ Rate limited on attempt {attempt + 1}")
+                    if attempt < max_retries - 1:
+                        continue
+                    else:
+                        raise HTTPException(
+                            status_code=429,
+                            detail="YouTube is temporarily rate limiting requests. Please wait a few minutes and try again."
+                        )
+                else:
+                    logger.info(f"📝 Attempt {attempt + 1} English failed: {error_msg}")
             
-            # Get the first available transcript
-            for transcript_obj in transcript_list:
-                try:
-                    logger.info(f"🔄 Trying {transcript_obj.language_code}...")
-                    transcript = transcript_obj.fetch()
-                    
-                    if transcript and len(transcript) > 0:
-                        logger.info(f"✅ SUCCESS with {transcript_obj.language_code}: {len(transcript)} segments")
-                        return format_transcript_simple(transcript, clean)
-                        
-                except Exception as fetch_error:
-                    logger.info(f"📝 Failed to fetch {transcript_obj.language_code}: {str(fetch_error)}")
-                    continue
-                    
+            # If we get here and it's the last attempt, break to avoid infinite loop
+            if attempt == max_retries - 1:
+                break
+                
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.info(f"📝 List method failed: {str(e)}")
-        
-        # If we get here, all methods failed
-        logger.error(f"💥 All methods failed for video {video_id}")
-        raise HTTPException(
-            status_code=404,
-            detail=f"No transcript found for video {video_id}. This video may not have captions enabled, may be private, age-restricted, or unavailable. Please try a different video."
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"💥 Critical error: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to extract transcript for video {video_id}. Error: {str(e)}"
-        )
+            logger.warning(f"💥 Attempt {attempt + 1} critical error: {str(e)}")
+            if attempt == max_retries - 1:
+                break
+    
+    # All attempts failed
+    logger.error(f"💥 All {max_retries} attempts failed for video {video_id}")
+    raise HTTPException(
+        status_code=404,
+        detail=f"Unable to extract transcript for video {video_id} after {max_retries} attempts. This may be due to rate limiting, or the video may not have captions available."
+    )
 
 def format_transcript_simple(transcript_list: list, clean: bool = True) -> str:
     """
-    Simple transcript formatting - no XML complications
+    Simple transcript formatting - no complications
     """
     if not transcript_list or len(transcript_list) == 0:
         raise Exception("Empty transcript data")
@@ -607,12 +647,21 @@ async def read_users_me(current_user: User = Depends(get_current_user)):
 async def download_transcript_corrected(
     request: TranscriptRequest,
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    req: Request = None
 ):
     """
-    Simple transcript downloader - no complications
+    Rate-limited transcript downloader
     """
     video_id = request.youtube_id.strip()
+    
+    # Rate limiting check
+    client_ip = get_client_ip(req)
+    if not check_rate_limit(client_ip):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded. Maximum {RATE_LIMIT_MAX_REQUESTS} requests per {RATE_LIMIT_WINDOW} seconds. Please wait before trying again."
+        )
     
     # Extract video ID from various YouTube URL formats
     if 'youtube.com' in video_id or 'youtu.be' in video_id:
@@ -638,7 +687,7 @@ async def download_transcript_corrected(
             detail="Invalid YouTube video ID. Please provide a valid 11-character video ID or full YouTube URL."
         )
     
-    logger.info(f"🎯 Simple transcript request for: {video_id}")
+    logger.info(f"🎯 Rate-limited transcript request for: {video_id}")
     
     # Check subscription limits
     transcript_type = "clean" if request.clean_transcript else "unclean"
@@ -650,9 +699,9 @@ async def download_transcript_corrected(
             detail=f"You've reached your monthly limit for {transcript_type} transcripts. Please upgrade your plan."
         )
     
-    # Extract transcript using simple method
+    # Extract transcript using rate-limited method with retry
     try:
-        transcript_text = get_youtube_transcript_corrected(video_id, clean=request.clean_transcript)
+        transcript_text = await get_youtube_transcript_with_retry(video_id, clean=request.clean_transcript)
         
         # Validate result
         if not transcript_text or len(transcript_text.strip()) < 10:
@@ -672,7 +721,7 @@ async def download_transcript_corrected(
         db.add(new_download)
         db.commit()
         
-        logger.info(f"🎉 Simple SUCCESS: {user.username} downloaded {len(transcript_text)} chars for {video_id}")
+        logger.info(f"🎉 Rate-limited SUCCESS: {user.username} downloaded {len(transcript_text)} chars for {video_id}")
         
         return {
             "transcript": transcript_text,
@@ -684,7 +733,7 @@ async def download_transcript_corrected(
         raise
     except Exception as e:
         db.rollback()
-        logger.error(f"💥 Simple extraction failed: {str(e)}")
+        logger.error(f"💥 Rate-limited extraction failed: {str(e)}")
         
         raise HTTPException(
             status_code=500,
@@ -906,12 +955,14 @@ async def get_test_videos():
         "message": "These video IDs have been verified to work for transcript extraction",
         "videos": working_videos,
         "usage": "Use any of these video IDs to test your transcript downloader",
-        "note": "Simple transcript extraction - no complications"
+        "note": "Rate-limited transcript extraction to prevent YouTube blocking"
     }
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+
+#======================================================================
 
 ######################################################################
 ### IMPORTANT MESSAGE: DO NOT ALTER THIS MAIN.PY ANYMORE-- THANKS! ###
