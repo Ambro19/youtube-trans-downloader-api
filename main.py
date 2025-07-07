@@ -2,7 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks, Re
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Optional, List
 import jwt
 from jwt.exceptions import PyJWTError
@@ -13,7 +13,6 @@ import os
 import logging
 from dotenv import load_dotenv
 import re
-import sqlite3
 
 import warnings
 warnings.filterwarnings("ignore", message=".*bcrypt.*")
@@ -32,9 +31,6 @@ logger = logging.getLogger("youtube_trans_downloader.main")
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 endpoint_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
 DOMAIN = os.getenv("DOMAIN", "https://youtube-trans-downloader-api.onrender.com")
-
-# Database path for direct SQLite operations
-DATABASE_PATH = "youtube_trans_downloader.db"
 
 # Create FastAPI app
 app = FastAPI(
@@ -334,66 +330,40 @@ def get_or_create_stripe_customer(user, db: Session):
         )
 
 #=================================#
-# FIXED SUBSCRIPTION FUNCTIONS    #
+# SIMPLE SUBSCRIPTION FUNCTIONS   #
 #=================================#
 
 def check_subscription_limit(user_id: int, transcript_type: str = None, db: Session = None) -> dict:
     """
-    FIXED subscription limit checker - no timezone issues
+    Simple subscription limit checker
     """
     try:
-        if db:
-            # Get user and subscription
-            user = db.query(User).filter(User.id == user_id).first()
-            if not user:
-                return {"allowed": False, "error": "User not found"}
-            
-            subscription = db.query(Subscription).filter(Subscription.user_id == user_id).first()
-            
-            if not subscription:
-                subscription_tier = "free"
-                subscription_status = "inactive"
-                start_date = None
-                end_date = None
-            else:
-                subscription_tier = subscription.tier
-                subscription_status = getattr(subscription, 'status', 'active')
-                start_date = subscription.start_date
-                end_date = subscription.expiry_date
-        else:
+        if not db:
             return {"allowed": False, "error": "Database connection required"}
+            
+        # Get user and subscription
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            return {"allowed": False, "error": "User not found"}
         
-        # Use NAIVE datetimes to avoid timezone issues
-        now = datetime.now()  # Naive datetime
-        start_dt = None
-        end_dt = None
+        subscription = db.query(Subscription).filter(Subscription.user_id == user_id).first()
         
-        if start_date:
-            try:
-                if hasattr(start_date, 'replace') and start_date.tzinfo:
-                    start_dt = start_date.replace(tzinfo=None)
-                else:
-                    start_dt = start_date
-            except:
-                start_dt = None
-        
-        if end_date:
-            try:
-                if hasattr(end_date, 'replace') and end_date.tzinfo:
-                    end_dt = end_date.replace(tzinfo=None)
-                else:
-                    end_dt = end_date
-            except:
-                end_dt = None
-        
-        # Check subscription status
-        is_subscription_active = (
-            subscription_status == 'active' and 
-            start_dt and start_dt <= now and 
-            (not end_dt or end_dt > now)
-        )
+        # Determine subscription tier
+        if not subscription:
+            subscription_tier = "free"
+            subscription_status = "inactive"
+        else:
+            subscription_tier = subscription.tier
+            subscription_status = getattr(subscription, 'status', 'active')
+            
+            # Check if subscription is expired (simple check)
+            if hasattr(subscription, 'expiry_date') and subscription.expiry_date:
+                if subscription.expiry_date < datetime.now():
+                    subscription_tier = "free"
+                    subscription_status = "expired"
         
         # Get current month usage
+        now = datetime.now()
         current_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         
         downloads_this_month = db.query(TranscriptDownload).filter(
@@ -405,442 +375,140 @@ def check_subscription_limit(user_id: int, transcript_type: str = None, db: Sess
         limits = get_subscription_limits(subscription_tier)
         monthly_limit = limits['monthly_downloads']
         
-        # Determine access
-        if subscription_tier in ['free', 'trial']:
-            allowed = downloads_this_month < monthly_limit
-            reason = "Free tier access" if allowed else "Free tier limit reached"
-        elif is_subscription_active:
-            allowed = downloads_this_month < monthly_limit or monthly_limit == float('inf')
-            reason = "Subscription active" if allowed else "Monthly limit exceeded"
+        # Simple access determination
+        if monthly_limit == float('inf'):
+            allowed = True
+            reason = "Unlimited access"
         else:
-            allowed = downloads_this_month < 5  # Emergency fallback to free tier
-            reason = "Subscription expired - using free tier"
+            allowed = downloads_this_month < monthly_limit
+            reason = "Access granted" if allowed else f"Monthly limit of {monthly_limit} reached"
         
-        usage_percentage = (downloads_this_month / monthly_limit * 100) if monthly_limit != float('inf') and monthly_limit > 0 else 0
-        
-        logger.info(f"✅ Subscription: {subscription_tier}, {downloads_this_month}/{monthly_limit}, allowed={allowed}")
+        logger.info(f"✅ Simple check: {subscription_tier}, {downloads_this_month}/{monthly_limit}, allowed={allowed}")
         
         return {
             "allowed": allowed,
             "reason": reason,
             "subscription": {
                 "tier": subscription_tier,
-                "status": subscription_status,
-                "is_active": is_subscription_active
+                "status": subscription_status
             },
             "usage": {
                 "downloads_this_month": downloads_this_month,
-                "monthly_limit": monthly_limit if monthly_limit != float('inf') else 'unlimited',
-                "usage_percentage": round(usage_percentage, 1)
+                "monthly_limit": monthly_limit if monthly_limit != float('inf') else 'unlimited'
             }
         }
         
     except Exception as e:
         logger.error(f"Subscription check error: {e}")
-        # On error, allow free tier limits to avoid blocking users
+        # On error, allow free tier limits
         return {
             "allowed": True,
-            "reason": "Error in subscription check - allowing access",
+            "reason": "Error in check - allowing access",
             "error": str(e)
         }
 
-def get_subscription_status_enhanced(user_id: int, db: Session = None) -> dict:
-    """
-    Get comprehensive subscription status with usage analytics
-    This is a NEW function that provides detailed subscription insights
-    """
-    try:
-        if db:
-            # Use SQLAlchemy ORM
-            user = db.query(User).filter(User.id == user_id).first()
-            if not user:
-                return {"error": "User not found"}
-            
-            subscription = db.query(Subscription).filter(Subscription.user_id == user_id).first()
-            
-            # Get user details
-            email = user.email
-            user_created = user.created_at
-            
-            # Get subscription details
-            if not subscription:
-                subscription_tier = "free"
-                subscription_status = "inactive"
-                start_date = None
-                end_date = None
-            else:
-                subscription_tier = subscription.tier
-                subscription_status = getattr(subscription, 'status', 'active')
-                start_date = subscription.start_date
-                end_date = subscription.expiry_date
-        else:
-            # Direct database access fallback
-            conn = sqlite3.connect(DATABASE_PATH)
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                SELECT subscription_tier, subscription_status, subscription_start_date, 
-                       subscription_end_date, email, created_at
-                FROM users WHERE id = ?
-            """, (user_id,))
-            
-            user_data = cursor.fetchone()
-            if not user_data:
-                return {"error": "User not found"}
-            
-            subscription_tier, subscription_status, start_date, end_date, email, user_created = user_data
-            conn.close()
-        
-        # Parse dates
-        now = datetime.now(timezone.utc)
-        start_dt = None
-        end_dt = None
-        user_created_dt = None
-        
-        if start_date:
-            try:
-                if isinstance(start_date, str):
-                    start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-                else:
-                    start_dt = start_date
-            except:
-                start_dt = None
-        
-        if end_date:
-            try:
-                if isinstance(end_date, str):
-                    end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-                else:
-                    end_dt = end_date
-            except:
-                end_dt = None
-        
-        if user_created:
-            try:
-                if isinstance(user_created, str):
-                    user_created_dt = datetime.fromisoformat(user_created.replace('Z', '+00:00'))
-                else:
-                    user_created_dt = user_created
-            except:
-                user_created_dt = None
-        
-        # Calculate subscription metrics
-        is_active = (
-            subscription_status == 'active' and 
-            start_dt and start_dt <= now and 
-            (not end_dt or end_dt > now)
-        )
-        
-        days_remaining = None
-        if end_dt and end_dt > now:
-            days_remaining = (end_dt - now).days
-        
-        days_since_start = None
-        if start_dt:
-            days_since_start = (now - start_dt).days
-        
-        # Get current month usage
-        current_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        
-        if db:
-            # SQLAlchemy queries
-            current_month_downloads = db.query(TranscriptDownload).filter(
-                TranscriptDownload.user_id == user_id,
-                TranscriptDownload.created_at >= current_month_start
-            ).count()
-            
-            total_downloads = db.query(TranscriptDownload).filter(
-                TranscriptDownload.user_id == user_id
-            ).count()
-            
-            # Get first and last download dates
-            first_download = db.query(TranscriptDownload).filter(
-                TranscriptDownload.user_id == user_id
-            ).order_by(TranscriptDownload.created_at.asc()).first()
-            
-            last_download = db.query(TranscriptDownload).filter(
-                TranscriptDownload.user_id == user_id
-            ).order_by(TranscriptDownload.created_at.desc()).first()
-            
-            first_ever_download = first_download.created_at if first_download else None
-            last_download_date = last_download.created_at if last_download else None
-            
-        else:
-            # Direct SQL queries
-            conn = sqlite3.connect(DATABASE_PATH)
-            cursor = conn.cursor()
-            
-            # Current month usage
-            cursor.execute("""
-                SELECT COUNT(*) FROM transcript_downloads 
-                WHERE user_id = ? AND created_at >= ?
-            """, (user_id, current_month_start.isoformat()))
-            current_month_downloads = cursor.fetchone()[0] or 0
-            
-            # Total downloads
-            cursor.execute("""
-                SELECT COUNT(*), MIN(created_at), MAX(created_at)
-                FROM transcript_downloads WHERE user_id = ?
-            """, (user_id,))
-            
-            total_data = cursor.fetchone()
-            total_downloads = total_data[0] if total_data else 0
-            first_ever_download = total_data[1] if total_data else None
-            last_download_date = total_data[2] if total_data else None
-            
-            conn.close()
-        
-        # Get subscription limits and features
-        limits = get_subscription_limits(subscription_tier)
-        
-        # Calculate usage percentage
-        monthly_limit = limits['monthly_downloads']
-        usage_percentage = (current_month_downloads / monthly_limit * 100) if monthly_limit != float('inf') and monthly_limit > 0 else 0
-        
-        # Calculate user engagement metrics
-        account_age_days = (now - user_created_dt).days if user_created_dt else 0
-        avg_downloads_per_day = total_downloads / max(account_age_days, 1)
-        
-        # Format file sizes helper
-        def format_size(size_bytes):
-            if not size_bytes:
-                return "0 B"
-            if size_bytes < 1024:
-                return f"{size_bytes} B"
-            elif size_bytes < 1024 * 1024:
-                return f"{size_bytes / 1024:.1f} KB"
-            else:
-                return f"{size_bytes / (1024 * 1024):.1f} MB"
-        
-        return {
-            "user_id": user_id,
-            "email": email,
-            "account_created": user_created.isoformat() if hasattr(user_created, 'isoformat') else str(user_created),
-            "account_age_days": account_age_days,
-            "subscription": {
-                "tier": subscription_tier,
-                "status": subscription_status,
-                "is_active": is_active,
-                "start_date": start_date.isoformat() if hasattr(start_date, 'isoformat') else str(start_date),
-                "end_date": end_date.isoformat() if hasattr(end_date, 'isoformat') else str(end_date),
-                "days_remaining": days_remaining,
-                "days_since_start": days_since_start,
-                "auto_renewal": subscription_status == 'active'
-            },
-            "current_month": {
-                "downloads": current_month_downloads,
-                "usage_percentage": round(usage_percentage, 1),
-                "remaining_downloads": max(0, monthly_limit - current_month_downloads) if monthly_limit != float('inf') else 'unlimited'
-            },
-            "lifetime_stats": {
-                "total_downloads": total_downloads,
-                "first_download": first_ever_download.isoformat() if hasattr(first_ever_download, 'isoformat') else str(first_ever_download) if first_ever_download else None,
-                "last_download": last_download_date.isoformat() if hasattr(last_download_date, 'isoformat') else str(last_download_date) if last_download_date else None,
-                "avg_downloads_per_day": round(avg_downloads_per_day, 2)
-            },
-            "limits": {k: (v if v != float('inf') else 'unlimited') for k, v in limits.items()},
-            "features": {
-                "bulk_downloads": limits.get('bulk_downloads', False),
-                "priority_processing": limits.get('priority_processing', False),
-                "advanced_formats": limits.get('advanced_formats', False),
-                "api_access": limits.get('api_access', False),
-                "export_formats": limits.get('export_formats', ['txt']),
-                "concurrent_downloads": limits.get('concurrent_downloads', 1)
-            },
-            "status_summary": {
-                "can_download": is_active and (current_month_downloads < monthly_limit or monthly_limit == float('inf')),
-                "limit_reached": current_month_downloads >= monthly_limit and monthly_limit != float('inf'),
-                "needs_upgrade": subscription_tier == 'free' and current_month_downloads >= monthly_limit,
-                "expires_soon": days_remaining is not None and days_remaining <= 7,
-                "heavy_user": avg_downloads_per_day > 5,
-                "new_user": account_age_days <= 30
-            }
-        }
-        
-    except Exception as e:
-        logger.error(f"Error getting subscription status: {e}")
-        return {"error": str(e)}
-
 #===========================================================
-# ROBUST TRANSCRIPT FUNCTIONS - NO MORE DEMO CONTENT!     #
+# SIMPLE TRANSCRIPT FUNCTIONS - NO XML COMPLICATIONS      #
 #===========================================================
 
 def get_youtube_transcript_corrected(video_id: str, clean: bool = True) -> str:
     """
-    ROBUST YouTube transcript extraction - REAL CONTENT ONLY!
-    No more demo content fallbacks - this will get real transcripts or fail properly
+    SIMPLE YouTube transcript extraction - no XML complications
     """
-    logger.info(f"🎯 ROBUST transcript extraction for: {video_id}")
+    logger.info(f"🎯 Simple transcript extraction for: {video_id}")
     
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
         
-        # METHOD 1: Direct English extraction with better error handling
+        # Method 1: Direct simple approach
         try:
-            logger.info("🔄 Method 1: Direct English extraction...")
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+            logger.info("🔄 Trying direct simple method...")
+            transcript = YouTubeTranscriptApi.get_transcript(video_id)
             
-            if transcript_list and len(transcript_list) > 0:
-                logger.info(f"✅ METHOD 1 SUCCESS: Got {len(transcript_list)} segments")
+            if transcript and len(transcript) > 0:
+                logger.info(f"✅ SUCCESS: Got {len(transcript)} transcript segments")
+                return format_transcript_simple(transcript, clean)
                 
-                # Validate the data before processing
-                valid_segments = [seg for seg in transcript_list if seg.get('text', '').strip()]
-                if valid_segments:
-                    return format_transcript_enhanced(valid_segments, clean)
-                else:
-                    logger.warning("📝 Method 1: No valid text in segments")
-                    
         except Exception as e:
-            logger.info(f"📝 Method 1 failed: {str(e)}")
+            logger.info(f"📝 Direct method failed: {str(e)}")
         
-        # METHOD 2: List transcripts approach with better handling
+        # Method 2: Try with language specified
         try:
-            logger.info("🔄 Method 2: List transcripts approach...")
-            transcript_list_obj = YouTubeTranscriptApi.list_transcripts(video_id)
+            logger.info("🔄 Trying with English language...")
+            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
             
-            # Try to get any available transcript
-            available_transcripts = list(transcript_list_obj)
-            logger.info(f"📋 Found {len(available_transcripts)} available transcripts")
-            
-            # First try manual English transcripts
-            for transcript in available_transcripts:
-                if transcript.language_code.startswith('en') and not transcript.is_generated:
-                    try:
-                        logger.info(f"🔄 Trying manual English: {transcript.language_code}")
-                        transcript_data = transcript.fetch()
-                        
-                        if transcript_data and len(transcript_data) > 0:
-                            # Validate data quality
-                            valid_segments = [seg for seg in transcript_data if seg.get('text', '').strip()]
-                            if len(valid_segments) >= 3:  # Need at least 3 valid segments
-                                logger.info(f"✅ METHOD 2A SUCCESS: {len(valid_segments)} valid segments")
-                                return format_transcript_enhanced(valid_segments, clean)
-                                
-                    except Exception as inner_e:
-                        logger.info(f"📝 Manual English {transcript.language_code} failed: {str(inner_e)}")
-                        continue
-            
-            # Then try auto-generated English transcripts
-            for transcript in available_transcripts:
-                if transcript.language_code.startswith('en') and transcript.is_generated:
-                    try:
-                        logger.info(f"🔄 Trying auto-generated English: {transcript.language_code}")
-                        transcript_data = transcript.fetch()
-                        
-                        if transcript_data and len(transcript_data) > 0:
-                            # Validate data quality
-                            valid_segments = [seg for seg in transcript_data if seg.get('text', '').strip()]
-                            if len(valid_segments) >= 3:
-                                logger.info(f"✅ METHOD 2B SUCCESS: {len(valid_segments)} valid segments")
-                                return format_transcript_enhanced(valid_segments, clean)
-                                
-                    except Exception as inner_e:
-                        logger.info(f"📝 Auto-generated English {transcript.language_code} failed: {str(inner_e)}")
-                        continue
-            
-            # Finally try ANY available transcript as last resort
-            for transcript in available_transcripts:
-                try:
-                    logger.info(f"🔄 Trying any available: {transcript.language_code} (generated: {transcript.is_generated})")
-                    transcript_data = transcript.fetch()
-                    
-                    if transcript_data and len(transcript_data) > 0:
-                        # Validate data quality
-                        valid_segments = [seg for seg in transcript_data if seg.get('text', '').strip()]
-                        if len(valid_segments) >= 3:
-                            logger.info(f"✅ METHOD 2C SUCCESS: {len(valid_segments)} valid segments from {transcript.language_code}")
-                            return format_transcript_enhanced(valid_segments, clean)
-                            
-                except Exception as inner_e:
-                    logger.info(f"📝 Language {transcript.language_code} failed: {str(inner_e)}")
-                    continue
-                        
+            if transcript and len(transcript) > 0:
+                logger.info(f"✅ SUCCESS: Got {len(transcript)} transcript segments")
+                return format_transcript_simple(transcript, clean)
+                
         except Exception as e:
-            logger.info(f"📝 Method 2 completely failed: {str(e)}")
+            logger.info(f"📝 English method failed: {str(e)}")
         
-        # METHOD 3: Alternative language codes approach
+        # Method 3: List available and try first one
         try:
-            logger.info("🔄 Method 3: Alternative language codes...")
+            logger.info("🔄 Trying list transcripts method...")
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
             
-            # Try various English language codes that might work
-            language_variants = [
-                ['en'],
-                ['en-US'], 
-                ['en-GB'],
-                ['en-CA'],
-                ['en-AU'],
-                ['en-US', 'en'],
-                ['en-GB', 'en']
-            ]
-            
-            for lang_list in language_variants:
+            # Get the first available transcript
+            for transcript_obj in transcript_list:
                 try:
-                    logger.info(f"🔄 Trying language variant: {lang_list}")
-                    transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=lang_list)
+                    logger.info(f"🔄 Trying {transcript_obj.language_code}...")
+                    transcript = transcript_obj.fetch()
                     
-                    if transcript_list and len(transcript_list) > 0:
-                        valid_segments = [seg for seg in transcript_list if seg.get('text', '').strip()]
-                        if len(valid_segments) >= 3:
-                            logger.info(f"✅ METHOD 3 SUCCESS: {len(valid_segments)} segments with {lang_list}")
-                            return format_transcript_enhanced(valid_segments, clean)
-                            
-                except Exception as lang_e:
-                    logger.info(f"📝 Language variant {lang_list} failed: {str(lang_e)}")
-                    continue
+                    if transcript and len(transcript) > 0:
+                        logger.info(f"✅ SUCCESS with {transcript_obj.language_code}: {len(transcript)} segments")
+                        return format_transcript_simple(transcript, clean)
                         
+                except Exception as fetch_error:
+                    logger.info(f"📝 Failed to fetch {transcript_obj.language_code}: {str(fetch_error)}")
+                    continue
+                    
         except Exception as e:
-            logger.info(f"📝 Method 3 failed: {str(e)}")
+            logger.info(f"📝 List method failed: {str(e)}")
         
-        # If we get here, all methods failed - raise a proper error
-        logger.error(f"💥 ALL METHODS FAILED for video {video_id}")
+        # If we get here, all methods failed
+        logger.error(f"💥 All methods failed for video {video_id}")
         raise HTTPException(
             status_code=404,
             detail=f"No transcript found for video {video_id}. This video may not have captions enabled, may be private, age-restricted, or unavailable. Please try a different video."
         )
         
     except HTTPException:
-        # Re-raise HTTP exceptions as-is
         raise
     except Exception as e:
-        logger.error(f"💥 Critical error in transcript extraction for {video_id}: {str(e)}")
+        logger.error(f"💥 Critical error: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to extract transcript for video {video_id}. Error: {str(e)}"
         )
 
-def format_transcript_enhanced(transcript_list: list, clean: bool = True) -> str:
+def format_transcript_simple(transcript_list: list, clean: bool = True) -> str:
     """
-    ENHANCED transcript formatting with strict validation
+    Simple transcript formatting - no XML complications
     """
-    if not transcript_list:
-        raise Exception("Empty transcript data provided")
+    if not transcript_list or len(transcript_list) == 0:
+        raise Exception("Empty transcript data")
     
-    logger.info(f"🔄 Formatting {len(transcript_list)} segments (clean={clean})")
+    logger.info(f"🔄 Simple formatting: {len(transcript_list)} segments (clean={clean})")
     
     try:
         if clean:
-            # Clean format - readable paragraph text
+            # Clean format - just join all text
             texts = []
             for item in transcript_list:
                 text = item.get('text', '').strip()
                 if text:
-                    # Clean and normalize
-                    cleaned_text = clean_transcript_text(text)
-                    if cleaned_text and len(cleaned_text.strip()) > 0:
-                        texts.append(cleaned_text)
+                    # Basic cleaning
+                    text = text.replace('\n', ' ').replace('\r', ' ')
+                    text = ' '.join(text.split())  # normalize whitespace
+                    if text:
+                        texts.append(text)
             
             if not texts:
-                raise Exception("No valid text content found after cleaning")
+                raise Exception("No valid text found")
             
-            # Join and final cleanup
             result = ' '.join(texts)
-            result = ' '.join(result.split())  # Normalize whitespace
-            result = result.replace(' .', '.').replace(' ,', ',')  # Fix punctuation
-            
-            if len(result.strip()) < 20:
-                raise Exception(f"Transcript too short: {len(result)} characters")
-                
-            logger.info(f"✅ Clean format: {len(result)} characters, {len(texts)} segments")
+            logger.info(f"✅ Clean format: {len(result)} characters")
             return result
             
         else:
@@ -851,19 +519,19 @@ def format_transcript_enhanced(transcript_list: list, clean: bool = True) -> str
                 text = item.get('text', '').strip()
                 
                 if text:
-                    cleaned_text = clean_transcript_text(text)
-                    if cleaned_text and len(cleaned_text.strip()) > 0:
-                        # Format timestamp
+                    # Basic cleaning
+                    text = text.replace('\n', ' ').replace('\r', ' ')
+                    text = ' '.join(text.split())
+                    
+                    if text:
+                        # Simple timestamp format
                         minutes = int(start // 60)
                         seconds = int(start % 60)
                         timestamp = f"[{minutes:02d}:{seconds:02d}]"
-                        lines.append(f"{timestamp} {cleaned_text}")
+                        lines.append(f"{timestamp} {text}")
             
             if not lines:
-                raise Exception("No valid timestamped content created")
-            
-            if len(lines) < 2:
-                logger.warning(f"Very short transcript: only {len(lines)} lines")
+                raise Exception("No valid timestamped lines")
             
             result = '\n'.join(lines)
             logger.info(f"✅ Timestamped format: {len(lines)} lines")
@@ -872,41 +540,6 @@ def format_transcript_enhanced(transcript_list: list, clean: bool = True) -> str
     except Exception as e:
         logger.error(f"❌ Formatting failed: {str(e)}")
         raise Exception(f"Failed to format transcript: {str(e)}")
-
-def clean_transcript_text(text: str) -> str:
-    """
-    Clean transcript text more effectively
-    """
-    if not text:
-        return ""
-    
-    try:
-        # Basic HTML entity fixes
-        text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
-        text = text.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
-        
-        # Remove HTML/XML tags
-        import re
-        text = re.sub(r'<[^>]+>', '', text)
-        
-        # Remove common transcript artifacts
-        text = re.sub(r'\[Music\]', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'\[Applause\]', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'\[Laughter\]', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'\(inaudible\)', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'\(unintelligible\)', '', text, flags=re.IGNORECASE)
-        
-        # Normalize whitespace
-        text = ' '.join(text.split())
-        
-        # Remove leading/trailing punctuation artifacts
-        text = text.strip('.,!?;: -')
-        
-        return text.strip()
-        
-    except Exception as e:
-        logger.warning(f"Text cleaning error: {str(e)}")
-        return text.strip() if text else ""
 
 #=======================================================================
 # API ENDPOINTS: ALL THE ENDPOINTS OF THE YOUTUBE TRANS DOWNLOADER API #
@@ -977,24 +610,24 @@ async def download_transcript_corrected(
     db: Session = Depends(get_db)
 ):
     """
-    FIXED transcript downloader - NO MORE DEMO CONTENT!
+    Simple transcript downloader - no complications
     """
     video_id = request.youtube_id.strip()
     
     # Extract video ID from various YouTube URL formats
     if 'youtube.com' in video_id or 'youtu.be' in video_id:
         patterns = [
-            r'(?:youtube\.com\/watch\?v=)([^&\n?#]+)',      # Standard watch URL
-            r'(?:youtu\.be\/)([^&\n?#]+)',                  # Short URL
-            r'(?:youtube\.com\/embed\/)([^&\n?#]+)',        # Embed URL
-            r'(?:youtube\.com\/shorts\/)([^&\n?#]+)',       # Shorts URL
-            r'[?&]v=([^&\n?#]+)'                            # Video parameter
+            r'(?:youtube\.com\/watch\?v=)([^&\n?#]+)',
+            r'(?:youtu\.be\/)([^&\n?#]+)',
+            r'(?:youtube\.com\/embed\/)([^&\n?#]+)',
+            r'(?:youtube\.com\/shorts\/)([^&\n?#]+)',
+            r'[?&]v=([^&\n?#]+)'
         ]
         
         for pattern in patterns:
             match = re.search(pattern, video_id)
             if match:
-                video_id = match.group(1)[:11]  # YouTube IDs are 11 characters
+                video_id = match.group(1)[:11]
                 logger.info(f"✅ Extracted video ID: {video_id}")
                 break
     
@@ -1005,9 +638,9 @@ async def download_transcript_corrected(
             detail="Invalid YouTube video ID. Please provide a valid 11-character video ID or full YouTube URL."
         )
     
-    logger.info(f"🎯 REAL TRANSCRIPT request for: {video_id}")
+    logger.info(f"🎯 Simple transcript request for: {video_id}")
     
-    # Check subscription limits based on transcript type
+    # Check subscription limits
     transcript_type = "clean" if request.clean_transcript else "unclean"
     limit_check = check_subscription_limit(user.id, transcript_type, db)
     
@@ -1017,18 +650,18 @@ async def download_transcript_corrected(
             detail=f"You've reached your monthly limit for {transcript_type} transcripts. Please upgrade your plan."
         )
     
-    # Extract transcript using ROBUST method - NO DEMO CONTENT!
+    # Extract transcript using simple method
     try:
         transcript_text = get_youtube_transcript_corrected(video_id, clean=request.clean_transcript)
         
-        # Validate that we got meaningful content
-        if not transcript_text or len(transcript_text.strip()) < 20:
+        # Validate result
+        if not transcript_text or len(transcript_text.strip()) < 10:
             raise HTTPException(
                 status_code=404,
                 detail=f"No valid transcript content found for video {video_id}."
             )
         
-        # Record successful download for usage tracking
+        # Record successful download
         new_download = TranscriptDownload(
             user_id=user.id,
             youtube_id=video_id,
@@ -1039,7 +672,7 @@ async def download_transcript_corrected(
         db.add(new_download)
         db.commit()
         
-        logger.info(f"🎉 REAL TRANSCRIPT SUCCESS: {user.username} downloaded {len(transcript_text)} chars for {video_id}")
+        logger.info(f"🎉 Simple SUCCESS: {user.username} downloaded {len(transcript_text)} chars for {video_id}")
         
         return {
             "transcript": transcript_text,
@@ -1051,7 +684,7 @@ async def download_transcript_corrected(
         raise
     except Exception as e:
         db.rollback()
-        logger.error(f"💥 Transcript extraction failed: {str(e)}")
+        logger.error(f"💥 Simple extraction failed: {str(e)}")
         
         raise HTTPException(
             status_code=500,
@@ -1063,7 +696,7 @@ async def get_subscription_status_ultra_safe(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Ultra-safe subscription status - handles all database issues gracefully"""
+    """Ultra-safe subscription status"""
     try:
         # Get basic subscription info
         subscription = db.query(Subscription).filter(
@@ -1086,30 +719,19 @@ async def get_subscription_status_ultra_safe(
                 status = "active" if tier != "free" else "inactive"
                 expiry_date = subscription.expiry_date if hasattr(subscription, 'expiry_date') else None
         
-        # Calculate usage for current month using safe method
+        # Calculate usage for current month
         month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         
-        # Safe usage calculation with multiple fallbacks
+        # Safe usage calculation
         def get_safe_usage(transcript_type):
             try:
-                # Method 1: Try ORM query
                 return db.query(TranscriptDownload).filter(
                     TranscriptDownload.user_id == current_user.id,
                     TranscriptDownload.transcript_type == transcript_type,
                     TranscriptDownload.created_at >= month_start
                 ).count()
             except Exception:
-                try:
-                    # Method 2: Raw SQL fallback
-                    result = db.execute(
-                        "SELECT COUNT(*) FROM transcript_downloads WHERE user_id = ? AND transcript_type = ? AND created_at >= ?",
-                        (current_user.id, transcript_type, month_start.isoformat())
-                    )
-                    return result.scalar() or 0
-                except Exception:
-                    # Method 3: Ultimate fallback
-                    logger.warning(f"All usage queries failed for {transcript_type}, returning 0")
-                    return 0
+                return 0
         
         # Get usage for all types safely
         clean_usage = get_safe_usage("clean")
@@ -1167,24 +789,6 @@ async def get_subscription_status_ultra_safe(
             "stripe_customer_id": None,
             "current_period_end": None
         }
-
-@app.get("/subscription_status_enhanced/")
-async def get_subscription_status_enhanced_endpoint(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """
-    NEW ENDPOINT: Enhanced subscription status with detailed analytics
-    """
-    try:
-        enhanced_status = get_subscription_status_enhanced(current_user.id, db)
-        return enhanced_status
-    except Exception as e:
-        logger.error(f"❌ Error getting enhanced subscription status: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to retrieve enhanced subscription status"
-        )
 
 @app.post("/confirm_payment/")
 async def confirm_payment_endpoint(
@@ -1302,7 +906,7 @@ async def get_test_videos():
         "message": "These video IDs have been verified to work for transcript extraction",
         "videos": working_videos,
         "usage": "Use any of these video IDs to test your transcript downloader",
-        "note": "Real transcript extraction - no demo content"
+        "note": "Simple transcript extraction - no complications"
     }
 
 if __name__ == "__main__":
