@@ -334,24 +334,22 @@ def get_or_create_stripe_customer(user, db: Session):
         )
 
 #=================================#
-# ENHANCED SUBSCRIPTION FUNCTIONS #
+# FIXED SUBSCRIPTION FUNCTIONS    #
 #=================================#
 
-# FIXED SUBSCRIPTION FUNCTION - Resolves datetime timezone issues
 def check_subscription_limit(user_id: int, transcript_type: str = None, db: Session = None) -> dict:
     """
-    FIXED: Enhanced subscription limit checker with timezone handling
+    FIXED subscription limit checker - no timezone issues
     """
     try:
         if db:
-            # Get user with subscription details
+            # Get user and subscription
             user = db.query(User).filter(User.id == user_id).first()
             if not user:
                 return {"allowed": False, "error": "User not found"}
             
             subscription = db.query(Subscription).filter(Subscription.user_id == user_id).first()
             
-            # Determine subscription tier and status
             if not subscription:
                 subscription_tier = "free"
                 subscription_status = "inactive"
@@ -363,110 +361,64 @@ def check_subscription_limit(user_id: int, transcript_type: str = None, db: Sess
                 start_date = subscription.start_date
                 end_date = subscription.expiry_date
         else:
-            # Fallback to direct database access
-            conn = sqlite3.connect(DATABASE_PATH)
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                SELECT subscription_tier, subscription_status, subscription_start_date, subscription_end_date 
-                FROM users WHERE id = ?
-            """, (user_id,))
-            
-            user_data = cursor.fetchone()
-            if not user_data:
-                return {"allowed": False, "error": "User not found"}
-            
-            subscription_tier, subscription_status, start_date, end_date = user_data
-            conn.close()
+            return {"allowed": False, "error": "Database connection required"}
         
-        # FIXED: Parse subscription dates with proper timezone handling
-        now = datetime.now()  # Use naive datetime consistently
+        # Use NAIVE datetimes to avoid timezone issues
+        now = datetime.now()  # Naive datetime
         start_dt = None
         end_dt = None
         
         if start_date:
             try:
-                if isinstance(start_date, str):
-                    # Remove timezone info to make it naive
-                    start_dt = datetime.fromisoformat(start_date.replace('Z', '').replace('+00:00', ''))
+                if hasattr(start_date, 'replace') and start_date.tzinfo:
+                    start_dt = start_date.replace(tzinfo=None)
                 else:
-                    # Convert datetime to naive if needed
-                    start_dt = start_date.replace(tzinfo=None) if start_date.tzinfo else start_date
+                    start_dt = start_date
             except:
                 start_dt = None
         
         if end_date:
             try:
-                if isinstance(end_date, str):
-                    # Remove timezone info to make it naive
-                    end_dt = datetime.fromisoformat(end_date.replace('Z', '').replace('+00:00', ''))
+                if hasattr(end_date, 'replace') and end_date.tzinfo:
+                    end_dt = end_date.replace(tzinfo=None)
                 else:
-                    # Convert datetime to naive if needed
-                    end_dt = end_date.replace(tzinfo=None) if end_date.tzinfo else end_date
+                    end_dt = end_date
             except:
                 end_dt = None
         
-        # Check if subscription is active (all naive datetimes now)
+        # Check subscription status
         is_subscription_active = (
             subscription_status == 'active' and 
             start_dt and start_dt <= now and 
             (not end_dt or end_dt > now)
         )
         
-        # Get current month's usage
+        # Get current month usage
         current_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         
-        if db:
-            # Use SQLAlchemy for usage queries
-            downloads_this_month = db.query(TranscriptDownload).filter(
-                TranscriptDownload.user_id == user_id,
-                TranscriptDownload.created_at >= current_month_start
-            ).count()
-            
-            # Get breakdown by type if needed
-            if transcript_type:
-                type_downloads = db.query(TranscriptDownload).filter(
-                    TranscriptDownload.user_id == user_id,
-                    TranscriptDownload.transcript_type == transcript_type,
-                    TranscriptDownload.created_at >= current_month_start
-                ).count()
-            else:
-                type_downloads = downloads_this_month
-        else:
-            # Direct database query fallback
-            conn = sqlite3.connect(DATABASE_PATH)
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                SELECT COUNT(*) FROM transcript_downloads 
-                WHERE user_id = ? AND created_at >= ?
-            """, (user_id, current_month_start.isoformat()))
-            
-            downloads_this_month = cursor.fetchone()[0] or 0
-            type_downloads = downloads_this_month
-            conn.close()
+        downloads_this_month = db.query(TranscriptDownload).filter(
+            TranscriptDownload.user_id == user_id,
+            TranscriptDownload.created_at >= current_month_start
+        ).count()
         
         # Get subscription limits
         limits = get_subscription_limits(subscription_tier)
         monthly_limit = limits['monthly_downloads']
         
-        # Calculate usage metrics
-        usage_percentage = (downloads_this_month / monthly_limit * 100) if monthly_limit != float('inf') and monthly_limit > 0 else 0
-        remaining_downloads = max(0, monthly_limit - downloads_this_month) if monthly_limit != float('inf') else float('inf')
-        
-        # Determine access status
-        if not is_subscription_active:
-            if subscription_tier in ['free', 'trial']:
-                allowed = downloads_this_month < monthly_limit
-                reason = "Free tier limit" if not allowed else "Free tier access"
-            else:
-                allowed = False
-                reason = "Subscription expired or inactive"
-        else:
+        # Determine access
+        if subscription_tier in ['free', 'trial']:
+            allowed = downloads_this_month < monthly_limit
+            reason = "Free tier access" if allowed else "Free tier limit reached"
+        elif is_subscription_active:
             allowed = downloads_this_month < monthly_limit or monthly_limit == float('inf')
             reason = "Subscription active" if allowed else "Monthly limit exceeded"
+        else:
+            allowed = downloads_this_month < 5  # Emergency fallback to free tier
+            reason = "Subscription expired - using free tier"
         
-        logger.info(f"✅ Subscription check: {subscription_tier} tier, {downloads_this_month}/{monthly_limit} downloads, allowed={allowed}")
+        usage_percentage = (downloads_this_month / monthly_limit * 100) if monthly_limit != float('inf') and monthly_limit > 0 else 0
+        
+        logger.info(f"✅ Subscription: {subscription_tier}, {downloads_this_month}/{monthly_limit}, allowed={allowed}")
         
         return {
             "allowed": allowed,
@@ -474,33 +426,22 @@ def check_subscription_limit(user_id: int, transcript_type: str = None, db: Sess
             "subscription": {
                 "tier": subscription_tier,
                 "status": subscription_status,
-                "is_active": is_subscription_active,
-                "start_date": start_date.isoformat() if start_date and hasattr(start_date, 'isoformat') else str(start_date),
-                "end_date": end_date.isoformat() if end_date and hasattr(end_date, 'isoformat') else str(end_date),
-                "days_remaining": (end_dt - now).days if end_dt and end_dt > now else None
+                "is_active": is_subscription_active
             },
             "usage": {
                 "downloads_this_month": downloads_this_month,
                 "monthly_limit": monthly_limit if monthly_limit != float('inf') else 'unlimited',
-                "remaining_downloads": remaining_downloads if remaining_downloads != float('inf') else 'unlimited',
-                "usage_percentage": round(usage_percentage, 1),
-                "type_specific_downloads": type_downloads
-            },
-            "limits": limits,
-            "features": {
-                "bulk_downloads": limits.get('bulk_downloads', False),
-                "priority_processing": limits.get('priority_processing', False),
-                "advanced_formats": limits.get('advanced_formats', False),
-                "api_access": limits.get('api_access', False)
+                "usage_percentage": round(usage_percentage, 1)
             }
         }
         
     except Exception as e:
-        logger.error(f"Error checking subscription limit: {e}")
+        logger.error(f"Subscription check error: {e}")
+        # On error, allow free tier limits to avoid blocking users
         return {
-            "allowed": True,  # Allow on error to avoid blocking users
-            "error": str(e),
-            "usage": {"downloads_this_month": 0, "monthly_limit": 5}
+            "allowed": True,
+            "reason": "Error in subscription check - allowing access",
+            "error": str(e)
         }
 
 def get_subscription_status_enhanced(user_id: int, db: Session = None) -> dict:
@@ -721,233 +662,251 @@ def get_subscription_status_enhanced(user_id: int, db: Session = None) -> dict:
         return {"error": str(e)}
 
 #===========================================================
-# ENHANCED TRANSCRIPT FUNCTIONS
+# ROBUST TRANSCRIPT FUNCTIONS - NO MORE DEMO CONTENT!     #
 #===========================================================
 
-# FIXED TRANSCRIPT EXTRACTION - Simplified and more reliable
 def get_youtube_transcript_corrected(video_id: str, clean: bool = True) -> str:
     """
-    FIXED: Simplified YouTube transcript extraction focusing on reliability
+    ROBUST YouTube transcript extraction - REAL CONTENT ONLY!
+    No more demo content fallbacks - this will get real transcripts or fail properly
     """
-    logger.info(f"🎯 FIXED transcript extraction for: {video_id}")
+    logger.info(f"🎯 ROBUST transcript extraction for: {video_id}")
     
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
         
-        # METHOD 1: Simple direct extraction with just English
+        # METHOD 1: Direct English extraction with better error handling
         try:
-            logger.info("🔄 Trying simple English extraction...")
+            logger.info("🔄 Method 1: Direct English extraction...")
             transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
             
             if transcript_list and len(transcript_list) > 0:
-                logger.info(f"✅ SUCCESS: Got {len(transcript_list)} transcript segments")
-                return format_transcript_enhanced(transcript_list, clean)
+                logger.info(f"✅ METHOD 1 SUCCESS: Got {len(transcript_list)} segments")
                 
+                # Validate the data before processing
+                valid_segments = [seg for seg in transcript_list if seg.get('text', '').strip()]
+                if valid_segments:
+                    return format_transcript_enhanced(valid_segments, clean)
+                else:
+                    logger.warning("📝 Method 1: No valid text in segments")
+                    
         except Exception as e:
-            logger.info(f"📝 Direct English extraction failed: {str(e)}")
+            logger.info(f"📝 Method 1 failed: {str(e)}")
         
-        # METHOD 2: List transcripts and find English
+        # METHOD 2: List transcripts approach with better handling
         try:
-            logger.info("🔄 Trying transcript list method...")
+            logger.info("🔄 Method 2: List transcripts approach...")
             transcript_list_obj = YouTubeTranscriptApi.list_transcripts(video_id)
             
-            # Find English transcript (manual or auto-generated)
-            english_transcript = None
+            # Try to get any available transcript
+            available_transcripts = list(transcript_list_obj)
+            logger.info(f"📋 Found {len(available_transcripts)} available transcripts")
             
-            # Look for manual English transcript first
-            for transcript in transcript_list_obj:
-                if transcript.language_code == 'en':
-                    english_transcript = transcript
-                    logger.info(f"🎯 Found manual English transcript")
-                    break
-            
-            # If no manual transcript, try auto-generated
-            if not english_transcript:
-                try:
-                    english_transcript = transcript_list_obj.find_generated_transcript(['en'])
-                    logger.info("🤖 Found auto-generated English transcript")
-                except:
-                    pass
-            
-            # Fetch and format the transcript
-            if english_transcript:
-                transcript_data = english_transcript.fetch()
-                if transcript_data and len(transcript_data) > 0:
-                    logger.info(f"✅ LIST SUCCESS: Got {len(transcript_data)} segments")
-                    return format_transcript_enhanced(transcript_data, clean)
+            # First try manual English transcripts
+            for transcript in available_transcripts:
+                if transcript.language_code.startswith('en') and not transcript.is_generated:
+                    try:
+                        logger.info(f"🔄 Trying manual English: {transcript.language_code}")
+                        transcript_data = transcript.fetch()
                         
-        except Exception as e:
-            logger.info(f"📝 List method failed: {str(e)}")
-        
-        # METHOD 3: Try any available language and translate
-        try:
-            logger.info("🔄 Trying any available transcript...")
-            transcript_list_obj = YouTubeTranscriptApi.list_transcripts(video_id)
+                        if transcript_data and len(transcript_data) > 0:
+                            # Validate data quality
+                            valid_segments = [seg for seg in transcript_data if seg.get('text', '').strip()]
+                            if len(valid_segments) >= 3:  # Need at least 3 valid segments
+                                logger.info(f"✅ METHOD 2A SUCCESS: {len(valid_segments)} valid segments")
+                                return format_transcript_enhanced(valid_segments, clean)
+                                
+                    except Exception as inner_e:
+                        logger.info(f"📝 Manual English {transcript.language_code} failed: {str(inner_e)}")
+                        continue
             
-            # Get any available transcript
-            for transcript in transcript_list_obj:
+            # Then try auto-generated English transcripts
+            for transcript in available_transcripts:
+                if transcript.language_code.startswith('en') and transcript.is_generated:
+                    try:
+                        logger.info(f"🔄 Trying auto-generated English: {transcript.language_code}")
+                        transcript_data = transcript.fetch()
+                        
+                        if transcript_data and len(transcript_data) > 0:
+                            # Validate data quality
+                            valid_segments = [seg for seg in transcript_data if seg.get('text', '').strip()]
+                            if len(valid_segments) >= 3:
+                                logger.info(f"✅ METHOD 2B SUCCESS: {len(valid_segments)} valid segments")
+                                return format_transcript_enhanced(valid_segments, clean)
+                                
+                    except Exception as inner_e:
+                        logger.info(f"📝 Auto-generated English {transcript.language_code} failed: {str(inner_e)}")
+                        continue
+            
+            # Finally try ANY available transcript as last resort
+            for transcript in available_transcripts:
                 try:
-                    logger.info(f"🔄 Trying transcript in: {transcript.language_code}")
+                    logger.info(f"🔄 Trying any available: {transcript.language_code} (generated: {transcript.is_generated})")
                     transcript_data = transcript.fetch()
+                    
                     if transcript_data and len(transcript_data) > 0:
-                        logger.info(f"✅ SUCCESS with {transcript.language_code}: {len(transcript_data)} segments")
-                        return format_transcript_enhanced(transcript_data, clean)
+                        # Validate data quality
+                        valid_segments = [seg for seg in transcript_data if seg.get('text', '').strip()]
+                        if len(valid_segments) >= 3:
+                            logger.info(f"✅ METHOD 2C SUCCESS: {len(valid_segments)} valid segments from {transcript.language_code}")
+                            return format_transcript_enhanced(valid_segments, clean)
+                            
                 except Exception as inner_e:
-                    logger.info(f"📝 Failed with {transcript.language_code}: {str(inner_e)}")
+                    logger.info(f"📝 Language {transcript.language_code} failed: {str(inner_e)}")
                     continue
                         
         except Exception as e:
-            logger.info(f"📝 Any language method failed: {str(e)}")
+            logger.info(f"📝 Method 2 completely failed: {str(e)}")
         
-        # If all methods fail, log the video ID and return demo content
-        logger.warning(f"⚠️ All extraction methods failed for {video_id}")
-        logger.info(f"🔄 Falling back to demo content for testing")
-        return get_demo_content(clean)
+        # METHOD 3: Alternative language codes approach
+        try:
+            logger.info("🔄 Method 3: Alternative language codes...")
+            
+            # Try various English language codes that might work
+            language_variants = [
+                ['en'],
+                ['en-US'], 
+                ['en-GB'],
+                ['en-CA'],
+                ['en-AU'],
+                ['en-US', 'en'],
+                ['en-GB', 'en']
+            ]
+            
+            for lang_list in language_variants:
+                try:
+                    logger.info(f"🔄 Trying language variant: {lang_list}")
+                    transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=lang_list)
+                    
+                    if transcript_list and len(transcript_list) > 0:
+                        valid_segments = [seg for seg in transcript_list if seg.get('text', '').strip()]
+                        if len(valid_segments) >= 3:
+                            logger.info(f"✅ METHOD 3 SUCCESS: {len(valid_segments)} segments with {lang_list}")
+                            return format_transcript_enhanced(valid_segments, clean)
+                            
+                except Exception as lang_e:
+                    logger.info(f"📝 Language variant {lang_list} failed: {str(lang_e)}")
+                    continue
+                        
+        except Exception as e:
+            logger.info(f"📝 Method 3 failed: {str(e)}")
         
+        # If we get here, all methods failed - raise a proper error
+        logger.error(f"💥 ALL METHODS FAILED for video {video_id}")
+        raise HTTPException(
+            status_code=404,
+            detail=f"No transcript found for video {video_id}. This video may not have captions enabled, may be private, age-restricted, or unavailable. Please try a different video."
+        )
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
         logger.error(f"💥 Critical error in transcript extraction for {video_id}: {str(e)}")
         raise HTTPException(
-            status_code=404,
-            detail=f"Unable to extract transcript for video {video_id}. The video may not have captions enabled, be private, or be unavailable."
+            status_code=500,
+            detail=f"Failed to extract transcript for video {video_id}. Error: {str(e)}"
         )
 
-# FIXED FORMAT FUNCTION - Better error handling
 def format_transcript_enhanced(transcript_list: list, clean: bool = True) -> str:
     """
-    FIXED: Enhanced transcript formatting with better error handling
+    ENHANCED transcript formatting with strict validation
     """
     if not transcript_list:
-        logger.warning("📝 Empty transcript list received")
-        raise Exception("Empty transcript data")
+        raise Exception("Empty transcript data provided")
     
-    logger.info(f"🔄 Formatting {len(transcript_list)} transcript segments (clean={clean})")
+    logger.info(f"🔄 Formatting {len(transcript_list)} segments (clean={clean})")
     
     try:
         if clean:
-            # Enhanced clean format - create readable paragraph text
+            # Clean format - readable paragraph text
             texts = []
             for item in transcript_list:
                 text = item.get('text', '').strip()
                 if text:
-                    # Clean and normalize the text
-                    text = clean_transcript_text(text)
-                    if text and len(text) > 1:  # Only add meaningful text
-                        texts.append(text)
+                    # Clean and normalize
+                    cleaned_text = clean_transcript_text(text)
+                    if cleaned_text and len(cleaned_text.strip()) > 0:
+                        texts.append(cleaned_text)
             
             if not texts:
-                logger.warning("📝 No valid text found in transcript segments")
-                raise Exception("No valid text content found")
+                raise Exception("No valid text content found after cleaning")
             
-            # Join all text segments into one continuous string
+            # Join and final cleanup
             result = ' '.join(texts)
-            
-            # Final cleanup for better readability
             result = ' '.join(result.split())  # Normalize whitespace
-            result = result.replace(' .', '.').replace(' ,', ',')  # Fix punctuation spacing
+            result = result.replace(' .', '.').replace(' ,', ',')  # Fix punctuation
             
-            # Validate that we have meaningful content
-            if len(result) < 10:  # Too short, likely invalid
-                logger.warning(f"📝 Transcript too short: {len(result)} characters")
-                raise Exception("Transcript too short or invalid")
+            if len(result.strip()) < 20:
+                raise Exception(f"Transcript too short: {len(result)} characters")
                 
-            logger.info(f"✅ Clean transcript formatted: {len(result)} characters")
+            logger.info(f"✅ Clean format: {len(result)} characters, {len(texts)} segments")
             return result
+            
         else:
-            # Enhanced timestamped format - each line has [MM:SS] timestamp
+            # Timestamped format
             lines = []
             for item in transcript_list:
                 start = item.get('start', 0)
                 text = item.get('text', '').strip()
+                
                 if text:
-                    # Clean the text but preserve timestamps
-                    text = clean_transcript_text(text)
-                    if text and len(text) > 1:
-                        # Convert seconds to MM:SS format
+                    cleaned_text = clean_transcript_text(text)
+                    if cleaned_text and len(cleaned_text.strip()) > 0:
+                        # Format timestamp
                         minutes = int(start // 60)
                         seconds = int(start % 60)
                         timestamp = f"[{minutes:02d}:{seconds:02d}]"
-                        lines.append(f"{timestamp} {text}")
+                        lines.append(f"{timestamp} {cleaned_text}")
             
             if not lines:
-                logger.warning("📝 No valid timestamped lines created")
-                raise Exception("No valid timestamped content")
+                raise Exception("No valid timestamped content created")
             
-            # Validate that we have enough content
-            if len(lines) < 3:  # Too few lines, likely invalid
-                logger.warning(f"📝 Too few transcript lines: {len(lines)}")
-                # Don't fail completely, just warn
+            if len(lines) < 2:
+                logger.warning(f"Very short transcript: only {len(lines)} lines")
             
             result = '\n'.join(lines)
-            logger.info(f"✅ Timestamped transcript formatted: {len(lines)} lines")
+            logger.info(f"✅ Timestamped format: {len(lines)} lines")
             return result
             
     except Exception as e:
-        logger.error(f"❌ Error formatting transcript: {str(e)}")
+        logger.error(f"❌ Formatting failed: {str(e)}")
         raise Exception(f"Failed to format transcript: {str(e)}")
 
-# IMPROVED CLEAN FUNCTION
 def clean_transcript_text(text: str) -> str:
     """
-    IMPROVED: Clean transcript text with better handling
+    Clean transcript text more effectively
     """
     if not text:
         return ""
     
     try:
-        # Fix common HTML entities
+        # Basic HTML entity fixes
         text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
-        text = text.replace('\n', ' ').replace('\r', ' ')
+        text = text.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
         
-        # Remove HTML/XML tags (like <c>, <i>, etc.)
+        # Remove HTML/XML tags
         import re
         text = re.sub(r'<[^>]+>', '', text)
         
         # Remove common transcript artifacts
-        text = re.sub(r'\[.*?\]', '', text)  # Remove [Music], [Applause], etc.
-        text = re.sub(r'\(.*?\)', '', text)  # Remove (inaudible), etc.
+        text = re.sub(r'\[Music\]', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\[Applause\]', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\[Laughter\]', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\(inaudible\)', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\(unintelligible\)', '', text, flags=re.IGNORECASE)
         
-        # Normalize whitespace (replace multiple spaces with single space)
+        # Normalize whitespace
         text = ' '.join(text.split())
         
-        # Remove leading/trailing punctuation artifacts that don't belong
+        # Remove leading/trailing punctuation artifacts
         text = text.strip('.,!?;: -')
         
         return text.strip()
+        
     except Exception as e:
-        logger.warning(f"📝 Error cleaning text: {str(e)}")
+        logger.warning(f"Text cleaning error: {str(e)}")
         return text.strip() if text else ""
-
-# SIMPLIFIED DEMO CONTENT
-def get_demo_content(clean: bool) -> str:
-    """
-    IMPROVED: Better demo content that clearly indicates it's a fallback
-    """
-    demo_text = """[DEMO CONTENT - Transcript extraction failed] 
-    
-    This is demonstration content because the actual YouTube transcript could not be extracted. 
-    The video may not have captions available, may be private, or there might be a temporary issue with YouTube's transcript service.
-    
-    Please try:
-    1. A different video with confirmed captions
-    2. One of the working example videos provided
-    3. Checking if the video has captions enabled on YouTube
-    
-    If you continue to see this message, please contact support."""
-    
-    if clean:
-        return demo_text
-    else:
-        # Add timestamps for demonstration
-        lines = [
-            "[00:00] [DEMO CONTENT - Transcript extraction failed]",
-            "[00:05] This is demonstration content because the actual YouTube transcript",
-            "[00:10] could not be extracted. The video may not have captions available,",
-            "[00:15] may be private, or there might be a temporary issue",
-            "[00:20] with YouTube's transcript service.",
-            "[00:25] Please try a different video with confirmed captions",
-            "[00:30] or one of the working example videos provided."
-        ]
-        return '\n'.join(lines)
 
 #=======================================================================
 # API ENDPOINTS: ALL THE ENDPOINTS OF THE YOUTUBE TRANS DOWNLOADER API #
@@ -1018,7 +977,7 @@ async def download_transcript_corrected(
     db: Session = Depends(get_db)
 ):
     """
-    Enhanced transcript downloader with robust extraction methods
+    FIXED transcript downloader - NO MORE DEMO CONTENT!
     """
     video_id = request.youtube_id.strip()
     
@@ -1046,7 +1005,7 @@ async def download_transcript_corrected(
             detail="Invalid YouTube video ID. Please provide a valid 11-character video ID or full YouTube URL."
         )
     
-    logger.info(f"🎯 ENHANCED transcript request for: {video_id}")
+    logger.info(f"🎯 REAL TRANSCRIPT request for: {video_id}")
     
     # Check subscription limits based on transcript type
     transcript_type = "clean" if request.clean_transcript else "unclean"
@@ -1058,15 +1017,15 @@ async def download_transcript_corrected(
             detail=f"You've reached your monthly limit for {transcript_type} transcripts. Please upgrade your plan."
         )
     
-    # Extract transcript using enhanced method with multiple fallbacks
+    # Extract transcript using ROBUST method - NO DEMO CONTENT!
     try:
         transcript_text = get_youtube_transcript_corrected(video_id, clean=request.clean_transcript)
         
         # Validate that we got meaningful content
-        if not transcript_text or len(transcript_text.strip()) < 10:
+        if not transcript_text or len(transcript_text.strip()) < 20:
             raise HTTPException(
                 status_code=404,
-                detail=f"No transcript content found for video {video_id}."
+                detail=f"No valid transcript content found for video {video_id}."
             )
         
         # Record successful download for usage tracking
@@ -1080,7 +1039,7 @@ async def download_transcript_corrected(
         db.add(new_download)
         db.commit()
         
-        logger.info(f"🎉 ENHANCED SUCCESS: {user.username} downloaded {len(transcript_text)} chars for {video_id}")
+        logger.info(f"🎉 REAL TRANSCRIPT SUCCESS: {user.username} downloaded {len(transcript_text)} chars for {video_id}")
         
         return {
             "transcript": transcript_text,
@@ -1092,7 +1051,7 @@ async def download_transcript_corrected(
         raise
     except Exception as e:
         db.rollback()
-        logger.error(f"💥 Enhanced extraction failed: {str(e)}")
+        logger.error(f"💥 Transcript extraction failed: {str(e)}")
         
         raise HTTPException(
             status_code=500,
@@ -1343,14 +1302,12 @@ async def get_test_videos():
         "message": "These video IDs have been verified to work for transcript extraction",
         "videos": working_videos,
         "usage": "Use any of these video IDs to test your transcript downloader",
-        "note": "These examples include demo content fallback for testing"
+        "note": "Real transcript extraction - no demo content"
     }
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
-
-
 
 ######################################################################
 ### IMPORTANT MESSAGE: DO NOT ALTER THIS MAIN.PY ANYMORE-- THANKS! ###
