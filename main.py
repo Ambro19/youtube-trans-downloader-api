@@ -136,7 +136,10 @@ def get_transcript_youtube_api(video_id: str, clean: bool = True) -> str:
             for seg in transcript:
                 t = int(seg['start'])
                 timestamp = f"[{t//60:02d}:{t%60:02d}]"
-                lines.append(f"{timestamp} {seg['text'].replace('\n', ' ')}")
+             #   lines.append(f"{timestamp} {seg['text'].replace('\n', ' ')}")
+                text_clean = seg['text'].replace('\n', ' ')
+                lines.append(f"{timestamp} {text_clean}")
+
             return "\n".join(lines)
     except Exception as e:
         logger.info(f"Transcript API failed: {e}")
