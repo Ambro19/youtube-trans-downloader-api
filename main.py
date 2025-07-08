@@ -189,6 +189,24 @@ def root():
 #     db.refresh(new_user)
 #     return new_user
 
+# @app.post("/register")
+# def register(user: UserCreate, db: Session = Depends(get_db)):
+#     # Check for existing username/email
+#     if db.query(User).filter(User.username == user.username).first():
+#         raise HTTPException(status_code=400, detail="Username already exists.")
+#     if db.query(User).filter(User.email == user.email).first():
+#         raise HTTPException(status_code=400, detail="Email already exists.")
+#     user_obj = User(
+#         username=user.username,
+#         email=user.email,
+#         hashed_password=get_password_hash(user.password),
+#         created_at=datetime.utcnow()
+#     )
+#     db.add(user_obj)
+#     db.commit()
+#     db.refresh(user_obj)
+#     return {"message": "User registered successfully."}
+
 @app.post("/register")
 def register(user: UserCreate, db: Session = Depends(get_db)):
     # Check for existing username/email
@@ -206,6 +224,20 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user_obj)
     return {"message": "User registered successfully."}
+
+
+@app.post("/token")
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == form_data.username).first()
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+    # Create access token and return (add your create_access_token logic here)
+    access_token = create_access_token(
+        data={"sub": user.username},
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
 
 # @app.post("/token", response_model=Token)
 # def login_for_access_token(
@@ -225,11 +257,11 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
 #     )
 #     return {"access_token": access_token, "token_type": "bearer"}
 
-@app.post("/token")
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = get_user_by_username(db, form_data.username)
-    if not user or not user.verify_password(form_data.password):
-        raise HTTPException(status_code=401, detail="Incorrect username or password")
+# @app.post("/token")
+# def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+#     user = get_user_by_username(db, form_data.username)
+#     if not user or not user.verify_password(form_data.password):
+#         raise HTTPException(status_code=401, detail="Incorrect username or password")
 
 @app.get("/users/me", response_model=UserResponse)
 def read_users_me(current_user: User = Depends(get_current_user)):
