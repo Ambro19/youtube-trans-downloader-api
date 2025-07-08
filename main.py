@@ -10,6 +10,7 @@ from jwt.exceptions import PyJWTError
 from pydantic import BaseModel
 from passlib.context import CryptContext
 import stripe
+import json
 import os
 import logging
 from dotenv import load_dotenv
@@ -402,23 +403,12 @@ def get_youtube_transcript_corrected(video_id: str, clean: bool = True) -> str:
     logger.warning(f"All extraction methods failed for {video_id}. Returning DEMO content.")
     return get_demo_content(clean)
 
-def extract_subtitle_from_entry(ydl, entry, clean: bool) -> str:
-    """
-    Download subtitle using yt-dlp's downloader (NOT requests).
-    Handles various subtitle formats.
-    """
+def extract_subtitle_from_entry(url: str, ext: str, clean: bool) -> str:
+    import requests
     try:
-        url = entry.get('url')
-        ext = entry.get('ext', 'vtt')
-        if not url:
-            return ""
-        
-        # Use yt-dlp's internal downloader to get subtitle content
-        content_bytes = ydl.urlopen(url).read()
-        content = content_bytes.decode('utf-8', errors='ignore')
-        logger.info(f"Downloaded subtitle via yt-dlp, ext={ext}, length={len(content)}")
-        
-        # Parse content based on format
+        resp = requests.get(url, timeout=10)
+        content = resp.text
+        logger.info(f"Downloaded subtitle file, ext={ext}, length={len(content)}")
         if ext == "vtt":
             return parse_vtt(content, clean)
         elif ext in ("srv1", "srv2", "srv3", "json"):
@@ -429,11 +419,18 @@ def extract_subtitle_from_entry(ydl, entry, clean: bool) -> str:
             return parse_srt(content, clean)
         elif ext == "m3u8":
             return parse_m3u8(content, clean)
+        elif ext == "json3":      # <-- Add this block!
+            return parse_json3_subtitle(content, clean)
         else:
+            # Try json3 parser as a last resort if content looks like JSON
+            if content.strip().startswith("{") and '"events":' in content:
+                return parse_json3_subtitle(content, clean)
+            # fallback: return text
             return content if len(content.strip()) > 0 else ""
     except Exception as e:
-        logger.info(f"Failed to download/parse subtitle file with yt-dlp: {e}")
+        logger.info(f"Failed to download/parse subtitle file: {e}")
         return ""
+
 
 def format_transcript_enhanced(transcript_list: list, clean: bool = True) -> str:
     """Format raw transcript data into clean or timestamped text"""
@@ -565,6 +562,43 @@ def parse_m3u8(content: str, clean: bool) -> str:
     """Placeholder for M3U8 format parsing (not implemented)"""
     logger.info("M3U8 subtitle parsing not implemented—returning raw content.")
     return content.strip()
+
+def parse_json3_subtitle(content: str, clean: bool = True) -> str:
+    """
+    Parse YouTube's json3 subtitle format to clean/timestamped text.
+    """
+    try:
+        data = json.loads(content)
+        if "events" not in data:
+            return ""
+        events = data["events"]
+        lines = []
+        for ev in events:
+            segs = ev.get("segs", [])
+            if not segs:
+                continue
+            # Join all seg texts for the event
+            text = "".join([seg.get("utf8", "") for seg in segs]).strip()
+            if not text:
+                continue
+            # Get start time in ms, convert to MM:SS
+            ms = ev.get("tStartMs", 0)
+            minutes = int(ms // 60000)
+            seconds = int((ms % 60000) // 1000)
+            timestamp = f"[{minutes:02d}:{seconds:02d}]"
+            if clean:
+                lines.append(text)
+            else:
+                lines.append(f"{timestamp} {text}")
+        # Return as paragraph or timestamped lines
+        if clean:
+            return " ".join(lines)
+        else:
+            return "\n".join(lines)
+    except Exception as e:
+        logger.info(f"Failed to parse json3 subtitle: {e}")
+        return ""
+
 
 def get_demo_content(clean: bool = True):
     """Fallback demo content when transcript extraction fails"""
