@@ -304,275 +304,275 @@ def get_or_create_stripe_customer(user, db: Session):
 # ENHANCED TRANSCRIPT FUNCTIONS: TRANSCRIPT RELATED FUNCTIONS #
 #===========================================================  #
 
-# def check_subscription_limit(user_id: int, transcript_type: str, db: Session):
-#     """Robust subscription limit check - handles missing columns gracefully"""
-#     try:
-#         # Get subscription info
-#         subscription = db.query(Subscription).filter(Subscription.user_id == user_id).first()
+def check_subscription_limit(user_id: int, transcript_type: str, db: Session):
+    """Robust subscription limit check - handles missing columns gracefully"""
+    try:
+        # Get subscription info
+        subscription = db.query(Subscription).filter(Subscription.user_id == user_id).first()
         
-#         if not subscription:
-#             tier = "free"
-#         else:
-#             tier = subscription.tier
-#             if subscription.expiry_date < datetime.now():
-#                 tier = "free"
+        if not subscription:
+            tier = "free"
+        else:
+            tier = subscription.tier
+            if subscription.expiry_date < datetime.now():
+                tier = "free"
         
-#         # Calculate current month start
-#         month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        # Calculate current month start
+        month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         
-#         # Use a simple query that only uses basic columns that definitely exist
-#         try:
-#             # Try the enhanced query first
-#             usage = db.query(TranscriptDownload).filter(
-#                 TranscriptDownload.user_id == user_id,
-#                 TranscriptDownload.transcript_type == transcript_type,
-#                 TranscriptDownload.created_at >= month_start
-#             ).count()
-#         except Exception as e:
-#             logger.warning(f"Enhanced query failed, using simple fallback: {e}")
+        # Use a simple query that only uses basic columns that definitely exist
+        try:
+            # Try the enhanced query first
+            usage = db.query(TranscriptDownload).filter(
+                TranscriptDownload.user_id == user_id,
+                TranscriptDownload.transcript_type == transcript_type,
+                TranscriptDownload.created_at >= month_start
+            ).count()
+        except Exception as e:
+            logger.warning(f"Enhanced query failed, using simple fallback: {e}")
             
-#             # Fallback to basic SQL query that only uses guaranteed columns
-#             result = db.execute(
-#                 "SELECT COUNT(*) FROM transcript_downloads WHERE user_id = ? AND transcript_type = ? AND created_at >= ?",
-#                 (user_id, transcript_type, month_start.isoformat())
-#             )
-#             usage = result.scalar() or 0
+            # Fallback to basic SQL query that only uses guaranteed columns
+            result = db.execute(
+                "SELECT COUNT(*) FROM transcript_downloads WHERE user_id = ? AND transcript_type = ? AND created_at >= ?",
+                (user_id, transcript_type, month_start.isoformat())
+            )
+            usage = result.scalar() or 0
         
-#         # Get limit for this tier and transcript type
-#         limit = SUBSCRIPTION_LIMITS[tier].get(transcript_type, 0)
+        # Get limit for this tier and transcript type
+        limit = SUBSCRIPTION_LIMITS[tier].get(transcript_type, 0)
         
-#         # Return True if user can download (hasn't reached limit)
-#         if limit == float('inf'):
-#             return True
+        # Return True if user can download (hasn't reached limit)
+        if limit == float('inf'):
+            return True
         
-#         return usage < limit
+        return usage < limit
         
-#     except Exception as e:
-#         logger.error(f"Error checking subscription limit: {e}")
-#         # If there's any error, default to allowing free tier limits
-#         return True  # Allow download in case of errors to avoid blocking users
+    except Exception as e:
+        logger.error(f"Error checking subscription limit: {e}")
+        # If there's any error, default to allowing free tier limits
+        return True  # Allow download in case of errors to avoid blocking users
 
 
-# def format_transcript_enhanced(transcript_list: list, clean: bool = True) -> str:
-#     """
-#     Enhanced transcript formatting with better text processing
+def format_transcript_enhanced(transcript_list: list, clean: bool = True) -> str:
+    """
+    Enhanced transcript formatting with better text processing
     
-#     This function takes raw transcript data and formats it into either:
-#     - Clean format: Plain text with proper spacing and punctuation
-#     - Timestamped format: Text with [MM:SS] timestamps for each segment
+    This function takes raw transcript data and formats it into either:
+    - Clean format: Plain text with proper spacing and punctuation
+    - Timestamped format: Text with [MM:SS] timestamps for each segment
     
-#     Args:
-#         transcript_list: List of transcript segments with 'text' and 'start' keys
-#         clean: If True, returns clean text; if False, returns timestamped format
+    Args:
+        transcript_list: List of transcript segments with 'text' and 'start' keys
+        clean: If True, returns clean text; if False, returns timestamped format
     
-#     Returns:
-#         Formatted transcript string
-#     """
-#     if not transcript_list:
-#         raise Exception("Empty transcript data")
+    Returns:
+        Formatted transcript string
+    """
+    if not transcript_list:
+        raise Exception("Empty transcript data")
     
-#     if clean:
-#         # Enhanced clean format - create readable paragraph text
-#         texts = []
-#         for item in transcript_list:
-#             text = item.get('text', '').strip()
-#             if text:
-#                 # Clean and normalize the text
-#                 text = clean_transcript_text(text)
-#                 if text:  # Only add if text remains after cleaning
-#                     texts.append(text)
+    if clean:
+        # Enhanced clean format - create readable paragraph text
+        texts = []
+        for item in transcript_list:
+            text = item.get('text', '').strip()
+            if text:
+                # Clean and normalize the text
+                text = clean_transcript_text(text)
+                if text:  # Only add if text remains after cleaning
+                    texts.append(text)
         
-#         # Join all text segments into one continuous string
-#         result = ' '.join(texts)
+        # Join all text segments into one continuous string
+        result = ' '.join(texts)
         
-#         # Final cleanup for better readability
-#         result = ' '.join(result.split())  # Normalize whitespace
-#         result = result.replace(' .', '.').replace(' ,', ',')  # Fix punctuation spacing
+        # Final cleanup for better readability
+        result = ' '.join(result.split())  # Normalize whitespace
+        result = result.replace(' .', '.').replace(' ,', ',')  # Fix punctuation spacing
         
-#         # Validate that we have meaningful content
-#         if len(result) < 20:  # Too short, likely invalid
-#             raise Exception("Transcript too short or invalid")
+        # Validate that we have meaningful content
+        if len(result) < 20:  # Too short, likely invalid
+            raise Exception("Transcript too short or invalid")
             
-#         logger.info(f"✅ Enhanced clean transcript: {len(result)} characters")
-#         return result
-#     else:
-#         # Enhanced timestamped format - each line has [MM:SS] timestamp
-#         lines = []
-#         for item in transcript_list:
-#             start = item.get('start', 0)
-#             text = item.get('text', '').strip()
-#             if text:
-#                 # Clean the text but preserve timestamps
-#                 text = clean_transcript_text(text)
-#                 if text:
-#                     # Convert seconds to MM:SS format
-#                     minutes = int(start // 60)
-#                     seconds = int(start % 60)
-#                     timestamp = f"[{minutes:02d}:{seconds:02d}]"
-#                     lines.append(f"{timestamp} {text}")
+        logger.info(f"✅ Enhanced clean transcript: {len(result)} characters")
+        return result
+    else:
+        # Enhanced timestamped format - each line has [MM:SS] timestamp
+        lines = []
+        for item in transcript_list:
+            start = item.get('start', 0)
+            text = item.get('text', '').strip()
+            if text:
+                # Clean the text but preserve timestamps
+                text = clean_transcript_text(text)
+                if text:
+                    # Convert seconds to MM:SS format
+                    minutes = int(start // 60)
+                    seconds = int(start % 60)
+                    timestamp = f"[{minutes:02d}:{seconds:02d}]"
+                    lines.append(f"{timestamp} {text}")
         
-#         # Validate that we have enough content
-#         if len(lines) < 5:  # Too few lines, likely invalid
-#             raise Exception("Transcript has too few valid segments")
+        # Validate that we have enough content
+        if len(lines) < 5:  # Too few lines, likely invalid
+            raise Exception("Transcript has too few valid segments")
             
-#         result = '\n'.join(lines)
-#         logger.info(f"✅ Enhanced timestamped transcript: {len(lines)} lines")
-#         return result
+        result = '\n'.join(lines)
+        logger.info(f"✅ Enhanced timestamped transcript: {len(lines)} lines")
+        return result
 
-# def clean_transcript_text(text: str) -> str:
-#     """
-#     Clean transcript text from common artifacts and formatting issues
+def clean_transcript_text(text: str) -> str:
+    """
+    Clean transcript text from common artifacts and formatting issues
     
-#     This function removes:
-#     - HTML entities (&amp;, &lt;, &gt;)
-#     - HTML/XML tags
-#     - Extra whitespace and line breaks
-#     - Leading/trailing punctuation artifacts
+    This function removes:
+    - HTML entities (&amp;, &lt;, &gt;)
+    - HTML/XML tags
+    - Extra whitespace and line breaks
+    - Leading/trailing punctuation artifacts
     
-#     Args:
-#         text: Raw transcript text that may contain artifacts
+    Args:
+        text: Raw transcript text that may contain artifacts
     
-#     Returns:
-#         Clean, readable text
-#     """
-#     if not text:
-#         return ""
+    Returns:
+        Clean, readable text
+    """
+    if not text:
+        return ""
     
-#     # Fix common HTML entities
-#     text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
-#     text = text.replace('\n', ' ').replace('\r', ' ')
+    # Fix common HTML entities
+    text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+    text = text.replace('\n', ' ').replace('\r', ' ')
     
-#     # Remove HTML/XML tags (like <c>, <i>, etc.)
-#     import re
-#     text = re.sub(r'<[^>]+>', '', text)
+    # Remove HTML/XML tags (like <c>, <i>, etc.)
+    import re
+    text = re.sub(r'<[^>]+>', '', text)
     
-#     # Normalize whitespace (replace multiple spaces with single space)
-#     text = ' '.join(text.split())
+    # Normalize whitespace (replace multiple spaces with single space)
+    text = ' '.join(text.split())
     
-#     # Remove leading/trailing punctuation artifacts that don't belong
-#     text = text.strip('.,!?;: ')
+    # Remove leading/trailing punctuation artifacts that don't belong
+    text = text.strip('.,!?;: ')
     
-#     return text.strip()
+    return text.strip()
 
-# def parse_subtitle_content_enhanced(content: str, format_type: str) -> list:
-#     """
-#     Enhanced subtitle content parsing for multiple formats
+def parse_subtitle_content_enhanced(content: str, format_type: str) -> list:
+    """
+    Enhanced subtitle content parsing for multiple formats
     
-#     Supports parsing of:
-#     - VTT/WebVTT format (most common)
-#     - SRV3/JSON format (YouTube's internal format)
-#     - TTML/XML format (standard subtitle format)
+    Supports parsing of:
+    - VTT/WebVTT format (most common)
+    - SRV3/JSON format (YouTube's internal format)
+    - TTML/XML format (standard subtitle format)
     
-#     Args:
-#         content: Raw subtitle file content
-#         format_type: Format indicator (vtt, srv3, json, ttml, xml)
+    Args:
+        content: Raw subtitle file content
+        format_type: Format indicator (vtt, srv3, json, ttml, xml)
     
-#     Returns:
-#         List of transcript segments with text, start time, and duration
-#     """
-#     transcript_data = []
+    Returns:
+        List of transcript segments with text, start time, and duration
+    """
+    transcript_data = []
     
-#     try:
-#         if format_type.lower() in ['vtt', 'webvtt']:
-#             transcript_data = parse_vtt_content(content)
-#         elif format_type.lower() in ['srv3', 'json']:
-#             transcript_data = parse_srv3_content(content)
-#         elif format_type.lower() in ['ttml', 'xml']:
-#             transcript_data = parse_ttml_content(content)
-#         else:
-#             # Try to auto-detect format based on content
-#             if content.strip().startswith('WEBVTT'):
-#                 transcript_data = parse_vtt_content(content)
-#             elif content.strip().startswith('{') or content.strip().startswith('['):
-#                 transcript_data = parse_srv3_content(content)
-#             elif '<' in content and '>' in content:
-#                 transcript_data = parse_ttml_content(content)
+    try:
+        if format_type.lower() in ['vtt', 'webvtt']:
+            transcript_data = parse_vtt_content(content)
+        elif format_type.lower() in ['srv3', 'json']:
+            transcript_data = parse_srv3_content(content)
+        elif format_type.lower() in ['ttml', 'xml']:
+            transcript_data = parse_ttml_content(content)
+        else:
+            # Try to auto-detect format based on content
+            if content.strip().startswith('WEBVTT'):
+                transcript_data = parse_vtt_content(content)
+            elif content.strip().startswith('{') or content.strip().startswith('['):
+                transcript_data = parse_srv3_content(content)
+            elif '<' in content and '>' in content:
+                transcript_data = parse_ttml_content(content)
     
-#     except Exception as e:
-#         logger.info(f"📝 Content parsing failed: {str(e)}")
+    except Exception as e:
+        logger.info(f"📝 Content parsing failed: {str(e)}")
     
-#     return transcript_data
+    return transcript_data
 
 
-#Here
+Here
 
-# def parse_ttml_timestamp(timestamp: str) -> float:
-#     """
-#     Parse TTML timestamp format to seconds
+def parse_ttml_timestamp(timestamp: str) -> float:
+    """
+    Parse TTML timestamp format to seconds
     
-#     TTML supports various timestamp formats:
-#     - "10s" (seconds)
-#     - "01:30:45" (HH:MM:SS)
+    TTML supports various timestamp formats:
+    - "10s" (seconds)
+    - "01:30:45" (HH:MM:SS)
     
-#     Args:
-#         timestamp: TTML timestamp string
+    Args:
+        timestamp: TTML timestamp string
     
-#     Returns:
-#         Time in seconds as float
-#     """
-#     try:
-#         if 's' in timestamp:
-#             return float(timestamp.replace('s', ''))
-#         elif ':' in timestamp:
-#             parts = timestamp.split(':')
-#             if len(parts) == 3:
-#                 h, m, s = parts
-#                 return int(h) * 3600 + int(m) * 60 + float(s)
-#     except:
-#         pass
-#     return 0
+    Returns:
+        Time in seconds as float
+    """
+    try:
+        if 's' in timestamp:
+            return float(timestamp.replace('s', ''))
+        elif ':' in timestamp:
+            parts = timestamp.split(':')
+            if len(parts) == 3:
+                h, m, s = parts
+                return int(h) * 3600 + int(m) * 60 + float(s)
+    except:
+        pass
+    return 0
 
-# def extract_live_transcript(video_id: str, clean: bool) -> str:
-#     """
-#     Handle live stream transcript extraction
+def extract_live_transcript(video_id: str, clean: bool) -> str:
+    """
+    Handle live stream transcript extraction
     
-#     Live streams have special requirements:
-#     - Transcripts may not be available during broadcast
-#     - Content may be incomplete
-#     - Should provide helpful feedback to users
+    Live streams have special requirements:
+    - Transcripts may not be available during broadcast
+    - Content may be incomplete
+    - Should provide helpful feedback to users
     
-#     Args:
-#         video_id: YouTube video ID
-#         clean: Whether to return clean or timestamped format
+    Args:
+        video_id: YouTube video ID
+        clean: Whether to return clean or timestamped format
     
-#     Returns:
-#         Live transcript content or helpful message
-#     """
-#     logger.info(f"🔴 Attempting live transcript extraction for {video_id}")
+    Returns:
+        Live transcript content or helpful message
+    """
+    logger.info(f"🔴 Attempting live transcript extraction for {video_id}")
     
-#     # For live streams, try the standard API methods first
-#     try:
-#         from youtube_transcript_api import YouTubeTranscriptApi
-#         transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-#         if transcript_list:
-#             return format_transcript_enhanced(transcript_list, clean)
-#     except:
-#         pass
+    # For live streams, try the standard API methods first
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+        if transcript_list:
+            return format_transcript_enhanced(transcript_list, clean)
+    except:
+        pass
     
-#     # Return informative message for live content
-#     return "This appears to be a live stream. Live transcripts may not be available or may be incomplete. Please try again after the stream has ended."
+    # Return informative message for live content
+    return "This appears to be a live stream. Live transcripts may not be available or may be incomplete. Please try again after the stream has ended."
 
-# def extract_with_direct_api(video_id: str) -> list:
-#     """
-#     Direct API extraction method for edge cases
+def extract_with_direct_api(video_id: str) -> list:
+    """
+    Direct API extraction method for edge cases
     
-#     This is a placeholder for future implementation of additional
-#     direct API methods that might become available.
+    This is a placeholder for future implementation of additional
+    direct API methods that might become available.
     
-#     Args:
-#         video_id: YouTube video ID
+    Args:
+        video_id: YouTube video ID
     
-#     Returns:
-#         List of transcript segments (currently empty)
-#     """
-#     try:
-#         # Placeholder for future direct API implementations
-#         # Could include custom API endpoints, alternative services, etc.
-#         return []
-#     except:
-#         return []
+    Returns:
+        List of transcript segments (currently empty)
+    """
+    try:
+        # Placeholder for future direct API implementations
+        # Could include custom API endpoints, alternative services, etc.
+        return []
+    except:
+        return []
 
-# ======================================= 
+======================================= 
 
 
 # ================== ENHANCED TRANSCRIPT EXTRACTION LOGIC ====================
