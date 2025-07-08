@@ -52,8 +52,11 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 def get_user(db: Session, username: str) -> Optional[User]:
     return db.query(User).filter(User.username == username).first()
 
-def get_user_by_email(db: Session, email: str) -> Optional[User]:
-    return db.query(User).filter(User.email == email).first()
+# def get_user_by_email(db: Session, email: str) -> Optional[User]:
+#     return db.query(User).filter(User.email == email).first()
+def get_user_by_username(db: Session, username: str):
+    return db.query(User).filter(User.username == username).first()
+
 
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
@@ -168,41 +171,64 @@ def startup():
 def root():
     return {"message": "YouTube Transcript Downloader API", "status": "running"}
 
-@app.post("/register", response_model=UserResponse)
-def register_user(user_data: UserCreate, db: Session = Depends(get_db)):
-    if get_user(db, user_data.username):
-        raise HTTPException(status_code=400, detail="Username already registered")
-    if get_user_by_email(db, user_data.email):
-        raise HTTPException(status_code=400, detail="Email already registered")
-    hashed_password = get_password_hash(user_data.password)
-    new_user = User(
-        username=user_data.username,
-        email=user_data.email,
-        hashed_password=hashed_password,
+# @app.post("/register", response_model=UserResponse)
+# def register_user(user_data: UserCreate, db: Session = Depends(get_db)):
+#     if get_user(db, user_data.username):
+#         raise HTTPException(status_code=400, detail="Username already registered")
+#     if get_user_by_email(db, user_data.email):
+#         raise HTTPException(status_code=400, detail="Email already registered")
+#     hashed_password = get_password_hash(user_data.password)
+#     new_user = User(
+#         username=user_data.username,
+#         email=user_data.email,
+#         hashed_password=hashed_password,
+#         created_at=datetime.utcnow()
+#     )
+#     db.add(new_user)
+#     db.commit()
+#     db.refresh(new_user)
+#     return new_user
+
+@app.post("/register")
+def register(user: UserCreate, db: Session = Depends(get_db)):
+    # Check for existing username/email
+    if db.query(User).filter(User.username == user.username).first():
+        raise HTTPException(status_code=400, detail="Username already exists.")
+    if db.query(User).filter(User.email == user.email).first():
+        raise HTTPException(status_code=400, detail="Email already exists.")
+    user_obj = User(
+        username=user.username,
+        email=user.email,
+        hashed_password=get_password_hash(user.password),
         created_at=datetime.utcnow()
     )
-    db.add(new_user)
+    db.add(user_obj)
     db.commit()
-    db.refresh(new_user)
-    return new_user
+    db.refresh(user_obj)
+    return {"message": "User registered successfully."}
 
-@app.post("/token", response_model=Token)
-def login_for_access_token(
-    form_data: OAuth2PasswordRequestForm = Depends(),
-    db: Session = Depends(get_db)
-):
-    user = get_user(db, form_data.username)
-    if not user or not verify_password(form_data.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    access_token = create_access_token(
-        data={"sub": user.username}, 
-        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    )
-    return {"access_token": access_token, "token_type": "bearer"}
+# @app.post("/token", response_model=Token)
+# def login_for_access_token(
+#     form_data: OAuth2PasswordRequestForm = Depends(),
+#     db: Session = Depends(get_db)
+# ):
+#     user = get_user(db, form_data.username)
+#     if not user or not verify_password(form_data.password, user.hashed_password):
+#         raise HTTPException(
+#             status_code=status.HTTP_401_UNAUTHORIZED,
+#             detail="Incorrect username or password",
+#             headers={"WWW-Authenticate": "Bearer"},
+#         )
+#     access_token = create_access_token(
+#         data={"sub": user.username}, 
+#         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+#     )
+#     return {"access_token": access_token, "token_type": "bearer"}
+@app.post("/token")
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = get_user_by_username(db, form_data.username)
+    if not user or not user.verify_password(form_data.password):
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
 
 @app.get("/users/me", response_model=UserResponse)
 def read_users_me(current_user: User = Depends(get_current_user)):
