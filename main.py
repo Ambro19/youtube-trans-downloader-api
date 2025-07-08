@@ -14,8 +14,9 @@ import logging
 from dotenv import load_dotenv
 import re
 
+from database import engine, SessionLocal, get_db  # Make sure this points to your db
 from models import User, create_tables  # Use your models.py User model!
-from database import SessionLocal, get_db  # Make sure this points to your db
+#from database import SessionLocal, get_db  # Make sure this points to your db
 
 load_dotenv()
 
@@ -157,7 +158,7 @@ USAGE_KEYS = {
 
 @app.on_event("startup")
 def startup():
-    create_tables()
+    create_tables(engine)
 
 @app.get("/")
 def root():
