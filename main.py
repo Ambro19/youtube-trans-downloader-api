@@ -652,6 +652,81 @@ async def read_users_me(current_user: User = Depends(get_current_user)):
     """Endpoint to get current user's information"""
     return current_user
 
+@app.get("/subscription_status/")
+async def get_subscription_status_ultra_safe(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    try:
+        subscription = db.query(Subscription).filter(
+            Subscription.user_id == current_user.id
+        ).first()
+        if not subscription:
+            tier = "free"
+            status = "inactive"
+            expiry_date = None
+        else:
+            if hasattr(subscription, 'expiry_date') and subscription.expiry_date and subscription.expiry_date < datetime.now():
+                tier = "free"
+                status = "expired"
+                expiry_date = subscription.expiry_date
+            else:
+                tier = subscription.tier if subscription.tier else "free"
+                status = "active" if tier != "free" else "inactive"
+                expiry_date = subscription.expiry_date if hasattr(subscription, 'expiry_date') else None
+        # Usage logic...
+        month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        def get_safe_usage(transcript_type):
+            try:
+                return db.query(TranscriptDownload).filter(
+                    TranscriptDownload.user_id == current_user.id,
+                    TranscriptDownload.transcript_type == transcript_type,
+                    TranscriptDownload.created_at >= month_start
+                ).count()
+            except Exception:
+                return 0
+        clean_usage = get_safe_usage("clean")
+        unclean_usage = get_safe_usage("unclean")
+        audio_usage = get_safe_usage("audio")
+        video_usage = get_safe_usage("video")
+        limits = SUBSCRIPTION_LIMITS.get(tier, SUBSCRIPTION_LIMITS["free"])
+        json_limits = {k: ('unlimited' if v == float('inf') else v) for k, v in limits.items()}
+        return {
+            "tier": tier,
+            "status": status,
+            "usage": {
+                "clean_transcripts": clean_usage,
+                "unclean_transcripts": unclean_usage,
+                "audio_downloads": audio_usage,
+                "video_downloads": video_usage,
+            },
+            "limits": json_limits,
+            "subscription_id": subscription.payment_id if subscription and hasattr(subscription, 'payment_id') else None,
+            "stripe_customer_id": getattr(current_user, 'stripe_customer_id', None),
+            "current_period_end": expiry_date.isoformat() if expiry_date else None
+        }
+    except Exception as e:
+        logger.error(f"❌ Error getting subscription status: {str(e)}")
+        return {
+            "tier": "free",
+            "status": "inactive", 
+            "usage": {
+                "clean_transcripts": 0,
+                "unclean_transcripts": 0,
+                "audio_downloads": 0,
+                "video_downloads": 0,
+            },
+            "limits": {
+                "clean_transcripts": 5,
+                "unclean_transcripts": 3,
+                "audio_downloads": 2,
+                "video_downloads": 1
+            },
+            "subscription_id": None,
+            "stripe_customer_id": None,
+            "current_period_end": None
+        }
+
 @app.post("/download_transcript/")
 async def download_transcript_corrected(
     request: TranscriptRequest,
