@@ -171,41 +171,41 @@ def startup():
 def root():
     return {"message": "YouTube Transcript Downloader API", "status": "running"}
 
-# @app.post("/register", response_model=UserResponse)
-# def register_user(user_data: UserCreate, db: Session = Depends(get_db)):
-#     if get_user(db, user_data.username):
-#         raise HTTPException(status_code=400, detail="Username already registered")
-#     if get_user_by_email(db, user_data.email):
-#         raise HTTPException(status_code=400, detail="Email already registered")
-#     hashed_password = get_password_hash(user_data.password)
-#     new_user = User(
-#         username=user_data.username,
-#         email=user_data.email,
-#         hashed_password=hashed_password,
-#         created_at=datetime.utcnow()
-#     )
-#     db.add(new_user)
-#     db.commit()
-#     db.refresh(new_user)
-#     return new_user
-
-@app.post("/register")
-def register(user: UserCreate, db: Session = Depends(get_db)):
-    # Check for existing username/email
-    if db.query(User).filter(User.username == user.username).first():
-        raise HTTPException(status_code=400, detail="Username already exists.")
-    if db.query(User).filter(User.email == user.email).first():
-        raise HTTPException(status_code=400, detail="Email already exists.")
-    user_obj = User(
-        username=user.username,
-        email=user.email,
-        hashed_password=get_password_hash(user.password),
+@app.post("/register", response_model=UserResponse)
+def register_user(user_data: UserCreate, db: Session = Depends(get_db)):
+    if get_user(db, user_data.username):
+        raise HTTPException(status_code=400, detail="Username already registered")
+    if get_user_by_email(db, user_data.email):
+        raise HTTPException(status_code=400, detail="Email already registered")
+    hashed_password = get_password_hash(user_data.password)
+    new_user = User(
+        username=user_data.username,
+        email=user_data.email,
+        hashed_password=hashed_password,
         created_at=datetime.utcnow()
     )
-    db.add(user_obj)
+    db.add(new_user)
     db.commit()
-    db.refresh(user_obj)
-    return {"message": "User registered successfully."}
+    db.refresh(new_user)
+    return new_user
+
+# @app.post("/register")
+# def register(user: UserCreate, db: Session = Depends(get_db)):
+#     # Check for existing username/email
+#     if db.query(User).filter(User.username == user.username).first():
+#         raise HTTPException(status_code=400, detail="Username already exists.")
+#     if db.query(User).filter(User.email == user.email).first():
+#         raise HTTPException(status_code=400, detail="Email already exists.")
+#     user_obj = User(
+#         username=user.username,
+#         email=user.email,
+#         hashed_password=get_password_hash(user.password),
+#         created_at=datetime.utcnow()
+#     )
+#     db.add(user_obj)
+#     db.commit()
+#     db.refresh(user_obj)
+#     return {"message": "User registered successfully."}
 
 # @app.post("/token", response_model=Token)
 # def login_for_access_token(
@@ -224,6 +224,7 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
 #         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
 #     )
 #     return {"access_token": access_token, "token_type": "bearer"}
+
 @app.post("/token")
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = get_user_by_username(db, form_data.username)
