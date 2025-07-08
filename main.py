@@ -493,9 +493,6 @@ def parse_subtitle_content_enhanced(content: str, format_type: str) -> list:
     
     return transcript_data
 
-
-Here
-
 def parse_ttml_timestamp(timestamp: str) -> float:
     """
     Parse TTML timestamp format to seconds
@@ -571,10 +568,7 @@ def extract_with_direct_api(video_id: str) -> list:
         return []
     except:
         return []
-
-======================================= 
-
-
+ 
 # ================== ENHANCED TRANSCRIPT EXTRACTION LOGIC ====================
 
 def get_youtube_transcript_corrected(video_id: str, clean: bool = True) -> str:
