@@ -409,6 +409,7 @@ def extract_subtitle_from_entry(url: str, ext: str, clean: bool) -> str:
         resp = requests.get(url, timeout=10)
         content = resp.text
         logger.info(f"Downloaded subtitle file, ext={ext}, length={len(content)}")
+        # --- Robust handling of subtitle formats, including json3 ---
         if ext == "vtt":
             return parse_vtt(content, clean)
         elif ext in ("srv1", "srv2", "srv3", "json"):
@@ -417,20 +418,51 @@ def extract_subtitle_from_entry(url: str, ext: str, clean: bool) -> str:
             return parse_ttml(content, clean)
         elif ext == "srt":
             return parse_srt(content, clean)
+        elif ext == "json3":
+            return parse_json3(content, clean)
         elif ext == "m3u8":
             return parse_m3u8(content, clean)
-        elif ext == "json3":      # <-- Add this block!
-            return parse_json3_subtitle(content, clean)
         else:
-            # Try json3 parser as a last resort if content looks like JSON
-            if content.strip().startswith("{") and '"events":' in content:
-                return parse_json3_subtitle(content, clean)
             # fallback: return text
             return content if len(content.strip()) > 0 else ""
     except Exception as e:
         logger.info(f"Failed to download/parse subtitle file: {e}")
         return ""
 
+
+def parse_json3(content: str, clean: bool) -> str:
+    """
+    Parse YouTube's json3 subtitle format into clean or unclean text.
+    - clean=True: paragraph text only.
+    - clean=False: SRT-style text with timestamps ([MM:SS]).
+    """
+    try:
+        data = json.loads(content)
+        events = data.get('events', [])
+        lines = []
+        for event in events:
+            t_start_ms = event.get('tStartMs')
+            segs = event.get('segs')
+            if segs and isinstance(segs, list):
+                text = ''.join(seg.get('utf8', '') for seg in segs).replace('\n', ' ').strip()
+                if not text:
+                    continue
+                # Format timestamp if needed
+                if not clean and t_start_ms is not None:
+                    t = int(t_start_ms) // 1000
+                    minutes = t // 60
+                    seconds = t % 60
+                    timestamp = f"[{minutes:02d}:{seconds:02d}]"
+                    lines.append(f"{timestamp} {text}")
+                elif clean:
+                    lines.append(text)
+        if clean:
+            return ' '.join(lines)
+        else:
+            return '\n'.join(lines)
+    except Exception as e:
+        logger.info(f"Failed to parse json3: {e}")
+        return ""
 
 def format_transcript_enhanced(transcript_list: list, clean: bool = True) -> str:
     """Format raw transcript data into clean or timestamped text"""
@@ -513,16 +545,19 @@ def parse_vtt(content: str, clean: bool) -> str:
     return text.strip()
 
 def parse_srv(content: str, clean: bool) -> str:
-    """Parse SRV format subtitles (XML-based)"""
-    import xml.etree.ElementTree as ET
+    # Use this for .srv1, .srv2, .srv3, .json (legacy)
     try:
-        root = ET.fromstring(content)
-        # Extract all text elements
-        texts = [el.text for el in root.iter() if el.tag == "text" and el.text]
-        text = "\n".join(texts)
-        if clean:
-            text = re.sub(r"<[^>]+>", "", text)
-        return text.strip()
+        import xml.etree.ElementTree as ET
+        try:
+            root = ET.fromstring(content)
+            texts = [el.text for el in root.iter() if el.tag == "text" and el.text]
+            text = "\n".join(texts)
+            if clean:
+                text = re.sub(r"<[^>]+>", "", text)
+            return text.strip()
+        except ET.ParseError:
+            # Not XML, maybe old JSON (very rare)
+            return ""
     except Exception as e:
         logger.info(f"Failed to parse srv: {e}")
         return ""
