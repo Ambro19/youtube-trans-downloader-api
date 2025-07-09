@@ -14,6 +14,11 @@ import logging
 from dotenv import load_dotenv
 import re
 
+
+import subprocess
+import json
+
+
 from database import engine, SessionLocal, get_db  # Make sure this points to your db
 from models import User, create_tables  # Use your models.py User model!
 #from database import SessionLocal, get_db  # Make sure this points to your db
