@@ -152,6 +152,23 @@ def get_transcript_youtube_api(video_id: str, clean: bool = True) -> str:
         logger.error(f"Transcript API failed: {e}\n{traceback.format_exc()}")
         return None
 
+def get_transcript_with_ytdlp(video_id):
+    try:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        cmd = [
+            "yt-dlp", "--write-auto-sub", "--sub-lang", "en", "--skip-download", "--print-json", url
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        # Parse the output (should be a JSON line)
+        for line in proc.stdout.splitlines():
+            if line.startswith('{'):
+                data = json.loads(line)
+                if 'automatic_captions' in data:
+                    return "[captions downloaded]"  # You'll need extra logic to load .vtt file
+        return None
+    except Exception as e:
+        return None
+
 def get_demo_content(clean=True):
     if clean:
         return "This is demo transcript content. The real YouTube transcript could not be downloaded."
