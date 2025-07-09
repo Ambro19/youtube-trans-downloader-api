@@ -136,8 +136,6 @@ def extract_youtube_video_id(youtube_id_or_url: str) -> str:
 def get_transcript_youtube_api(video_id: str, clean: bool = True) -> str:
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
-        import traceback
-        logger.info(f"Fetching transcript for video: {video_id}")
         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
         if clean:
             text = " ".join([seg['text'].replace('\n', ' ') for seg in transcript])
@@ -147,14 +145,15 @@ def get_transcript_youtube_api(video_id: str, clean: bool = True) -> str:
             for seg in transcript:
                 t = int(seg['start'])
                 timestamp = f"[{t//60:02d}:{t%60:02d}]"
-             #   lines.append(f"{timestamp} {seg['text'].replace('\n', ' ')}")
+                #lines.append(f"{timestamp} {seg['text'].replace('\n', ' ')}")
                 text_clean = seg['text'].replace('\n', ' ')
-                lines.append(f"{timestamp} {text_clean}")
-
             return "\n".join(lines)
     except Exception as e:
-        #logger.info(f"Transcript API failed: {e}")
-        logger.error(f"Transcript API failed: {e}\n{traceback.format_exc()}")
+        # Try yt-dlp fallback!
+        print(f"Transcript API failed: {e} - trying yt-dlp fallback...")
+        yt_dlp_transcript = get_transcript_with_ytdlp(video_id, clean=clean)
+        if yt_dlp_transcript:
+            return yt_dlp_transcript
         return None
 
 def get_transcript_with_ytdlp(video_id, clean=True):
@@ -196,27 +195,6 @@ def get_transcript_with_ytdlp(video_id, clean=True):
         return "\n".join(text_blocks) if text_blocks else None
     except Exception as e:
         print("yt-dlp fallback error:", e)
-        return None
-def get_transcript_youtube_api(video_id: str, clean: bool = True) -> str:
-    try:
-        from youtube_transcript_api import YouTubeTranscriptApi
-        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
-        if clean:
-            text = " ".join([seg['text'].replace('\n', ' ') for seg in transcript])
-            return " ".join(text.split())
-        else:
-            lines = []
-            for seg in transcript:
-                t = int(seg['start'])
-                timestamp = f"[{t//60:02d}:{t%60:02d}]"
-                lines.append(f"{timestamp} {seg['text'].replace('\n', ' ')}")
-            return "\n".join(lines)
-    except Exception as e:
-        # Try yt-dlp fallback!
-        print(f"Transcript API failed: {e} - trying yt-dlp fallback...")
-        yt_dlp_transcript = get_transcript_with_ytdlp(video_id, clean=clean)
-        if yt_dlp_transcript:
-            return yt_dlp_transcript
         return None
 
 def get_demo_content(clean=True):
