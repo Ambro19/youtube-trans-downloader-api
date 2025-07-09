@@ -157,21 +157,66 @@ def get_transcript_youtube_api(video_id: str, clean: bool = True) -> str:
         logger.error(f"Transcript API failed: {e}\n{traceback.format_exc()}")
         return None
 
-def get_transcript_with_ytdlp(video_id):
+def get_transcript_with_ytdlp(video_id, clean=True):
+    """
+    Use yt-dlp to extract captions as a fallback.
+    Returns transcript as a string, or None.
+    """
     try:
-        url = f"https://www.youtube.com/watch?v={video_id}"
+        # Ensure yt-dlp is installed and in your PATH or venv
+        # Try to get the English auto-generated captions
         cmd = [
-            "yt-dlp", "--write-auto-sub", "--sub-lang", "en", "--skip-download", "--print-json", url
+            "yt-dlp",
+            "--skip-download",
+            "--write-auto-subs",
+            "--sub-lang", "en",
+            "--sub-format", "json3",
+            "--output", "%(id)s",
+            f"https://www.youtube.com/watch?v={video_id}"
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        # Parse the output (should be a JSON line)
-        for line in proc.stdout.splitlines():
-            if line.startswith('{'):
-                data = json.loads(line)
-                if 'automatic_captions' in data:
-                    return "[captions downloaded]"  # You'll need extra logic to load .vtt file
-        return None
+        subprocess.run(cmd, check=True, capture_output=True)
+        json_path = f"{video_id}.en.json3"
+        if not os.path.exists(json_path):
+            return None
+        with open(json_path, encoding="utf8") as f:
+            data = json.load(f)
+        # Parse the JSON3 captions (Google format)
+        text_blocks = []
+        for event in data.get("events", []):
+            if "segs" in event and "tStartMs" in event:
+                text = "".join([seg.get("utf8", "") for seg in event["segs"]]).strip()
+                if text:
+                    if clean:
+                        text_blocks.append(text)
+                    else:
+                        start_sec = int(event["tStartMs"] // 1000)
+                        timestamp = f"[{start_sec // 60:02d}:{start_sec % 60:02d}]"
+                        text_blocks.append(f"{timestamp} {text}")
+        os.remove(json_path)  # Clean up
+        return "\n".join(text_blocks) if text_blocks else None
     except Exception as e:
+        print("yt-dlp fallback error:", e)
+        return None
+def get_transcript_youtube_api(video_id: str, clean: bool = True) -> str:
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+        if clean:
+            text = " ".join([seg['text'].replace('\n', ' ') for seg in transcript])
+            return " ".join(text.split())
+        else:
+            lines = []
+            for seg in transcript:
+                t = int(seg['start'])
+                timestamp = f"[{t//60:02d}:{t%60:02d}]"
+                lines.append(f"{timestamp} {seg['text'].replace('\n', ' ')}")
+            return "\n".join(lines)
+    except Exception as e:
+        # Try yt-dlp fallback!
+        print(f"Transcript API failed: {e} - trying yt-dlp fallback...")
+        yt_dlp_transcript = get_transcript_with_ytdlp(video_id, clean=clean)
+        if yt_dlp_transcript:
+            return yt_dlp_transcript
         return None
 
 def get_demo_content(clean=True):
