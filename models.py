@@ -7,41 +7,6 @@ import bcrypt
 
 Base = declarative_base()
 
-# class User(Base):
-#     __tablename__ = "users"
-
-#     # Primary key and basic fields
-#     id = Column(Integer, primary_key=True, index=True)
-#     email = Column(String(255), unique=True, index=True, nullable=False)
-#     full_name = Column(String(255), nullable=True)
-#     hashed_password = Column(String(255), nullable=False)
-#     is_active = Column(Boolean, default=True)
-#     is_verified = Column(Boolean, default=False)
-    
-#     # Timestamps
-#     created_at = Column(DateTime, default=datetime.utcnow)
-#     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-#     last_login = Column(DateTime, nullable=True)
-
-#     # Subscription fields
-#     subscription_tier = Column(String(20), default='free', nullable=False)
-#     subscription_status = Column(String(20), default='inactive', nullable=False)
-#     subscription_id = Column(String(255), nullable=True)  # Stripe subscription ID
-#     subscription_current_period_end = Column(DateTime, nullable=True)
-#     stripe_customer_id = Column(String(255), nullable=True)
-
-#     # Usage tracking fields (reset monthly)
-#     usage_clean_transcripts = Column(Integer, default=0, nullable=False)
-#     usage_unclean_transcripts = Column(Integer, default=0, nullable=False)
-#     usage_audio_downloads = Column(Integer, default=0, nullable=False)
-#     usage_video_downloads = Column(Integer, default=0, nullable=False)
-#     usage_reset_date = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-#     # Additional user preferences
-#     timezone = Column(String(50), default='UTC')
-#     language = Column(String(10), default='en')
-#     notification_preferences = Column(Text, nullable=True)  # JSON string
-
 class User(Base):
     __tablename__ = "users"
 
@@ -70,25 +35,9 @@ class User(Base):
     notification_preferences = Column(Text, nullable=True)
 
 
-
-    # def __repr__(self):
-    #     return f"<User(id={self.id}, email='{self.email}', tier='{self.subscription_tier}')>"
     def __repr__(self):
         return f"<User(id={self.id}, username='{self.username}', email='{self.email}')>"
  
-    
-    # def set_password(self, password: str):
-    #     """Hash and set the user's password"""
-    #     salt = bcrypt.gensalt()
-    #     self.hashed_password = bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
-
-    # def verify_password(self, password: str) -> bool:
-    #     """Verify the user's password"""
-    #     return bcrypt.checkpw(
-    #         password.encode('utf-8'), 
-    #         self.hashed_password.encode('utf-8')
-    #     )
-
     def set_password(self, password: str):
         salt = bcrypt.gensalt()
         self.hashed_password = bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
@@ -208,7 +157,7 @@ def create_tables(engine):
     """Create all tables in the database"""
     Base.metadata.create_all(bind=engine)
 
-
+#===========================================
 # # models.py - Updated User Model with Subscription Fields
 
 # from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float
