@@ -21,7 +21,9 @@ import json
 
 # --- Import all database models ---
 from database import engine, SessionLocal, get_db
-from database import User  # <-- KEY: ensure correct import (Subscription, TranscriptDownload)
+#from database import User, # TranscriptDownload  # Subscription, <-- KEY: ensure correct import (Subscription, TranscriptDownload)
+from models import User #, SubscriptionHistory, TranscriptDownload
+
 from models import create_tables
 
 load_dotenv()
