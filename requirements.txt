@@ -1,49 +1,48 @@
-# requirements.txt - Enhanced for YouTube Transcript Downloader
-# Updated to ensure compatibility and add missing dependencies
-
-# Core FastAPI and server
+# Core API stack
 fastapi==0.109.0
-uvicorn==0.27.0
-python-multipart==0.0.6
+uvicorn[standard]==0.27.0
 
-# Database
+# Database & ORM
 sqlalchemy==2.0.25
 
-# Data validation
+# Pydantic (for FastAPI validation)
 pydantic==2.5.3
 
-# YouTube transcript extraction (LATEST VERSION)
-youtube-transcript-api==1.1.0
+# Authentication & Security
+PyJWT==2.8.0
+passlib[bcrypt]==1.7.4
+bcrypt==3.2.2        # <--- DO NOT upgrade this until passlib supports 4.x+
 
-# YouTube downloader (more robust against blocking)
-yt-dlp==2024.12.6
+# Multipart/formdata (for file uploads)
+python-multipart==0.0.6
 
-# Payment processing
+# Payments
 stripe==7.10.0
 
-# Environment and configuration
+# YouTube transcript & download
+youtube-transcript-api==1.1.0
+yt-dlp==2024.12.6
+
+# .env support
 python-dotenv==1.0.0
 
-# Authentication and security
-PyJWT==2.8.0
-bcrypt==4.1.2
-passlib[bcrypt]==1.7.4
-
-# HTTP requests
+# HTTP/Network utils
 requests==2.32.4
-
-# Additional dependencies for improved reliability
-# XML parsing (defusedxml is used by youtube-transcript-api internally)
-defusedxml==0.7.1
-
-# Enhanced HTTP client with retry capabilities
 httpx==0.26.0
 
-# Better JSON handling
-orjson==3.9.10
-
-# Timezone handling
+# Timezones
 pytz==2023.3
 
-# Optional: For better error tracking in production
+# XML parsing (required for YouTube transcript)
+defusedxml==0.7.1
+
+# Fast JSON handling (optional, used only if you import/use orjson)
+orjson==3.9.10
+
+# Optional: Frontend proxying or development
+# aiofiles==23.2.1
+
+# Optional: Error reporting for production
 # sentry-sdk[fastapi]==1.40.0
+
+# --- Remove any unused or "leftover" libraries you don't actually import in your codebase! ---
