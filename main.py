@@ -20,11 +20,9 @@ import subprocess
 import json
 
 # --- Import all database models ---
-from database import engine, SessionLocal, get_db
-#from database import User, # TranscriptDownload  # Subscription, <-- KEY: ensure correct import (Subscription, TranscriptDownload)
-from models import User #, SubscriptionHistory, TranscriptDownload
 
-from models import create_tables
+from models import User, TranscriptDownload, SubscriptionHistory
+from database import engine, SessionLocal, get_db, create_tables
 
 load_dotenv()
 
@@ -198,7 +196,7 @@ TRANSCRIPT_TYPE_MAP = {
 
 @app.on_event("startup")
 def startup():
-    create_tables(engine)
+    create_tables()
 
 @app.get("/")
 def root():

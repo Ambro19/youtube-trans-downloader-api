@@ -1,8 +1,10 @@
+# database.py
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from models import Base, User, SubscriptionHistory  # Import all models from models.py
 import os
 from dotenv import load_dotenv
+from models import Base  # Only import Base, all models are in models.py
 
 load_dotenv()
 
@@ -20,9 +22,10 @@ def get_db():
 def create_tables():
     Base.metadata.create_all(bind=engine)
 
+
 #=========================
 
-#========================================= the very last one===================
+#======= the very last one: DO NOT CANGE IT ==============
 # # Complete Fixed database.py - ALL columns included
 
 # from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, create_engine
