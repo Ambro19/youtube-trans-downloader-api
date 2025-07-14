@@ -356,9 +356,8 @@ async def download_transcript(
         }
     elif request.format == "xml":
         formatted_transcript = f"""<?xml version="1.0" encoding="UTF-8"?>
-<transcript video_id="{video_id}">
-{"".join([f"<line>{line}</line>" for line in transcript.split('\n')])}
-</transcript>"""
+        <transcript video_id="{video_id}">{"".join(f"<line>{line}</line>" for line in transcript.split('\n'))}
+        </transcript>"""
     elif request.format == "csv":
         lines = transcript.split('\n')
         formatted_transcript = "start_time,text\n" + "\n".join([
