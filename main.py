@@ -355,14 +355,41 @@ async def download_transcript(
             }
         }
     elif request.format == "xml":
-        formatted_transcript = f"""<?xml version="1.0" encoding="UTF-8"?>
-        <transcript video_id="{video_id}">{"".join(f"<line>{line}</line>" for line in transcript.split('\n'))}
-        </transcript>"""
+        # Fixed XML generation
+        xml_lines = [f"<line>{line}</line>" for line in transcript.split('\n')]
+        formatted_transcript = f'''<?xml version="1.0" encoding="UTF-8"?>
+<transcript video_id="{video_id}">
+{"".join(xml_lines)}
+</transcript>'''
     elif request.format == "csv":
         lines = transcript.split('\n')
-        formatted_transcript = "start_time,text\n" + "\n".join([
+        formatted_transcript = "start_time,text\n" + "\n".join(
             f"{i},{line}" for i, line in enumerate(lines)
-        ])
+        )
+#     formatted_transcript = transcript
+#     if request.format == "json":
+#         formatted_transcript = {
+#             "video_id": video_id,
+#             "transcript": transcript.split('\n'),
+#             "metadata": {
+#                 "format": "json",
+#                 "clean": request.clean_transcript,
+#                 "generated_at": datetime.utcnow().isoformat()
+#             }
+#         }
+#     elif request.format == "xml":
+#         formatted_transcript = f"""<?xml version="1.0" encoding="UTF-8"?>
+#         <transcript video_id="{video_id}">{"".join(f"<line>{line}</line>" for line in transcript.split('\n'))}
+#   </transcript>"""
+#     elif request.format == "csv":
+#         lines = transcript.split('\n')
+#         formatted_transcript = "start_time,text\n" + "\n".join([
+#             f"{i},{line}" for i, line in enumerate(lines)
+#         ])
+
+
+
+
     
     # Save download record
     download = TranscriptDownload(
