@@ -1,11 +1,8 @@
-# models.py - Updated User Model with Subscription Fields
-
-# models.py
-
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
 import bcrypt
+import json
 
 Base = declarative_base()
 
@@ -13,51 +10,60 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    username = Column(String(50), unique=True, index=True, nullable=False)
-    email = Column(String(255), unique=True, index=True, nullable=False)
-    full_name = Column(String(255), nullable=True)
-    hashed_password = Column(String(255), nullable=False)
-    is_active = Column(Boolean, default=True)
-    is_verified = Column(Boolean, default=False)
+    username = Column(String(50), unique=True, index=True)
+    email = Column(String(100), unique=True, index=True)
+    hashed_password = Column(String(255))
     created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    last_login = Column(DateTime, nullable=True)
-    subscription_tier = Column(String(20), default='free', nullable=False)
-    subscription_status = Column(String(20), default='inactive', nullable=False)
-    subscription_id = Column(String(255), nullable=True)
-    subscription_current_period_end = Column(DateTime, nullable=True)
-    stripe_customer_id = Column(String(255), nullable=True)
-    usage_clean_transcripts = Column(Integer, default=0, nullable=False)
-    usage_unclean_transcripts = Column(Integer, default=0, nullable=False)
-    usage_audio_downloads = Column(Integer, default=0, nullable=False)
-    usage_video_downloads = Column(Integer, default=0, nullable=False)
-    usage_reset_date = Column(DateTime, default=datetime.utcnow, nullable=False)
+    
+    # Stripe integration
+    stripe_customer_id = Column(String(255), index=True)
+    stripe_subscription_id = Column(String(255), index=True)
+    
+    # User details
+    full_name = Column(String(100))
+    phone_number = Column(String(20))
+    is_active = Column(Boolean, default=True)
+    email_verified = Column(Boolean, default=False)
+    last_login = Column(DateTime)
+    
+    # Subscription info
+    subscription_tier = Column(String(20), default='free')
+    subscription_status = Column(String(20), default='inactive')
+    current_period_end = Column(DateTime)
+    
+    # Usage tracking
+    usage_clean_transcripts = Column(Integer, default=0)
+    usage_unclean_transcripts = Column(Integer, default=0)
+    usage_audio_downloads = Column(Integer, default=0)
+    usage_video_downloads = Column(Integer, default=0)
+    usage_reset_date = Column(DateTime, default=datetime.utcnow)
+    
+    # Preferences
     timezone = Column(String(50), default='UTC')
     language = Column(String(10), default='en')
-    notification_preferences = Column(Text, nullable=True)
-
-    def __repr__(self):
-        return f"<User(id={self.id}, username='{self.username}', email='{self.email}')>"
+    notification_preferences = Column(Text)
 
     def set_password(self, password: str):
         salt = bcrypt.gensalt()
         self.hashed_password = bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
 
     def verify_password(self, password: str) -> bool:
-        return bcrypt.checkpw(password.encode('utf-8'), self.hashed_password.encode('utf-8'))
+        return bcrypt.checkpw(
+            password.encode('utf-8'), 
+            self.hashed_password.encode('utf-8')
+        )
 
     def is_subscription_active(self) -> bool:
         if self.subscription_tier == 'free':
             return True
-        if not self.subscription_current_period_end:
-            return False
         return (
             self.subscription_status in ['active', 'trialing'] and
-            self.subscription_current_period_end > datetime.utcnow()
+            self.current_period_end and
+            self.current_period_end > datetime.utcnow()
         )
 
     def get_plan_limits(self) -> dict:
-        limits = {
+        return {
             'free': {
                 'clean_transcripts': 5,
                 'unclean_transcripts': 3,
@@ -76,87 +82,227 @@ class User(Base):
                 'audio_downloads': float('inf'),
                 'video_downloads': float('inf')
             }
-        }
-        return limits.get(self.subscription_tier, limits['free'])
-
-    def get_current_usage(self) -> dict:
-        return {
-            'clean_transcripts': self.usage_clean_transcripts,
-            'unclean_transcripts': self.usage_unclean_transcripts,
-            'audio_downloads': self.usage_audio_downloads,
-            'video_downloads': self.usage_video_downloads
-        }
+        }.get(self.subscription_tier)
 
     def can_perform_action(self, action_type: str) -> bool:
         if self.usage_reset_date.month != datetime.utcnow().month:
             self.reset_monthly_usage()
+            
         limits = self.get_plan_limits()
         current_usage = getattr(self, f'usage_{action_type}', 0)
         limit = limits.get(action_type, 0)
-        if limit == float('inf'):
-            return True
-        return current_usage < limit
+        
+        return current_usage < limit if limit != float('inf') else True
 
     def reset_monthly_usage(self):
-        self.usage_clean_transcripts = 0
-        self.usage_unclean_transcripts = 0
-        self.usage_audio_downloads = 0
-        self.usage_video_downloads = 0
+        for usage_type in ['clean_transcripts', 'unclean_transcripts', 'audio_downloads', 'video_downloads']:
+            setattr(self, f'usage_{usage_type}', 0)
         self.usage_reset_date = datetime.utcnow()
 
     def increment_usage(self, action_type: str):
-        current_usage = getattr(self, f'usage_{action_type}', 0)
-        setattr(self, f'usage_{action_type}', current_usage + 1)
+        current = getattr(self, f'usage_{action_type}', 0)
+        setattr(self, f'usage_{action_type}', current + 1)
 
-    def to_dict(self) -> dict:
+    def to_dict(self):
         return {
             'id': self.id,
+            'username': self.username,
             'email': self.email,
-            'full_name': self.full_name,
-            'is_active': self.is_active,
-            'is_verified': self.is_verified,
             'subscription_tier': self.subscription_tier,
             'subscription_status': self.subscription_status,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'last_login': self.last_login.isoformat() if self.last_login else None,
+            'current_period_end': self.current_period_end.isoformat() if self.current_period_end else None,
+            'usage': {
+                'clean_transcripts': self.usage_clean_transcripts,
+                'unclean_transcripts': self.usage_unclean_transcripts,
+                'audio_downloads': self.usage_audio_downloads,
+                'video_downloads': self.usage_video_downloads
+            }
         }
-
-class TranscriptDownload(Base):
-    __tablename__ = "transcript_downloads"
-
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, nullable=False, index=True)
-    youtube_id = Column(String(20), nullable=False, index=True)
-    transcript_type = Column(String(20), nullable=False)  # clean, unclean, audio, video
-    created_at = Column(DateTime, nullable=False)
-    file_size = Column(Integer, nullable=True)  # Size in bytes
-    processing_time = Column(Integer, nullable=True)  # Time in milliseconds
-    download_method = Column(String(50), nullable=True)  # youtube-transcript-api, yt-dlp, etc.
-    quality = Column(String(20), nullable=True)  # high, medium, low
-    language = Column(String(10), default='en')
 
 class SubscriptionHistory(Base):
     __tablename__ = "subscription_history"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, nullable=False)
-    action = Column(String(50), nullable=False)  # 'upgraded', 'downgraded', 'cancelled', 'renewed'
-    from_tier = Column(String(20), nullable=True)
-    to_tier = Column(String(20), nullable=True)
-    amount = Column(Float, nullable=True)
-    stripe_subscription_id = Column(String(255), nullable=True)
-    stripe_payment_intent_id = Column(String(255), nullable=True)
+    user_id = Column(Integer, index=True)
+    action = Column(String(50))  # upgrade, downgrade, cancel, renew
+    from_tier = Column(String(20))
+    to_tier = Column(String(20))
+    amount = Column(Float)
+    stripe_subscription_id = Column(String(255))
+    stripe_payment_intent_id = Column(String(255))
     created_at = Column(DateTime, default=datetime.utcnow)
-    history_metadata = Column(Text, nullable=True)  # JSON string for additional data
+    history_meta_data = Column(Text)  # Changed from metadata to meta_data
 
-    def __repr__(self):
-        return f"<SubscriptionHistory(user_id={self.user_id}, action='{self.action}', from='{self.from_tier}', to='{self.to_tier}')>"
+    def set_meta_data(self, data: dict):
+        self.history_meta_data = json.dumps(data)
+
+    def get_meta_data(self) -> dict:
+        return json.loads(self.history_meta_data) if self.history_meta_data else {}
 
 def create_tables(engine):
-    """Create all tables in the database"""
     Base.metadata.create_all(bind=engine)
 
+#====================================
+# # models.py - Updated User Model with Subscription Fields
+# # models.py
+
+# from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float
+# from sqlalchemy.ext.declarative import declarative_base
+# from datetime import datetime
+# import bcrypt
+
+# Base = declarative_base()
+
+# class User(Base):
+#     __tablename__ = "users"
+
+#     id = Column(Integer, primary_key=True, index=True)
+#     username = Column(String(50), unique=True, index=True, nullable=False)
+#     email = Column(String(255), unique=True, index=True, nullable=False)
+#     full_name = Column(String(255), nullable=True)
+#     hashed_password = Column(String(255), nullable=False)
+#     is_active = Column(Boolean, default=True)
+#     is_verified = Column(Boolean, default=False)
+#     created_at = Column(DateTime, default=datetime.utcnow)
+#     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+#     last_login = Column(DateTime, nullable=True)
+#     subscription_tier = Column(String(20), default='free', nullable=False)
+#     subscription_status = Column(String(20), default='inactive', nullable=False)
+#     subscription_id = Column(String(255), nullable=True)
+#     subscription_current_period_end = Column(DateTime, nullable=True)
+#     stripe_customer_id = Column(String(255), nullable=True)
+#     usage_clean_transcripts = Column(Integer, default=0, nullable=False)
+#     usage_unclean_transcripts = Column(Integer, default=0, nullable=False)
+#     usage_audio_downloads = Column(Integer, default=0, nullable=False)
+#     usage_video_downloads = Column(Integer, default=0, nullable=False)
+#     usage_reset_date = Column(DateTime, default=datetime.utcnow, nullable=False)
+#     timezone = Column(String(50), default='UTC')
+#     language = Column(String(10), default='en')
+#     notification_preferences = Column(Text, nullable=True)
+
+#     def __repr__(self):
+#         return f"<User(id={self.id}, username='{self.username}', email='{self.email}')>"
+
+#     def set_password(self, password: str):
+#         salt = bcrypt.gensalt()
+#         self.hashed_password = bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+
+#     def verify_password(self, password: str) -> bool:
+#         return bcrypt.checkpw(password.encode('utf-8'), self.hashed_password.encode('utf-8'))
+
+#     def is_subscription_active(self) -> bool:
+#         if self.subscription_tier == 'free':
+#             return True
+#         if not self.subscription_current_period_end:
+#             return False
+#         return (
+#             self.subscription_status in ['active', 'trialing'] and
+#             self.subscription_current_period_end > datetime.utcnow()
+#         )
+
+#     def get_plan_limits(self) -> dict:
+#         limits = {
+#             'free': {
+#                 'clean_transcripts': 5,
+#                 'unclean_transcripts': 3,
+#                 'audio_downloads': 2,
+#                 'video_downloads': 1
+#             },
+#             'pro': {
+#                 'clean_transcripts': 100,
+#                 'unclean_transcripts': 50,
+#                 'audio_downloads': 50,
+#                 'video_downloads': 20
+#             },
+#             'premium': {
+#                 'clean_transcripts': float('inf'),
+#                 'unclean_transcripts': float('inf'),
+#                 'audio_downloads': float('inf'),
+#                 'video_downloads': float('inf')
+#             }
+#         }
+#         return limits.get(self.subscription_tier, limits['free'])
+
+#     def get_current_usage(self) -> dict:
+#         return {
+#             'clean_transcripts': self.usage_clean_transcripts,
+#             'unclean_transcripts': self.usage_unclean_transcripts,
+#             'audio_downloads': self.usage_audio_downloads,
+#             'video_downloads': self.usage_video_downloads
+#         }
+
+#     def can_perform_action(self, action_type: str) -> bool:
+#         if self.usage_reset_date.month != datetime.utcnow().month:
+#             self.reset_monthly_usage()
+#         limits = self.get_plan_limits()
+#         current_usage = getattr(self, f'usage_{action_type}', 0)
+#         limit = limits.get(action_type, 0)
+#         if limit == float('inf'):
+#             return True
+#         return current_usage < limit
+
+#     def reset_monthly_usage(self):
+#         self.usage_clean_transcripts = 0
+#         self.usage_unclean_transcripts = 0
+#         self.usage_audio_downloads = 0
+#         self.usage_video_downloads = 0
+#         self.usage_reset_date = datetime.utcnow()
+
+#     def increment_usage(self, action_type: str):
+#         current_usage = getattr(self, f'usage_{action_type}', 0)
+#         setattr(self, f'usage_{action_type}', current_usage + 1)
+
+#     def to_dict(self) -> dict:
+#         return {
+#             'id': self.id,
+#             'email': self.email,
+#             'full_name': self.full_name,
+#             'is_active': self.is_active,
+#             'is_verified': self.is_verified,
+#             'subscription_tier': self.subscription_tier,
+#             'subscription_status': self.subscription_status,
+#             'created_at': self.created_at.isoformat() if self.created_at else None,
+#             'last_login': self.last_login.isoformat() if self.last_login else None,
+#         }
+
+# class TranscriptDownload(Base):
+#     __tablename__ = "transcript_downloads"
+
+#     id = Column(Integer, primary_key=True, index=True)
+#     user_id = Column(Integer, nullable=False, index=True)
+#     youtube_id = Column(String(20), nullable=False, index=True)
+#     transcript_type = Column(String(20), nullable=False)  # clean, unclean, audio, video
+#     created_at = Column(DateTime, nullable=False)
+#     file_size = Column(Integer, nullable=True)  # Size in bytes
+#     processing_time = Column(Integer, nullable=True)  # Time in milliseconds
+#     download_method = Column(String(50), nullable=True)  # youtube-transcript-api, yt-dlp, etc.
+#     quality = Column(String(20), nullable=True)  # high, medium, low
+#     language = Column(String(10), default='en')
+
+# class SubscriptionHistory(Base):
+#     __tablename__ = "subscription_history"
+
+#     id = Column(Integer, primary_key=True, index=True)
+#     user_id = Column(Integer, nullable=False)
+#     action = Column(String(50), nullable=False)  # 'upgraded', 'downgraded', 'cancelled', 'renewed'
+#     from_tier = Column(String(20), nullable=True)
+#     to_tier = Column(String(20), nullable=True)
+#     amount = Column(Float, nullable=True)
+#     stripe_subscription_id = Column(String(255), nullable=True)
+#     stripe_payment_intent_id = Column(String(255), nullable=True)
+#     created_at = Column(DateTime, default=datetime.utcnow)
+#     history_metadata = Column(Text, nullable=True)  # JSON string for additional data
+
+#     def __repr__(self):
+#         return f"<SubscriptionHistory(user_id={self.user_id}, action='{self.action}', from='{self.from_tier}', to='{self.to_tier}')>"
+
+# def create_tables(engine):
+#     """Create all tables in the database"""
+#     Base.metadata.create_all(bind=engine)
+
 #===========================================
+
+#======= the very last one: DO NOT CANGE IT, PLEASE ==============
 # # models.py - Updated User Model with Subscription Fields
 
 # from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float
@@ -328,10 +474,10 @@ def create_tables(engine):
 #     """Create all tables in the database"""
 #     Base.metadata.create_all(bind=engine)
 
-#===================
+# # ===================
 
-#========= IMPORTANT NOTE: THIS MAIN.PY WORKS FINE EXCEPT ONE WORKING EXAMPLE LINK SO KEEP IT!! ==========
-#========= DESACTIVATED 7/9/25 @ 10:10 PM =========
+# #========= IMPORTANT NOTE: THIS MAIN.PY WORKS FINE EXCEPT ONE WORKING EXAMPLE LINK SO KEEP IT!! ==========
+# #========= DESACTIVATED 7/9/25 @ 10:10 PM =========
 
 # # main.py (advanced, usage tracked on User model, for youtube-transcript-api only)
 # from fastapi import FastAPI, HTTPException, Depends, status
