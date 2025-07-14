@@ -366,31 +366,7 @@ async def download_transcript(
         formatted_transcript = "start_time,text\n" + "\n".join(
             f"{i},{line}" for i, line in enumerate(lines)
         )
-#     formatted_transcript = transcript
-#     if request.format == "json":
-#         formatted_transcript = {
-#             "video_id": video_id,
-#             "transcript": transcript.split('\n'),
-#             "metadata": {
-#                 "format": "json",
-#                 "clean": request.clean_transcript,
-#                 "generated_at": datetime.utcnow().isoformat()
-#             }
-#         }
-#     elif request.format == "xml":
-#         formatted_transcript = f"""<?xml version="1.0" encoding="UTF-8"?>
-#         <transcript video_id="{video_id}">{"".join(f"<line>{line}</line>" for line in transcript.split('\n'))}
-#   </transcript>"""
-#     elif request.format == "csv":
-#         lines = transcript.split('\n')
-#         formatted_transcript = "start_time,text\n" + "\n".join([
-#             f"{i},{line}" for i, line in enumerate(lines)
-#         ])
 
-
-
-
-    
     # Save download record
     download = TranscriptDownload(
         user_id=current_user.id,
@@ -489,7 +465,7 @@ def get_subscription_status(
     subscription = db.query(Subscription).filter(
         Subscription.user_id == current_user.id
     ).first()
-    
+
     if not subscription:
         tier = PlanType.FREE
         status = "inactive"
@@ -498,20 +474,37 @@ def get_subscription_status(
         tier = PlanType(subscription.tier)
         status = subscription.status
         expiry_date = subscription.current_period_end
-    
+
     # Get current month's downloads
     current_month = datetime.utcnow().month
     downloads_this_month = db.query(TranscriptDownload).filter(
         TranscriptDownload.user_id == current_user.id,
         extract('month', TranscriptDownload.created_at) == current_month
     ).count()
-    
+
+    # Guarantee null-safety in frontend usage parsing
+    usage = {
+        "clean_transcripts": downloads_this_month,
+        "unclean_transcripts": downloads_this_month,
+        "audio_downloads": 0,  # Reserved for future use or extend as needed
+        "video_downloads": 0   # Reserved for future use or extend as needed
+    }
+
+    limits = {
+        "clean_transcripts": float("inf") if tier == PlanType.PREMIUM else PLAN_FEATURES[tier]["monthly_downloads"],
+        "unclean_transcripts": float("inf") if tier == PlanType.PREMIUM else PLAN_FEATURES[tier]["monthly_downloads"],
+        "audio_downloads": float("inf") if tier == PlanType.PREMIUM else 50,
+        "video_downloads": float("inf") if tier == PlanType.PREMIUM else 20
+    }
+
     return {
         "tier": tier.value,
         "status": status,
+        "usage": usage,
+        "limits": limits,
         "downloads_used": downloads_this_month,
         "downloads_allowed": (
-            "unlimited" if tier == PlanType.PREMIUM else 
+            "unlimited" if tier == PlanType.PREMIUM else
             PLAN_FEATURES[tier]["monthly_downloads"]
         ),
         "features": PLAN_FEATURES[tier],
@@ -551,7 +544,7 @@ if __name__ == "__main__":
 
 # ================== END: DeepSeek main.py ==========================
 
-# ##========= ACTIVATED: 7/9/25 @ 10:10 PM =========
+# ##========= FINAL MAIN.PY ACTIVATED: 7/9/25 @ 10:10 PM. USE AND KEEP IT =========
 # # main.py (COMPLETE PATCH) - unified usage, robust /subscription_status/, download history ready
 
 # from fastapi import FastAPI, HTTPException, Depends, status
