@@ -106,6 +106,8 @@ class UserInfo(BaseModel):
 
 # --- Routes ---
 
+from fastapi import Form
+
 @app.post("/register")
 def register(
     username: str = Form(...),
