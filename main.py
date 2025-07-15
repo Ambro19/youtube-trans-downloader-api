@@ -132,6 +132,32 @@ def extract_youtube_video_id(youtube_id_or_url: str) -> str:
             return match.group(1)[:11]
     return youtube_id_or_url.strip()[:11]
 
+# def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Optional[str] = None) -> str:
+#     try:
+#         from youtube_transcript_api import YouTubeTranscriptApi
+#         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+#         if clean:
+#             text = " ".join([seg['text'].replace('\n', ' ') for seg in transcript])
+#             return " ".join(text.split())
+#         else:
+#             if format == "srt":
+#                 return segments_to_srt(transcript)
+#             elif format == "vtt":
+#                 return segments_to_vtt(transcript)
+#             else:
+#                 # fallback: plain timestamped text
+#                 lines = []
+#                 for seg in transcript:
+#                     t = int(seg['start'])
+#                     timestamp = f"[{t//60:02d}:{t%60:02d}]"
+#                     text_clean = seg['text'].replace('\n', ' ')
+#                     lines.append(f"{timestamp} {text_clean}")
+#                 return "\n".join(lines)
+#     except Exception as e:
+#         print(f"Transcript API failed: {e} - trying yt-dlp fallback...")
+#         # Fallback to yt-dlp: Not shown for brevity, but should follow similar SRT/VTT logic
+#         return None
+
 def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Optional[str] = None) -> str:
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
@@ -145,7 +171,6 @@ def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Option
             elif format == "vtt":
                 return segments_to_vtt(transcript)
             else:
-                # fallback: plain timestamped text
                 lines = []
                 for seg in transcript:
                     t = int(seg['start'])
@@ -154,9 +179,13 @@ def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Option
                     lines.append(f"{timestamp} {text_clean}")
                 return "\n".join(lines)
     except Exception as e:
-        print(f"Transcript API failed: {e} - trying yt-dlp fallback...")
-        # Fallback to yt-dlp: Not shown for brevity, but should follow similar SRT/VTT logic
-        return None
+        logger.warning(f"Transcript API failed: {e} - trying yt-dlp fallback...")
+        fallback = get_transcript_with_ytdlp(video_id, clean)
+        if fallback:
+            return fallback
+        else:
+            logger.error(f"yt-dlp fallback also failed for video: {video_id}")
+            return None
 
 def get_transcript_with_ytdlp(video_id, clean=True):
     try:
