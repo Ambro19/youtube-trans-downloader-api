@@ -82,11 +82,26 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         raise credentials_exception
     return user
 
-# --- Pydantic Schemas ---
+# # --- Pydantic Schemas ---
+# class UserCreate(BaseModel):
+#     email: str
+#     password: str
+#     full_name: Optional[str] = None
+
 class UserCreate(BaseModel):
     email: str
     password: str
     full_name: Optional[str] = None
+
+    @classmethod
+    def as_form(
+        cls,
+        email: str = Form(...),
+        password: str = Form(...),
+        full_name: str = Form(None)
+    ):
+        return cls(email=email, password=password, full_name=full_name)
+
 
 class Token(BaseModel):
     access_token: str
@@ -106,30 +121,20 @@ class UserInfo(BaseModel):
 
 # --- Routes ---
 
-from fastapi import Form
-
-@app.post("/register")
-def register(
-    username: str = Form(...),
-    email: str = Form(...),
-    password: str = Form(...),
-    db: Session = Depends(get_db)
-):
-    if db.query(User).filter(User.username == username).first():
-        raise HTTPException(status_code=400, detail="Username already exists.")
-    if db.query(User).filter(User.email == email).first():
+@app.post("/register", response_model=UserInfo)
+def register(user_data: UserCreate = Depends(UserCreate.as_form), db: Session = Depends(get_db)):
+    if db.query(User).filter(User.email == user_data.email).first():
         raise HTTPException(status_code=400, detail="Email already exists.")
-
-    user_obj = User(
-        username=username,
-        email=email,
-        hashed_password=get_password_hash(password),
+    user = User(
+        email=user_data.email,
+        full_name=user_data.full_name,
         created_at=datetime.utcnow()
     )
-    db.add(user_obj)
+    user.set_password(user_data.password)
+    db.add(user)
     db.commit()
-    db.refresh(user_obj)
-    return {"message": "User registered successfully."}
+    db.refresh(user)
+    return user
 
 
 # @app.post("/register", response_model=UserInfo)
