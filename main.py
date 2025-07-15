@@ -122,15 +122,23 @@ class UserInfo(BaseModel):
 # --- Routes ---
 
 @app.post("/register", response_model=UserInfo)
-def register(user_data: UserCreate = Depends(UserCreate.as_form), db: Session = Depends(get_db)):
-    if db.query(User).filter(User.email == user_data.email).first():
+def register(
+    email: str = Form(...),
+    password: str = Form(...),
+    full_name: Optional[str] = Form(None),
+    db: Session = Depends(get_db)
+):
+    print("Received:", email, full_name)  # Debug: What the frontend actually sends
+
+    if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=400, detail="Email already exists.")
+
     user = User(
-        email=user_data.email,
-        full_name=user_data.full_name,
+        email=email,
+        full_name=full_name,
         created_at=datetime.utcnow()
     )
-    user.set_password(user_data.password)
+    user.set_password(password)
     db.add(user)
     db.commit()
     db.refresh(user)
