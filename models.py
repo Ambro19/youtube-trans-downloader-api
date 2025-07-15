@@ -1,146 +1,146 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float
-from sqlalchemy.ext.declarative import declarative_base
-from datetime import datetime
-import bcrypt
-import json
+# from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float
+# from sqlalchemy.ext.declarative import declarative_base
+# from datetime import datetime
+# import bcrypt
+# import json
 
-Base = declarative_base()
+# Base = declarative_base()
 
-class User(Base):
-    __tablename__ = "users"
+# class User(Base):
+#     __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String(50), unique=True, index=True)
-    email = Column(String(100), unique=True, index=True)
-    hashed_password = Column(String(255))
-    created_at = Column(DateTime, default=datetime.utcnow)
+#     id = Column(Integer, primary_key=True, index=True)
+#     username = Column(String(50), unique=True, index=True)
+#     email = Column(String(100), unique=True, index=True)
+#     hashed_password = Column(String(255))
+#     created_at = Column(DateTime, default=datetime.utcnow)
     
-    # Stripe integration
-    stripe_customer_id = Column(String(255), index=True)
-    stripe_subscription_id = Column(String(255), index=True)
+#     # Stripe integration
+#     stripe_customer_id = Column(String(255), index=True)
+#     stripe_subscription_id = Column(String(255), index=True)
     
-    # User details
-    full_name = Column(String(100))
-    phone_number = Column(String(20))
-    is_active = Column(Boolean, default=True)
-    email_verified = Column(Boolean, default=False)
-    last_login = Column(DateTime)
+#     # User details
+#     full_name = Column(String(100))
+#     phone_number = Column(String(20))
+#     is_active = Column(Boolean, default=True)
+#     email_verified = Column(Boolean, default=False)
+#     last_login = Column(DateTime)
     
-    # Subscription info
-    subscription_tier = Column(String(20), default='free')
-    subscription_status = Column(String(20), default='inactive')
-    current_period_end = Column(DateTime)
+#     # Subscription info
+#     subscription_tier = Column(String(20), default='free')
+#     subscription_status = Column(String(20), default='inactive')
+#     current_period_end = Column(DateTime)
     
-    # Usage tracking
-    usage_clean_transcripts = Column(Integer, default=0)
-    usage_unclean_transcripts = Column(Integer, default=0)
-    usage_audio_downloads = Column(Integer, default=0)
-    usage_video_downloads = Column(Integer, default=0)
-    usage_reset_date = Column(DateTime, default=datetime.utcnow)
+#     # Usage tracking
+#     usage_clean_transcripts = Column(Integer, default=0)
+#     usage_unclean_transcripts = Column(Integer, default=0)
+#     usage_audio_downloads = Column(Integer, default=0)
+#     usage_video_downloads = Column(Integer, default=0)
+#     usage_reset_date = Column(DateTime, default=datetime.utcnow)
     
-    # Preferences
-    timezone = Column(String(50), default='UTC')
-    language = Column(String(10), default='en')
-    notification_preferences = Column(Text)
+#     # Preferences
+#     timezone = Column(String(50), default='UTC')
+#     language = Column(String(10), default='en')
+#     notification_preferences = Column(Text)
 
-    def set_password(self, password: str):
-        salt = bcrypt.gensalt()
-        self.hashed_password = bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+#     def set_password(self, password: str):
+#         salt = bcrypt.gensalt()
+#         self.hashed_password = bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
 
-    def verify_password(self, password: str) -> bool:
-        return bcrypt.checkpw(
-            password.encode('utf-8'), 
-            self.hashed_password.encode('utf-8')
-        )
+#     def verify_password(self, password: str) -> bool:
+#         return bcrypt.checkpw(
+#             password.encode('utf-8'), 
+#             self.hashed_password.encode('utf-8')
+#         )
 
-    def is_subscription_active(self) -> bool:
-        if self.subscription_tier == 'free':
-            return True
-        return (
-            self.subscription_status in ['active', 'trialing'] and
-            self.current_period_end and
-            self.current_period_end > datetime.utcnow()
-        )
+#     def is_subscription_active(self) -> bool:
+#         if self.subscription_tier == 'free':
+#             return True
+#         return (
+#             self.subscription_status in ['active', 'trialing'] and
+#             self.current_period_end and
+#             self.current_period_end > datetime.utcnow()
+#         )
 
-    def get_plan_limits(self) -> dict:
-        return {
-            'free': {
-                'clean_transcripts': 5,
-                'unclean_transcripts': 3,
-                'audio_downloads': 2,
-                'video_downloads': 1
-            },
-            'pro': {
-                'clean_transcripts': 100,
-                'unclean_transcripts': 50,
-                'audio_downloads': 50,
-                'video_downloads': 20
-            },
-            'premium': {
-                'clean_transcripts': float('inf'),
-                'unclean_transcripts': float('inf'),
-                'audio_downloads': float('inf'),
-                'video_downloads': float('inf')
-            }
-        }.get(self.subscription_tier)
+#     def get_plan_limits(self) -> dict:
+#         return {
+#             'free': {
+#                 'clean_transcripts': 5,
+#                 'unclean_transcripts': 3,
+#                 'audio_downloads': 2,
+#                 'video_downloads': 1
+#             },
+#             'pro': {
+#                 'clean_transcripts': 100,
+#                 'unclean_transcripts': 50,
+#                 'audio_downloads': 50,
+#                 'video_downloads': 20
+#             },
+#             'premium': {
+#                 'clean_transcripts': float('inf'),
+#                 'unclean_transcripts': float('inf'),
+#                 'audio_downloads': float('inf'),
+#                 'video_downloads': float('inf')
+#             }
+#         }.get(self.subscription_tier)
 
-    def can_perform_action(self, action_type: str) -> bool:
-        if self.usage_reset_date.month != datetime.utcnow().month:
-            self.reset_monthly_usage()
+#     def can_perform_action(self, action_type: str) -> bool:
+#         if self.usage_reset_date.month != datetime.utcnow().month:
+#             self.reset_monthly_usage()
             
-        limits = self.get_plan_limits()
-        current_usage = getattr(self, f'usage_{action_type}', 0)
-        limit = limits.get(action_type, 0)
+#         limits = self.get_plan_limits()
+#         current_usage = getattr(self, f'usage_{action_type}', 0)
+#         limit = limits.get(action_type, 0)
         
-        return current_usage < limit if limit != float('inf') else True
+#         return current_usage < limit if limit != float('inf') else True
 
-    def reset_monthly_usage(self):
-        for usage_type in ['clean_transcripts', 'unclean_transcripts', 'audio_downloads', 'video_downloads']:
-            setattr(self, f'usage_{usage_type}', 0)
-        self.usage_reset_date = datetime.utcnow()
+#     def reset_monthly_usage(self):
+#         for usage_type in ['clean_transcripts', 'unclean_transcripts', 'audio_downloads', 'video_downloads']:
+#             setattr(self, f'usage_{usage_type}', 0)
+#         self.usage_reset_date = datetime.utcnow()
 
-    def increment_usage(self, action_type: str):
-        current = getattr(self, f'usage_{action_type}', 0)
-        setattr(self, f'usage_{action_type}', current + 1)
+#     def increment_usage(self, action_type: str):
+#         current = getattr(self, f'usage_{action_type}', 0)
+#         setattr(self, f'usage_{action_type}', current + 1)
 
-    def to_dict(self):
-        return {
-            'id': self.id,
-            'username': self.username,
-            'email': self.email,
-            'subscription_tier': self.subscription_tier,
-            'subscription_status': self.subscription_status,
-            'current_period_end': self.current_period_end.isoformat() if self.current_period_end else None,
-            'usage': {
-                'clean_transcripts': self.usage_clean_transcripts,
-                'unclean_transcripts': self.usage_unclean_transcripts,
-                'audio_downloads': self.usage_audio_downloads,
-                'video_downloads': self.usage_video_downloads
-            }
-        }
+#     def to_dict(self):
+#         return {
+#             'id': self.id,
+#             'username': self.username,
+#             'email': self.email,
+#             'subscription_tier': self.subscription_tier,
+#             'subscription_status': self.subscription_status,
+#             'current_period_end': self.current_period_end.isoformat() if self.current_period_end else None,
+#             'usage': {
+#                 'clean_transcripts': self.usage_clean_transcripts,
+#                 'unclean_transcripts': self.usage_unclean_transcripts,
+#                 'audio_downloads': self.usage_audio_downloads,
+#                 'video_downloads': self.usage_video_downloads
+#             }
+#         }
 
-class SubscriptionHistory(Base):
-    __tablename__ = "subscription_history"
+# class SubscriptionHistory(Base):
+#     __tablename__ = "subscription_history"
 
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, index=True)
-    action = Column(String(50))  # upgrade, downgrade, cancel, renew
-    from_tier = Column(String(20))
-    to_tier = Column(String(20))
-    amount = Column(Float)
-    stripe_subscription_id = Column(String(255))
-    stripe_payment_intent_id = Column(String(255))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    history_meta_data = Column(Text)  # Changed from metadata to meta_data
+#     id = Column(Integer, primary_key=True, index=True)
+#     user_id = Column(Integer, index=True)
+#     action = Column(String(50))  # upgrade, downgrade, cancel, renew
+#     from_tier = Column(String(20))
+#     to_tier = Column(String(20))
+#     amount = Column(Float)
+#     stripe_subscription_id = Column(String(255))
+#     stripe_payment_intent_id = Column(String(255))
+#     created_at = Column(DateTime, default=datetime.utcnow)
+#     history_meta_data = Column(Text)  # Changed from metadata to meta_data
 
-    def set_meta_data(self, data: dict):
-        self.history_meta_data = json.dumps(data)
+#     def set_meta_data(self, data: dict):
+#         self.history_meta_data = json.dumps(data)
 
-    def get_meta_data(self) -> dict:
-        return json.loads(self.history_meta_data) if self.history_meta_data else {}
+#     def get_meta_data(self) -> dict:
+#         return json.loads(self.history_meta_data) if self.history_meta_data else {}
 
-def create_tables(engine):
-    Base.metadata.create_all(bind=engine)
+# def create_tables(engine):
+#     Base.metadata.create_all(bind=engine)
 
 #====================================
 # # models.py - Updated User Model with Subscription Fields
@@ -305,176 +305,176 @@ def create_tables(engine):
 #======= the very last one: DO NOT CANGE IT, PLEASE ==============
 # # models.py - Updated User Model with Subscription Fields
 
-# from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float
-# from sqlalchemy.ext.declarative import declarative_base
-# from sqlalchemy.sql import func
-# from datetime import datetime
-# import bcrypt
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.sql import func
+from datetime import datetime
+import bcrypt
 
-# Base = declarative_base()
+Base = declarative_base()
 
-# class User(Base):
-#     __tablename__ = "users"
+class User(Base):
+    __tablename__ = "users"
 
-#     # Primary key and basic fields
-#     id = Column(Integer, primary_key=True, index=True)
-#     email = Column(String(255), unique=True, index=True, nullable=False)
-#     full_name = Column(String(255), nullable=True)
-#     hashed_password = Column(String(255), nullable=False)
-#     is_active = Column(Boolean, default=True)
-#     is_verified = Column(Boolean, default=False)
+    # Primary key and basic fields
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), unique=True, index=True, nullable=False)
+    full_name = Column(String(255), nullable=True)
+    hashed_password = Column(String(255), nullable=False)
+    is_active = Column(Boolean, default=True)
+    is_verified = Column(Boolean, default=False)
     
-#     # Timestamps
-#     created_at = Column(DateTime, default=datetime.utcnow)
-#     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-#     last_login = Column(DateTime, nullable=True)
+    # Timestamps
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_login = Column(DateTime, nullable=True)
 
-#     # Subscription fields
-#     subscription_tier = Column(String(20), default='free', nullable=False)
-#     subscription_status = Column(String(20), default='inactive', nullable=False)
-#     subscription_id = Column(String(255), nullable=True)  # Stripe subscription ID
-#     subscription_current_period_end = Column(DateTime, nullable=True)
-#     stripe_customer_id = Column(String(255), nullable=True)
+    # Subscription fields
+    subscription_tier = Column(String(20), default='free', nullable=False)
+    subscription_status = Column(String(20), default='inactive', nullable=False)
+    subscription_id = Column(String(255), nullable=True)  # Stripe subscription ID
+    subscription_current_period_end = Column(DateTime, nullable=True)
+    stripe_customer_id = Column(String(255), nullable=True)
 
-#     # Usage tracking fields (reset monthly)
-#     usage_clean_transcripts = Column(Integer, default=0, nullable=False)
-#     usage_unclean_transcripts = Column(Integer, default=0, nullable=False)
-#     usage_audio_downloads = Column(Integer, default=0, nullable=False)
-#     usage_video_downloads = Column(Integer, default=0, nullable=False)
-#     usage_reset_date = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Usage tracking fields (reset monthly)
+    usage_clean_transcripts = Column(Integer, default=0, nullable=False)
+    usage_unclean_transcripts = Column(Integer, default=0, nullable=False)
+    usage_audio_downloads = Column(Integer, default=0, nullable=False)
+    usage_video_downloads = Column(Integer, default=0, nullable=False)
+    usage_reset_date = Column(DateTime, default=datetime.utcnow, nullable=False)
 
-#     # Additional user preferences
-#     timezone = Column(String(50), default='UTC')
-#     language = Column(String(10), default='en')
-#     notification_preferences = Column(Text, nullable=True)  # JSON string
+    # Additional user preferences
+    timezone = Column(String(50), default='UTC')
+    language = Column(String(10), default='en')
+    notification_preferences = Column(Text, nullable=True)  # JSON string
 
-#     def __repr__(self):
-#         return f"<User(id={self.id}, email='{self.email}', tier='{self.subscription_tier}')>"
+    def __repr__(self):
+        return f"<User(id={self.id}, email='{self.email}', tier='{self.subscription_tier}')>"
 
-#     def set_password(self, password: str):
-#         """Hash and set the user's password"""
-#         salt = bcrypt.gensalt()
-#         self.hashed_password = bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+    def set_password(self, password: str):
+        """Hash and set the user's password"""
+        salt = bcrypt.gensalt()
+        self.hashed_password = bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
 
-#     def verify_password(self, password: str) -> bool:
-#         """Verify the user's password"""
-#         return bcrypt.checkpw(
-#             password.encode('utf-8'), 
-#             self.hashed_password.encode('utf-8')
-#         )
+    def verify_password(self, password: str) -> bool:
+        """Verify the user's password"""
+        return bcrypt.checkpw(
+            password.encode('utf-8'), 
+            self.hashed_password.encode('utf-8')
+        )
 
-#     def is_subscription_active(self) -> bool:
-#         """Check if user has an active subscription"""
-#         if self.subscription_tier == 'free':
-#             return True
+    def is_subscription_active(self) -> bool:
+        """Check if user has an active subscription"""
+        if self.subscription_tier == 'free':
+            return True
         
-#         if not self.subscription_current_period_end:
-#             return False
+        if not self.subscription_current_period_end:
+            return False
             
-#         return (
-#             self.subscription_status in ['active', 'trialing'] and
-#             self.subscription_current_period_end > datetime.utcnow()
-#         )
+        return (
+            self.subscription_status in ['active', 'trialing'] and
+            self.subscription_current_period_end > datetime.utcnow()
+        )
 
-#     def get_plan_limits(self) -> dict:
-#         """Get the usage limits for the user's current plan"""
-#         limits = {
-#             'free': {
-#                 'clean_transcripts': 5,
-#                 'unclean_transcripts': 3,
-#                 'audio_downloads': 2,
-#                 'video_downloads': 1
-#             },
-#             'pro': {
-#                 'clean_transcripts': 100,
-#                 'unclean_transcripts': 50,
-#                 'audio_downloads': 50,
-#                 'video_downloads': 20
-#             },
-#             'premium': {
-#                 'clean_transcripts': float('inf'),
-#                 'unclean_transcripts': float('inf'),
-#                 'audio_downloads': float('inf'),
-#                 'video_downloads': float('inf')
-#             }
-#         }
-#         return limits.get(self.subscription_tier, limits['free'])
+    def get_plan_limits(self) -> dict:
+        """Get the usage limits for the user's current plan"""
+        limits = {
+            'free': {
+                'clean_transcripts': 5,
+                'unclean_transcripts': 3,
+                'audio_downloads': 2,
+                'video_downloads': 1
+            },
+            'pro': {
+                'clean_transcripts': 100,
+                'unclean_transcripts': 50,
+                'audio_downloads': 50,
+                'video_downloads': 20
+            },
+            'premium': {
+                'clean_transcripts': float('inf'),
+                'unclean_transcripts': float('inf'),
+                'audio_downloads': float('inf'),
+                'video_downloads': float('inf')
+            }
+        }
+        return limits.get(self.subscription_tier, limits['free'])
 
-#     def get_current_usage(self) -> dict:
-#         """Get the user's current usage for this month"""
-#         return {
-#             'clean_transcripts': self.usage_clean_transcripts,
-#             'unclean_transcripts': self.usage_unclean_transcripts,
-#             'audio_downloads': self.usage_audio_downloads,
-#             'video_downloads': self.usage_video_downloads
-#         }
+    def get_current_usage(self) -> dict:
+        """Get the user's current usage for this month"""
+        return {
+            'clean_transcripts': self.usage_clean_transcripts,
+            'unclean_transcripts': self.usage_unclean_transcripts,
+            'audio_downloads': self.usage_audio_downloads,
+            'video_downloads': self.usage_video_downloads
+        }
 
-#     def can_perform_action(self, action_type: str) -> bool:
-#         """Check if user can perform the specified action based on limits"""
-#         # Reset usage if it's a new month
-#         if self.usage_reset_date.month != datetime.utcnow().month:
-#             self.reset_monthly_usage()
+    def can_perform_action(self, action_type: str) -> bool:
+        """Check if user can perform the specified action based on limits"""
+        # Reset usage if it's a new month
+        if self.usage_reset_date.month != datetime.utcnow().month:
+            self.reset_monthly_usage()
 
-#         limits = self.get_plan_limits()
-#         current_usage = getattr(self, f'usage_{action_type}', 0)
-#         limit = limits.get(action_type, 0)
+        limits = self.get_plan_limits()
+        current_usage = getattr(self, f'usage_{action_type}', 0)
+        limit = limits.get(action_type, 0)
 
-#         if limit == float('inf'):
-#             return True
+        if limit == float('inf'):
+            return True
 
-#         return current_usage < limit
+        return current_usage < limit
 
-#     def reset_monthly_usage(self):
-#         """Reset monthly usage counters"""
-#         self.usage_clean_transcripts = 0
-#         self.usage_unclean_transcripts = 0
-#         self.usage_audio_downloads = 0
-#         self.usage_video_downloads = 0
-#         self.usage_reset_date = datetime.utcnow()
+    def reset_monthly_usage(self):
+        """Reset monthly usage counters"""
+        self.usage_clean_transcripts = 0
+        self.usage_unclean_transcripts = 0
+        self.usage_audio_downloads = 0
+        self.usage_video_downloads = 0
+        self.usage_reset_date = datetime.utcnow()
 
-#     def increment_usage(self, action_type: str):
-#         """Increment usage counter for the specified action"""
-#         current_usage = getattr(self, f'usage_{action_type}', 0)
-#         setattr(self, f'usage_{action_type}', current_usage + 1)
+    def increment_usage(self, action_type: str):
+        """Increment usage counter for the specified action"""
+        current_usage = getattr(self, f'usage_{action_type}', 0)
+        setattr(self, f'usage_{action_type}', current_usage + 1)
 
-#     def to_dict(self) -> dict:
-#         """Convert user to dictionary for JSON serialization"""
-#         return {
-#             'id': self.id,
-#             'email': self.email,
-#             'full_name': self.full_name,
-#             'is_active': self.is_active,
-#             'is_verified': self.is_verified,
-#             'subscription_tier': self.subscription_tier,
-#             'subscription_status': self.subscription_status,
-#             'created_at': self.created_at.isoformat() if self.created_at else None,
-#             'last_login': self.last_login.isoformat() if self.last_login else None,
-#         }
+    def to_dict(self) -> dict:
+        """Convert user to dictionary for JSON serialization"""
+        return {
+            'id': self.id,
+            'email': self.email,
+            'full_name': self.full_name,
+            'is_active': self.is_active,
+            'is_verified': self.is_verified,
+            'subscription_tier': self.subscription_tier,
+            'subscription_status': self.subscription_status,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'last_login': self.last_login.isoformat() if self.last_login else None,
+        }
 
-# # Additional model for storing subscription history (optional)
-# class SubscriptionHistory(Base):
-#     __tablename__ = "subscription_history"
+# Additional model for storing subscription history (optional)
+class SubscriptionHistory(Base):
+    __tablename__ = "subscription_history"
 
-#     id = Column(Integer, primary_key=True, index=True)
-#     user_id = Column(Integer, nullable=False)
-#     action = Column(String(50), nullable=False)  # 'upgraded', 'downgraded', 'cancelled', 'renewed'
-#     from_tier = Column(String(20), nullable=True)
-#     to_tier = Column(String(20), nullable=True)
-#     amount = Column(Float, nullable=True)
-#     stripe_subscription_id = Column(String(255), nullable=True)
-#     stripe_payment_intent_id = Column(String(255), nullable=True)
-#     created_at = Column(DateTime, default=datetime.utcnow)
-#     history_metadata = Column(Text, nullable=True)  # JSON string for additional data
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False)
+    action = Column(String(50), nullable=False)  # 'upgraded', 'downgraded', 'cancelled', 'renewed'
+    from_tier = Column(String(20), nullable=True)
+    to_tier = Column(String(20), nullable=True)
+    amount = Column(Float, nullable=True)
+    stripe_subscription_id = Column(String(255), nullable=True)
+    stripe_payment_intent_id = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    history_metadata = Column(Text, nullable=True)  # JSON string for additional data
 
-#     def __repr__(self):
-#         return f"<SubscriptionHistory(user_id={self.user_id}, action='{self.action}', from='{self.from_tier}', to='{self.to_tier}')>"
+    def __repr__(self):
+        return f"<SubscriptionHistory(user_id={self.user_id}, action='{self.action}', from='{self.from_tier}', to='{self.to_tier}')>"
 
-# # Create tables function
-# def create_tables(engine):
-#     """Create all tables in the database"""
-#     Base.metadata.create_all(bind=engine)
+# Create tables function
+def create_tables(engine):
+    """Create all tables in the database"""
+    Base.metadata.create_all(bind=engine)
 
-# # ===================
+# ===================
 
 # #========= IMPORTANT NOTE: THIS MAIN.PY WORKS FINE EXCEPT ONE WORKING EXAMPLE LINK SO KEEP IT!! ==========
 # #========= DESACTIVATED 7/9/25 @ 10:10 PM =========
@@ -860,7 +860,7 @@ def create_tables(engine):
 #     return {
 #         "videos": [
 #             {"id": "dQw4w9WgXcQ", "title": "Rick Astley - Never Gonna Give You Up"},
-#             {"id": "jNQXAC9IVRw", "title": "Me at the zoo"}
+#             {"id": "eYDS3T1egng", "title": "General-Purpose vs Special-Purpose Computers: What's the Difference?"}
 #         ]
 #     }
 
