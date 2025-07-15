@@ -13,6 +13,7 @@ from jwt.exceptions import PyJWTError
 from passlib.context import CryptContext
 from dotenv import load_dotenv
 import logging
+from fastapi import Form
 
 # --- Local imports ---
 from models import User, SubscriptionHistory, create_tables
@@ -105,20 +106,44 @@ class UserInfo(BaseModel):
 
 # --- Routes ---
 
-@app.post("/register", response_model=UserInfo)
-def register(user_data: UserCreate, db: Session = Depends(get_db)):
-    if db.query(User).filter(User.email == user_data.email).first():
+@app.post("/register")
+def register(
+    username: str = Form(...),
+    email: str = Form(...),
+    password: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    if db.query(User).filter(User.username == username).first():
+        raise HTTPException(status_code=400, detail="Username already exists.")
+    if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=400, detail="Email already exists.")
-    user = User(
-        email=user_data.email,
-        full_name=user_data.full_name,
+
+    user_obj = User(
+        username=username,
+        email=email,
+        hashed_password=get_password_hash(password),
         created_at=datetime.utcnow()
     )
-    user.set_password(user_data.password)
-    db.add(user)
+    db.add(user_obj)
     db.commit()
-    db.refresh(user)
-    return user
+    db.refresh(user_obj)
+    return {"message": "User registered successfully."}
+
+
+# @app.post("/register", response_model=UserInfo)
+# def register(user_data: UserCreate, db: Session = Depends(get_db)):
+#     if db.query(User).filter(User.email == user_data.email).first():
+#         raise HTTPException(status_code=400, detail="Email already exists.")
+#     user = User(
+#         email=user_data.email,
+#         full_name=user_data.full_name,
+#         created_at=datetime.utcnow()
+#     )
+#     user.set_password(user_data.password)
+#     db.add(user)
+#     db.commit()
+#     db.refresh(user)
+#     return user
 
 @app.post("/login", response_model=Token)
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
