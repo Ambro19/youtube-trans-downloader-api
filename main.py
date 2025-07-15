@@ -14,6 +14,7 @@ from passlib.context import CryptContext
 from dotenv import load_dotenv
 import logging
 from fastapi import Form
+from pydantic import BaseModel
 
 # --- Local imports ---
 from models import User, SubscriptionHistory, create_tables
@@ -88,6 +89,13 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 #     password: str
 #     full_name: Optional[str] = None
 
+
+class RegisterRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+
+
 class UserCreate(BaseModel):
     email: str
     password: str
@@ -101,6 +109,8 @@ class UserCreate(BaseModel):
         full_name: str = Form(None)
     ):
         return cls(email=email, password=password, full_name=full_name)
+    
+        
 
 
 class Token(BaseModel):
@@ -122,28 +132,22 @@ class UserInfo(BaseModel):
 # --- Routes ---
 
 @app.post("/register", response_model=UserInfo)
-def register(
-    email: str = Form(...),
-    password: str = Form(...),
-    full_name: Optional[str] = Form(None),
-    db: Session = Depends(get_db)
-):
-    print("Received:", email, full_name)  # Debug: What the frontend actually sends
+def register(user: RegisterRequest, db: Session = Depends(get_db)):
+    print("Received:", user.dict())  # Debug: Make sure you're receiving it
 
-    if db.query(User).filter(User.email == email).first():
+    if db.query(User).filter(User.email == user.email).first():
         raise HTTPException(status_code=400, detail="Email already exists.")
 
-    user = User(
-        email=email,
-        full_name=full_name,
+    new_user = User(
+        email=user.email,
+        full_name=user.username,
         created_at=datetime.utcnow()
     )
-    user.set_password(password)
-    db.add(user)
+    new_user.set_password(user.password)
+    db.add(new_user)
     db.commit()
-    db.refresh(user)
-    return user
-
+    db.refresh(new_user)
+    return new_user
 
 # @app.post("/register", response_model=UserInfo)
 # def register(user_data: UserCreate, db: Session = Depends(get_db)):
