@@ -4,3 +4,5 @@
 .env.production
 __pycache__/
 *.pyc
+youtube_trans_downloader.db
+
