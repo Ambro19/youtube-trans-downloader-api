@@ -1,5 +1,7 @@
 ##========= FINAL MAIN.PY ACTIVATED: 7/9/25 @ 10:10 PM. USE AND KEEP IT =========
 # # main.py (COMPLETE PATCH) - unified usage, robust /subscription_status/, download history ready
+# PATCHED fallback: yt-dlp retry + robust .json3 loader
+# Replaces get_transcript_with_ytdlp()
 
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +19,7 @@ from dotenv import load_dotenv
 import re
 import subprocess
 import json
+import time
 
 # --- Import all database models ---
 
@@ -187,8 +190,46 @@ def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Option
             logger.error(f"yt-dlp fallback also failed for video: {video_id}")
             return None
 
-def get_transcript_with_ytdlp(video_id, clean=True):
+# def get_transcript_with_ytdlp(video_id, clean=True):
+#     try:
+#         cmd = [
+#             "yt-dlp",
+#             "--skip-download",
+#             "--write-auto-subs",
+#             "--sub-lang", "en",
+#             "--sub-format", "json3",
+#             "--output", "%(id)s",
+#             f"https://www.youtube.com/watch?v={video_id}"
+#         ]
+#         subprocess.run(cmd, check=True, capture_output=True)
+#         json_path = f"{video_id}.en.json3"
+#         if not os.path.exists(json_path):
+#             return None
+#         with open(json_path, encoding="utf8") as f:
+#             data = json.load(f)
+#         text_blocks = []
+#         for event in data.get("events", []):
+#             if "segs" in event and "tStartMs" in event:
+#                 text = "".join([seg.get("utf8", "") for seg in event["segs"]]).strip()
+#                 if text:
+#                     if clean:
+#                         text_blocks.append(text)
+#                     else:
+#                         start_sec = int(event["tStartMs"] // 1000)
+#                         timestamp = f"[{start_sec // 60:02d}:{start_sec % 60:02d}]"
+#                         text_blocks.append(f"{timestamp} {text}")
+#         os.remove(json_path)
+#         return "\n".join(text_blocks) if text_blocks else None
+#     except Exception as e:
+#         print("yt-dlp fallback error:", e)
+#         return None
+
+def get_transcript_with_ytdlp(video_id: str, clean=True, retries=3, wait_sec=1) -> str:
     try:
+        output_file = f"{video_id}.en.json3"
+        url = f"https://www.youtube.com/watch?v={video_id}"
+
+        # yt-dlp command
         cmd = [
             "yt-dlp",
             "--skip-download",
@@ -196,29 +237,42 @@ def get_transcript_with_ytdlp(video_id, clean=True):
             "--sub-lang", "en",
             "--sub-format", "json3",
             "--output", "%(id)s",
-            f"https://www.youtube.com/watch?v={video_id}"
+            url
         ]
-        subprocess.run(cmd, check=True, capture_output=True)
-        json_path = f"{video_id}.en.json3"
-        if not os.path.exists(json_path):
-            return None
-        with open(json_path, encoding="utf8") as f:
+
+        subprocess.run(cmd, capture_output=True, check=False)
+
+        # Retry check for file
+        for attempt in range(retries):
+            if os.path.exists(output_file):
+                break
+            time.sleep(wait_sec)
+
+        if not os.path.exists(output_file):
+            raise FileNotFoundError(f"yt-dlp output not found: {output_file}")
+
+        # Read and parse json3 subtitle file
+        with open(output_file, encoding="utf8") as f:
             data = json.load(f)
+
         text_blocks = []
         for event in data.get("events", []):
             if "segs" in event and "tStartMs" in event:
-                text = "".join([seg.get("utf8", "") for seg in event["segs"]]).strip()
-                if text:
-                    if clean:
-                        text_blocks.append(text)
-                    else:
-                        start_sec = int(event["tStartMs"] // 1000)
-                        timestamp = f"[{start_sec // 60:02d}:{start_sec % 60:02d}]"
-                        text_blocks.append(f"{timestamp} {text}")
-        os.remove(json_path)
-        return "\n".join(text_blocks) if text_blocks else None
+                text = ''.join(seg.get("utf8", '') for seg in event.get("segs", []))
+                if not text.strip():
+                    continue
+                if clean:
+                    text_blocks.append(text.strip())
+                else:
+                    sec = int(event["tStartMs"] // 1000)
+                    timestamp = f"[{sec // 60:02d}:{sec % 60:02d}]"
+                    text_blocks.append(f"{timestamp} {text.strip()}")
+
+        os.remove(output_file)
+        return '\n'.join(text_blocks) if text_blocks else None
+
     except Exception as e:
-        print("yt-dlp fallback error:", e)
+        logger.error(f"yt-dlp fallback failed: {e}")
         return None
 
 # Formatters
