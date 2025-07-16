@@ -30,7 +30,7 @@ import time
 # --- Import all database models ---
 #from models import User, TranscriptDownload, SubscriptionHistory
 from database import engine, SessionLocal, get_db, create_tables
-#from database import engine, SessionLocal, get_db  # Make sure this points to your db
+from database import engine, SessionLocal, get_db  # Make sure this points to your db
 from models import User, create_tables  # Use your models.py User model!
 from database import SessionLocal, get_db  # Make sure this points to your db
 
@@ -184,7 +184,6 @@ def get_transcript_with_ytdlp(video_id: str, clean=True, retries=3, wait_sec=1) 
         ]
         subprocess.run(cmd, capture_output=True, check=False)
 
-        # retry .json3 check
         for _ in range(retries):
             if os.path.exists(output_json3):
                 with open(output_json3, encoding="utf8") as f:
@@ -203,7 +202,6 @@ def get_transcript_with_ytdlp(video_id: str, clean=True, retries=3, wait_sec=1) 
 
             time.sleep(wait_sec)
 
-        # fallback to raw .vtt (saves for debug only)
         if os.path.exists(output_vtt):
             with open(output_vtt, encoding="utf8") as f:
                 vtt_raw = f.read()
@@ -215,6 +213,7 @@ def get_transcript_with_ytdlp(video_id: str, clean=True, retries=3, wait_sec=1) 
     except Exception as e:
         logger.error(f"yt-dlp fallback failed: {e}")
         return None
+
 
 # def get_transcript_with_ytdlp(video_id: str, clean=True, retries=3, wait_sec=1) -> str:
 #     try:
