@@ -1,7 +1,13 @@
-##========= FINAL MAIN.PY ACTIVATED: 7/9/25 @ 10:10 PM. USE AND KEEP IT =========
+##========= FINAL MAIN.PY ACTIVATED: 7/9/25 @ 10:10 PM. USE AND KEEP IT ==
+
 # # main.py (COMPLETE PATCH) - unified usage, robust /subscription_status/, download history ready
-# PATCHED fallback: yt-dlp retry + robust .json3 loader
-# Replaces get_transcript_with_ytdlp()
+# PATCHED fallback: yt-dlp retry + robust .json3 loader. Replaces get_transcript_with_ytdlp()
+# PATCHED: Robust yt-dlp fallback + fix VTT fallback + proper TranscriptDownload import
+
+from pathlib import Path
+from youtube_transcript_api import YouTubeTranscriptApi
+#from .models import TranscriptDownload  # ✅ Fix NameError in /download_transcript
+from database import TranscriptDownload  # ✅ Fix NameError in /download_transcript
 
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,16 +28,11 @@ import json
 import time
 
 # --- Import all database models ---
-
 #from models import User, TranscriptDownload, SubscriptionHistory
 from database import engine, SessionLocal, get_db, create_tables
-
-
-
-from database import engine, SessionLocal, get_db  # Make sure this points to your db
+#from database import engine, SessionLocal, get_db  # Make sure this points to your db
 from models import User, create_tables  # Use your models.py User model!
 from database import SessionLocal, get_db  # Make sure this points to your db
-
 
 load_dotenv()
 
@@ -135,31 +136,6 @@ def extract_youtube_video_id(youtube_id_or_url: str) -> str:
             return match.group(1)[:11]
     return youtube_id_or_url.strip()[:11]
 
-# def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Optional[str] = None) -> str:
-#     try:
-#         from youtube_transcript_api import YouTubeTranscriptApi
-#         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
-#         if clean:
-#             text = " ".join([seg['text'].replace('\n', ' ') for seg in transcript])
-#             return " ".join(text.split())
-#         else:
-#             if format == "srt":
-#                 return segments_to_srt(transcript)
-#             elif format == "vtt":
-#                 return segments_to_vtt(transcript)
-#             else:
-#                 # fallback: plain timestamped text
-#                 lines = []
-#                 for seg in transcript:
-#                     t = int(seg['start'])
-#                     timestamp = f"[{t//60:02d}:{t%60:02d}]"
-#                     text_clean = seg['text'].replace('\n', ' ')
-#                     lines.append(f"{timestamp} {text_clean}")
-#                 return "\n".join(lines)
-#     except Exception as e:
-#         print(f"Transcript API failed: {e} - trying yt-dlp fallback...")
-#         # Fallback to yt-dlp: Not shown for brevity, but should follow similar SRT/VTT logic
-#         return None
 
 def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Optional[str] = None) -> str:
     try:
@@ -190,8 +166,62 @@ def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Option
             logger.error(f"yt-dlp fallback also failed for video: {video_id}")
             return None
 
-# def get_transcript_with_ytdlp(video_id, clean=True):
+# fallback for unavailable transcript
+def get_transcript_with_ytdlp(video_id: str, clean=True, retries=3, wait_sec=1) -> str:
+    try:
+        output_vtt = f"{video_id}.en.vtt"
+        output_json3 = f"{video_id}.en.json3"
+        url = f"https://www.youtube.com/watch?v={video_id}"
+
+        cmd = [
+            "yt-dlp",
+            "--skip-download",
+            "--write-auto-sub",
+            "--sub-lang", "en",
+            "--sub-format", "json3/vtt",
+            "--output", "%(id)s",
+            url
+        ]
+        subprocess.run(cmd, capture_output=True, check=False)
+
+        # retry .json3 check
+        for _ in range(retries):
+            if os.path.exists(output_json3):
+                with open(output_json3, encoding="utf8") as f:
+                    data = json.load(f)
+                os.remove(output_json3)
+
+                blocks = []
+                for e in data.get("events", []):
+                    if "segs" in e and "tStartMs" in e:
+                        text = ''.join(s.get("utf8", '') for s in e["segs"] if s.get("utf8"))
+                        if text.strip():
+                            sec = int(e["tStartMs"] // 1000)
+                            ts = f"[{sec//60:02d}:{sec%60:02d}]"
+                            blocks.append(f"{ts} {text.strip()}" if not clean else text.strip())
+                return "\n".join(blocks) if blocks else None
+
+            time.sleep(wait_sec)
+
+        # fallback to raw .vtt (saves for debug only)
+        if os.path.exists(output_vtt):
+            with open(output_vtt, encoding="utf8") as f:
+                vtt_raw = f.read()
+            os.remove(output_vtt)
+            return vtt_raw.strip() if vtt_raw else None
+
+        raise FileNotFoundError(f"yt-dlp output not found: {output_json3} or .vtt")
+
+    except Exception as e:
+        logger.error(f"yt-dlp fallback failed: {e}")
+        return None
+
+# def get_transcript_with_ytdlp(video_id: str, clean=True, retries=3, wait_sec=1) -> str:
 #     try:
+#         output_file = f"{video_id}.en.json3"
+#         url = f"https://www.youtube.com/watch?v={video_id}"
+
+#         # yt-dlp command
 #         cmd = [
 #             "yt-dlp",
 #             "--skip-download",
@@ -199,81 +229,43 @@ def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Option
 #             "--sub-lang", "en",
 #             "--sub-format", "json3",
 #             "--output", "%(id)s",
-#             f"https://www.youtube.com/watch?v={video_id}"
+#             url
 #         ]
-#         subprocess.run(cmd, check=True, capture_output=True)
-#         json_path = f"{video_id}.en.json3"
-#         if not os.path.exists(json_path):
-#             return None
-#         with open(json_path, encoding="utf8") as f:
+
+#         subprocess.run(cmd, capture_output=True, check=False)
+
+#         # Retry check for file
+#         for attempt in range(retries):
+#             if os.path.exists(output_file):
+#                 break
+#             time.sleep(wait_sec)
+
+#         if not os.path.exists(output_file):
+#             raise FileNotFoundError(f"yt-dlp output not found: {output_file}")
+
+#         # Read and parse json3 subtitle file
+#         with open(output_file, encoding="utf8") as f:
 #             data = json.load(f)
+
 #         text_blocks = []
 #         for event in data.get("events", []):
 #             if "segs" in event and "tStartMs" in event:
-#                 text = "".join([seg.get("utf8", "") for seg in event["segs"]]).strip()
-#                 if text:
-#                     if clean:
-#                         text_blocks.append(text)
-#                     else:
-#                         start_sec = int(event["tStartMs"] // 1000)
-#                         timestamp = f"[{start_sec // 60:02d}:{start_sec % 60:02d}]"
-#                         text_blocks.append(f"{timestamp} {text}")
-#         os.remove(json_path)
-#         return "\n".join(text_blocks) if text_blocks else None
+#                 text = ''.join(seg.get("utf8", '') for seg in event.get("segs", []))
+#                 if not text.strip():
+#                     continue
+#                 if clean:
+#                     text_blocks.append(text.strip())
+#                 else:
+#                     sec = int(event["tStartMs"] // 1000)
+#                     timestamp = f"[{sec // 60:02d}:{sec % 60:02d}]"
+#                     text_blocks.append(f"{timestamp} {text.strip()}")
+
+#         os.remove(output_file)
+#         return '\n'.join(text_blocks) if text_blocks else None
+
 #     except Exception as e:
-#         print("yt-dlp fallback error:", e)
+#         logger.error(f"yt-dlp fallback failed: {e}")
 #         return None
-
-def get_transcript_with_ytdlp(video_id: str, clean=True, retries=3, wait_sec=1) -> str:
-    try:
-        output_file = f"{video_id}.en.json3"
-        url = f"https://www.youtube.com/watch?v={video_id}"
-
-        # yt-dlp command
-        cmd = [
-            "yt-dlp",
-            "--skip-download",
-            "--write-auto-subs",
-            "--sub-lang", "en",
-            "--sub-format", "json3",
-            "--output", "%(id)s",
-            url
-        ]
-
-        subprocess.run(cmd, capture_output=True, check=False)
-
-        # Retry check for file
-        for attempt in range(retries):
-            if os.path.exists(output_file):
-                break
-            time.sleep(wait_sec)
-
-        if not os.path.exists(output_file):
-            raise FileNotFoundError(f"yt-dlp output not found: {output_file}")
-
-        # Read and parse json3 subtitle file
-        with open(output_file, encoding="utf8") as f:
-            data = json.load(f)
-
-        text_blocks = []
-        for event in data.get("events", []):
-            if "segs" in event and "tStartMs" in event:
-                text = ''.join(seg.get("utf8", '') for seg in event.get("segs", []))
-                if not text.strip():
-                    continue
-                if clean:
-                    text_blocks.append(text.strip())
-                else:
-                    sec = int(event["tStartMs"] // 1000)
-                    timestamp = f"[{sec // 60:02d}:{sec % 60:02d}]"
-                    text_blocks.append(f"{timestamp} {text.strip()}")
-
-        os.remove(output_file)
-        return '\n'.join(text_blocks) if text_blocks else None
-
-    except Exception as e:
-        logger.error(f"yt-dlp fallback failed: {e}")
-        return None
 
 # Formatters
 def segments_to_srt(transcript):
@@ -492,7 +484,7 @@ def get_test_videos():
     return {
         "videos": [
             {"id": "dQw4w9WgXcQ", "title": "Rick Astley - Never Gonna Give You Up"},
-            {"id": "eYDS3T1egng", "title": "General-Purpose vs Special-Purpose Computers"}
+            {"id": "jNQXAC9IVRw", "title": "Me at the zoo"}
         ]
     }
 
