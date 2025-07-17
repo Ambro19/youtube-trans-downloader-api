@@ -1,4 +1,4 @@
-##========= FINAL MAIN.PY ACTIVATED: 7/9/25 @ 10:10 PM. USE AND KEEP IT ==
+##======= DO NOT CHANGE THIS FINAL MAIN.PY ACTIVATED: 7/16/25 @ 10:00 PM. USE AND KEEP IT ==
 
 # # main.py (COMPLETE PATCH) - unified usage, robust /subscription_status/, download history ready
 # PATCHED fallback: yt-dlp retry + robust .json3 loader. Replaces get_transcript_with_ytdlp()
@@ -6,7 +6,6 @@
 
 from pathlib import Path
 from youtube_transcript_api import YouTubeTranscriptApi
-#from .models import TranscriptDownload  # ✅ Fix NameError in /download_transcript
 from database import TranscriptDownload  # ✅ Fix NameError in /download_transcript
 
 from fastapi import FastAPI, HTTPException, Depends, status
@@ -27,8 +26,17 @@ import subprocess
 import json
 import time
 
+#================
+# PATCH: Add endpoints for admin/debugging transcript extraction/logs
+
+from fastapi import APIRouter, HTTPException, Depends
+from sqlalchemy.orm import Session
+from database import get_db, TranscriptDownload # ✅ CORRECT location for model
+from transcript_utils import get_transcript_with_ytdlp  # ✅ Fixed circular import
+
+
+
 # --- Import all database models ---
-#from models import User, TranscriptDownload, SubscriptionHistory
 from database import engine, SessionLocal, get_db, create_tables
 from database import engine, SessionLocal, get_db  # Make sure this points to your db
 from models import User, create_tables  # Use your models.py User model!
@@ -213,58 +221,6 @@ def get_transcript_with_ytdlp(video_id: str, clean=True, retries=3, wait_sec=1) 
     except Exception as e:
         logger.error(f"yt-dlp fallback failed: {e}")
         return None
-
-
-# def get_transcript_with_ytdlp(video_id: str, clean=True, retries=3, wait_sec=1) -> str:
-#     try:
-#         output_file = f"{video_id}.en.json3"
-#         url = f"https://www.youtube.com/watch?v={video_id}"
-
-#         # yt-dlp command
-#         cmd = [
-#             "yt-dlp",
-#             "--skip-download",
-#             "--write-auto-subs",
-#             "--sub-lang", "en",
-#             "--sub-format", "json3",
-#             "--output", "%(id)s",
-#             url
-#         ]
-
-#         subprocess.run(cmd, capture_output=True, check=False)
-
-#         # Retry check for file
-#         for attempt in range(retries):
-#             if os.path.exists(output_file):
-#                 break
-#             time.sleep(wait_sec)
-
-#         if not os.path.exists(output_file):
-#             raise FileNotFoundError(f"yt-dlp output not found: {output_file}")
-
-#         # Read and parse json3 subtitle file
-#         with open(output_file, encoding="utf8") as f:
-#             data = json.load(f)
-
-#         text_blocks = []
-#         for event in data.get("events", []):
-#             if "segs" in event and "tStartMs" in event:
-#                 text = ''.join(seg.get("utf8", '') for seg in event.get("segs", []))
-#                 if not text.strip():
-#                     continue
-#                 if clean:
-#                     text_blocks.append(text.strip())
-#                 else:
-#                     sec = int(event["tStartMs"] // 1000)
-#                     timestamp = f"[{sec // 60:02d}:{sec % 60:02d}]"
-#                     text_blocks.append(f"{timestamp} {text.strip()}")
-
-#         os.remove(output_file)
-#         return '\n'.join(text_blocks) if text_blocks else None
-
-#     except Exception as e:
-#         logger.error(f"yt-dlp fallback failed: {e}")
-#         return None
 
 # Formatters
 def segments_to_srt(transcript):
@@ -486,6 +442,33 @@ def get_test_videos():
             {"id": "jNQXAC9IVRw", "title": "Me at the zoo"}
         ]
     }
+
+#===========================
+@app.get("/debug_transcript/{video_id}")
+def debug_transcript(video_id: str):
+    """Try to fetch transcript directly from yt-dlp and return raw result."""
+    result = get_transcript_with_ytdlp(video_id, clean=False)
+    if not result:
+        raise HTTPException(status_code=404, detail="Transcript not found or parsing failed")
+    return {"video_id": video_id, "raw": result[:3000]}  # Limit long output
+
+@app.get("/downloads/")
+def recent_downloads(limit: int = 10, db: Session = Depends(get_db)):
+    """Admin route to return recent transcript downloads."""
+    downloads = db.query(TranscriptDownload).order_by(TranscriptDownload.created_at.desc()).limit(limit).all()
+    return [
+        {
+            "id": d.id,
+            "user_id": d.user_id,
+            "youtube_id": d.youtube_id,
+            "transcript_type": d.transcript_type,
+            "created_at": d.created_at,
+            "lang": d.language,
+            "method": d.download_method,
+        }
+        for d in downloads
+    ]
+#===========================
 
 if __name__ == "__main__":
     import uvicorn
