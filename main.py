@@ -144,20 +144,24 @@ def extract_youtube_video_id(youtube_id_or_url: str) -> str:
             return match.group(1)[:11]
     return youtube_id_or_url.strip()[:11]
 
-
+# Also update the get_transcript_youtube_api function to handle formats better
 def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Optional[str] = None) -> str:
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+        
         if clean:
+            # Clean format - just text
             text = " ".join([seg['text'].replace('\n', ' ') for seg in transcript])
             return " ".join(text.split())
         else:
+            # Unclean format with timestamps
             if format == "srt":
                 return segments_to_srt(transcript)
             elif format == "vtt":
                 return segments_to_vtt(transcript)
             else:
+                # Default timestamp format [MM:SS]
                 lines = []
                 for seg in transcript:
                     t = int(seg['start'])
@@ -173,6 +177,35 @@ def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Option
         else:
             logger.error(f"yt-dlp fallback also failed for video: {video_id}")
             return None
+
+# def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Optional[str] = None) -> str:
+#     try:
+#         from youtube_transcript_api import YouTubeTranscriptApi
+#         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+#         if clean:
+#             text = " ".join([seg['text'].replace('\n', ' ') for seg in transcript])
+#             return " ".join(text.split())
+#         else:
+#             if format == "srt":
+#                 return segments_to_srt(transcript)
+#             elif format == "vtt":
+#                 return segments_to_vtt(transcript)
+#             else:
+#                 lines = []
+#                 for seg in transcript:
+#                     t = int(seg['start'])
+#                     timestamp = f"[{t//60:02d}:{t%60:02d}]"
+#                     text_clean = seg['text'].replace('\n', ' ')
+#                     lines.append(f"{timestamp} {text_clean}")
+#                 return "\n".join(lines)
+#     except Exception as e:
+#         logger.warning(f"Transcript API failed: {e} - trying yt-dlp fallback...")
+#         fallback = get_transcript_with_ytdlp(video_id, clean)
+#         if fallback:
+#             return fallback
+#         else:
+#             logger.error(f"yt-dlp fallback also failed for video: {video_id}")
+#             return None
 
 # fallback for unavailable transcript
 def get_transcript_with_ytdlp(video_id: str, clean=True, retries=3, wait_sec=1) -> str:
@@ -222,7 +255,38 @@ def get_transcript_with_ytdlp(video_id: str, clean=True, retries=3, wait_sec=1) 
         logger.error(f"yt-dlp fallback failed: {e}")
         return None
 
-# Formatters
+# Updated sections for main.py - Fix VTT format and improve transcript handling
+
+def segments_to_vtt(transcript):
+    """Convert segments to proper WebVTT format."""
+    def sec_to_vtt(ts):
+        h = int(ts // 3600)
+        m = int((ts % 3600) // 60)
+        s = int(ts % 60)
+        ms = int((ts - int(ts)) * 1000)
+        return f"{h:02}:{m:02}:{s:02}.{ms:03}"
+    
+    lines = [
+        "WEBVTT",
+        "Kind: captions", 
+        "Language: en",
+        ""  # Empty line after headers
+    ]
+    
+    for seg in transcript:
+        start = sec_to_vtt(seg["start"])
+        end = sec_to_vtt(seg.get("start", 0) + seg.get("duration", 0))
+        text = seg["text"].replace("\n", " ").strip()
+        
+        # Add timestamp line
+        lines.append(f"{start} --> {end}")
+        # Add text line
+        lines.append(text)
+        # Add empty line between cue blocks
+        lines.append("")
+    
+    return "\n".join(lines)
+
 def segments_to_srt(transcript):
     """Convert segments to SRT format."""
     def sec_to_srt(ts):
@@ -236,25 +300,48 @@ def segments_to_srt(transcript):
     for idx, seg in enumerate(transcript):
         start = sec_to_srt(seg["start"])
         end = sec_to_srt(seg.get("start", 0) + seg.get("duration", 0))
-        text = seg["text"].replace("\n", " ")
-        lines.append(f"{idx+1}\n{start} --> {end}\n{text}\n")
+        text = seg["text"].replace("\n", " ").strip()
+        
+        lines.append(f"{idx+1}")
+        lines.append(f"{start} --> {end}")
+        lines.append(text)
+        lines.append("")  # Empty line between subtitles
+    
     return "\n".join(lines)
 
-def segments_to_vtt(transcript):
-    """Convert segments to WebVTT format."""
-    def sec_to_vtt(ts):
-        h = int(ts // 3600)
-        m = int((ts % 3600) // 60)
-        s = int(ts % 60)
-        ms = int((ts - int(ts)) * 1000)
-        return f"{h:02}:{m:02}:{s:02}.{ms:03}"
-    lines = ["WEBVTT\n"]
-    for seg in transcript:
-        start = sec_to_vtt(seg["start"])
-        end = sec_to_vtt(seg.get("start", 0) + seg.get("duration", 0))
-        text = seg["text"].replace("\n", " ")
-        lines.append(f"{start} --> {end}\n{text}\n")
-    return "\n".join(lines)
+# # Formatters
+# def segments_to_srt(transcript):
+#     """Convert segments to SRT format."""
+#     def sec_to_srt(ts):
+#         h = int(ts // 3600)
+#         m = int((ts % 3600) // 60)
+#         s = int(ts % 60)
+#         ms = int((ts - int(ts)) * 1000)
+#         return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+#     lines = []
+#     for idx, seg in enumerate(transcript):
+#         start = sec_to_srt(seg["start"])
+#         end = sec_to_srt(seg.get("start", 0) + seg.get("duration", 0))
+#         text = seg["text"].replace("\n", " ")
+#         lines.append(f"{idx+1}\n{start} --> {end}\n{text}\n")
+#     return "\n".join(lines)
+
+# def segments_to_vtt(transcript):
+#     """Convert segments to WebVTT format."""
+#     def sec_to_vtt(ts):
+#         h = int(ts // 3600)
+#         m = int((ts % 3600) // 60)
+#         s = int(ts % 60)
+#         ms = int((ts - int(ts)) * 1000)
+#         return f"{h:02}:{m:02}:{s:02}.{ms:03}"
+#     lines = ["WEBVTT\n"]
+#     for seg in transcript:
+#         start = sec_to_vtt(seg["start"])
+#         end = sec_to_vtt(seg.get("start", 0) + seg.get("duration", 0))
+#         text = seg["text"].replace("\n", " ")
+#         lines.append(f"{start} --> {end}\n{text}\n")
+#     return "\n".join(lines)
 
 # --- Usage keys mapping ---
 USAGE_KEYS = {
