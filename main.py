@@ -144,16 +144,38 @@ def extract_youtube_video_id(youtube_id_or_url: str) -> str:
             return match.group(1)[:11]
     return youtube_id_or_url.strip()[:11]
 
-# Also update the get_transcript_youtube_api function to handle formats better
+# Replace these functions in your main.py
 def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Optional[str] = None) -> str:
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
         
         if clean:
-            # Clean format - just text
+            # Clean format - format into readable paragraphs
             text = " ".join([seg['text'].replace('\n', ' ') for seg in transcript])
-            return " ".join(text.split())
+            clean_text = " ".join(text.split())  # Remove extra spaces
+            
+            # Break into paragraphs (every ~500 characters at sentence end)
+            words = clean_text.split()
+            paragraphs = []
+            current_paragraph = []
+            char_count = 0
+            
+            for word in words:
+                current_paragraph.append(word)
+                char_count += len(word) + 1
+                
+                # Break into new paragraph if we've reached ~500 chars and hit sentence end
+                if char_count > 400 and word.endswith(('.', '!', '?')):
+                    paragraphs.append(' '.join(current_paragraph))
+                    current_paragraph = []
+                    char_count = 0
+            
+            # Add remaining words
+            if current_paragraph:
+                paragraphs.append(' '.join(current_paragraph))
+            
+            return '\n\n'.join(paragraphs)
         else:
             # Unclean format with timestamps
             if format == "srt":
@@ -171,26 +193,62 @@ def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Option
                 return "\n".join(lines)
     except Exception as e:
         logger.warning(f"Transcript API failed: {e} - trying yt-dlp fallback...")
-        fallback = get_transcript_with_ytdlp(video_id, clean)
-        if fallback:
-            return fallback
+        # For fallback, we need to handle the format properly
+        if clean:
+            fallback = get_transcript_with_ytdlp(video_id, clean=True)
+            if fallback:
+                # Format fallback text into paragraphs too
+                words = fallback.split()
+                paragraphs = []
+                current_paragraph = []
+                char_count = 0
+                
+                for word in words:
+                    current_paragraph.append(word)
+                    char_count += len(word) + 1
+                    
+                    if char_count > 400 and word.endswith(('.', '!', '?')):
+                        paragraphs.append(' '.join(current_paragraph))
+                        current_paragraph = []
+                        char_count = 0
+                
+                if current_paragraph:
+                    paragraphs.append(' '.join(current_paragraph))
+                
+                return '\n\n'.join(paragraphs)
         else:
-            logger.error(f"yt-dlp fallback also failed for video: {video_id}")
-            return None
+            # For unclean fallback, we need to convert to proper format
+            fallback = get_transcript_with_ytdlp(video_id, clean=False)
+            if fallback and format == "vtt":
+                # Convert [MM:SS] format to proper VTT
+                return convert_timestamp_to_vtt(fallback)
+            elif fallback and format == "srt":
+                # Convert [MM:SS] format to proper SRT
+                return convert_timestamp_to_srt(fallback)
+            return fallback
+        
+        logger.error(f"All transcript methods failed for video: {video_id}")
+        return None
 
+
+# # Also update the get_transcript_youtube_api function to handle formats better
 # def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Optional[str] = None) -> str:
 #     try:
 #         from youtube_transcript_api import YouTubeTranscriptApi
 #         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+        
 #         if clean:
+#             # Clean format - just text
 #             text = " ".join([seg['text'].replace('\n', ' ') for seg in transcript])
 #             return " ".join(text.split())
 #         else:
+#             # Unclean format with timestamps
 #             if format == "srt":
 #                 return segments_to_srt(transcript)
 #             elif format == "vtt":
 #                 return segments_to_vtt(transcript)
 #             else:
+#                 # Default timestamp format [MM:SS]
 #                 lines = []
 #                 for seg in transcript:
 #                     t = int(seg['start'])
@@ -206,6 +264,65 @@ def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Option
 #         else:
 #             logger.error(f"yt-dlp fallback also failed for video: {video_id}")
 #             return None
+
+def convert_timestamp_to_vtt(timestamp_text: str) -> str:
+    """Convert [MM:SS] format to proper WEBVTT format"""
+    lines = timestamp_text.strip().split('\n')
+    vtt_lines = [
+        "WEBVTT",
+        "Kind: captions", 
+        "Language: en",
+        ""
+    ]
+    
+    for line in lines:
+        # Match [MM:SS] pattern
+        match = re.match(r'\[(\d{2}):(\d{2})\] (.+)', line)
+        if match:
+            mm, ss, text = match.groups()
+            start_time = f"00:{mm}:{ss}.000"
+            # Estimate end time (add ~3 seconds)
+            end_minutes = int(mm)
+            end_seconds = int(ss) + 3
+            if end_seconds >= 60:
+                end_minutes += 1
+                end_seconds -= 60
+            end_time = f"00:{end_minutes:02d}:{end_seconds:02d}.000"
+            
+            vtt_lines.append(f"{start_time} --> {end_time}")
+            vtt_lines.append(text.strip())
+            vtt_lines.append("")
+    
+    return '\n'.join(vtt_lines)
+
+def convert_timestamp_to_srt(timestamp_text: str) -> str:
+    """Convert [MM:SS] format to proper SRT format"""
+    lines = timestamp_text.strip().split('\n')
+    srt_lines = []
+    counter = 1
+    
+    for line in lines:
+        # Match [MM:SS] pattern
+        match = re.match(r'\[(\d{2}):(\d{2})\] (.+)', line)
+        if match:
+            mm, ss, text = match.groups()
+            start_time = f"00:{mm}:{ss},000"
+            # Estimate end time (add ~3 seconds)
+            end_minutes = int(mm)
+            end_seconds = int(ss) + 3
+            if end_seconds >= 60:
+                end_minutes += 1
+                end_seconds -= 60
+            end_time = f"00:{end_minutes:02d}:{end_seconds:02d},000"
+            
+            srt_lines.append(str(counter))
+            srt_lines.append(f"{start_time} --> {end_time}")
+            srt_lines.append(text.strip())
+            srt_lines.append("")
+            counter += 1
+    
+    return '\n'.join(srt_lines)
+
 
 # fallback for unavailable transcript
 def get_transcript_with_ytdlp(video_id: str, clean=True, retries=3, wait_sec=1) -> str:
@@ -255,7 +372,6 @@ def get_transcript_with_ytdlp(video_id: str, clean=True, retries=3, wait_sec=1) 
         logger.error(f"yt-dlp fallback failed: {e}")
         return None
 
-# Updated sections for main.py - Fix VTT format and improve transcript handling
 
 def segments_to_vtt(transcript):
     """Convert segments to proper WebVTT format."""
@@ -270,7 +386,7 @@ def segments_to_vtt(transcript):
         "WEBVTT",
         "Kind: captions", 
         "Language: en",
-        ""  # Empty line after headers
+        ""
     ]
     
     for seg in transcript:
@@ -278,11 +394,8 @@ def segments_to_vtt(transcript):
         end = sec_to_vtt(seg.get("start", 0) + seg.get("duration", 0))
         text = seg["text"].replace("\n", " ").strip()
         
-        # Add timestamp line
         lines.append(f"{start} --> {end}")
-        # Add text line
         lines.append(text)
-        # Add empty line between cue blocks
         lines.append("")
     
     return "\n".join(lines)
@@ -305,11 +418,42 @@ def segments_to_srt(transcript):
         lines.append(f"{idx+1}")
         lines.append(f"{start} --> {end}")
         lines.append(text)
-        lines.append("")  # Empty line between subtitles
+        lines.append("")
     
     return "\n".join(lines)
 
-# # Formatters
+# # Updated sections for main.py - Fix VTT format and improve transcript handling
+
+# def segments_to_vtt(transcript):
+#     """Convert segments to proper WebVTT format."""
+#     def sec_to_vtt(ts):
+#         h = int(ts // 3600)
+#         m = int((ts % 3600) // 60)
+#         s = int(ts % 60)
+#         ms = int((ts - int(ts)) * 1000)
+#         return f"{h:02}:{m:02}:{s:02}.{ms:03}"
+    
+#     lines = [
+#         "WEBVTT",
+#         "Kind: captions", 
+#         "Language: en",
+#         ""  # Empty line after headers
+#     ]
+    
+#     for seg in transcript:
+#         start = sec_to_vtt(seg["start"])
+#         end = sec_to_vtt(seg.get("start", 0) + seg.get("duration", 0))
+#         text = seg["text"].replace("\n", " ").strip()
+        
+#         # Add timestamp line
+#         lines.append(f"{start} --> {end}")
+#         # Add text line
+#         lines.append(text)
+#         # Add empty line between cue blocks
+#         lines.append("")
+    
+#     return "\n".join(lines)
+
 # def segments_to_srt(transcript):
 #     """Convert segments to SRT format."""
 #     def sec_to_srt(ts):
@@ -323,25 +467,15 @@ def segments_to_srt(transcript):
 #     for idx, seg in enumerate(transcript):
 #         start = sec_to_srt(seg["start"])
 #         end = sec_to_srt(seg.get("start", 0) + seg.get("duration", 0))
-#         text = seg["text"].replace("\n", " ")
-#         lines.append(f"{idx+1}\n{start} --> {end}\n{text}\n")
+#         text = seg["text"].replace("\n", " ").strip()
+        
+#         lines.append(f"{idx+1}")
+#         lines.append(f"{start} --> {end}")
+#         lines.append(text)
+#         lines.append("")  # Empty line between subtitles
+    
 #     return "\n".join(lines)
 
-# def segments_to_vtt(transcript):
-#     """Convert segments to WebVTT format."""
-#     def sec_to_vtt(ts):
-#         h = int(ts // 3600)
-#         m = int((ts % 3600) // 60)
-#         s = int(ts % 60)
-#         ms = int((ts - int(ts)) * 1000)
-#         return f"{h:02}:{m:02}:{s:02}.{ms:03}"
-#     lines = ["WEBVTT\n"]
-#     for seg in transcript:
-#         start = sec_to_vtt(seg["start"])
-#         end = sec_to_vtt(seg.get("start", 0) + seg.get("duration", 0))
-#         text = seg["text"].replace("\n", " ")
-#         lines.append(f"{start} --> {end}\n{text}\n")
-#     return "\n".join(lines)
 
 # --- Usage keys mapping ---
 USAGE_KEYS = {
