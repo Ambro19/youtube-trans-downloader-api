@@ -109,11 +109,15 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     return user
 
 # --- Pydantic Models ---
-# Add these Pydantic models near your other BaseModel classes
+# Replace your PaymentIntentRequest model and /create_payment_intent/ endpoint in main.py
+# Updated Pydantic model to be more flexible
 class PaymentIntentRequest(BaseModel):
-    amount: float
-    plan_name: str
+    amount: Optional[float] = None
+    plan_name: Optional[str] = None
+    planName: Optional[str] = None  # Alternative field name
     price_id: Optional[str] = None
+    priceId: Optional[str] = None   # Alternative field name
+
 
 class PaymentConfirmRequest(BaseModel):
     payment_intent_id: str
@@ -642,63 +646,6 @@ async def create_payment_intent(
         
     except Exception as e:
         logger.error(f"Failed to create payment intent: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.post("/confirm_payment/")
-async def confirm_payment(
-    request: PaymentConfirmRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Confirm payment and upgrade user subscription"""
-    try:
-        # Retrieve payment intent from Stripe
-        intent = stripe.PaymentIntent.retrieve(request.payment_intent_id)
-        
-        if intent.status == 'succeeded':
-            # Update user subscription based on metadata
-            plan_name = intent.metadata.get('plan_name', '').lower()
-            
-            logger.info(f"Payment succeeded for user {current_user.id}, upgrading to {plan_name}")
-            
-            # Update subscription tier
-            if plan_name == 'pro':
-                current_user.subscription_tier = 'pro'
-            elif plan_name == 'premium':
-                current_user.subscription_tier = 'premium'
-            else:
-                logger.warning(f"Unknown plan name: {plan_name}")
-                current_user.subscription_tier = 'pro'  # Default to pro
-            
-            # Reset usage for new billing period
-            if hasattr(current_user, 'reset_monthly_usage'):
-                current_user.reset_monthly_usage()
-            else:
-                # Manual reset if method doesn't exist
-                current_user.usage_clean_transcripts = 0
-                current_user.usage_unclean_transcripts = 0
-                current_user.usage_audio_downloads = 0
-                current_user.usage_video_downloads = 0
-            
-            db.commit()
-            
-            return {
-                "success": True,
-                "subscription": {
-                    "tier": current_user.subscription_tier,
-                    "status": "active"
-                },
-                "message": f"Successfully upgraded to {plan_name} plan"
-            }
-        else:
-            logger.warning(f"Payment intent {intent.id} status: {intent.status}")
-            raise HTTPException(status_code=400, detail=f"Payment not completed. Status: {intent.status}")
-            
-    except stripe.error.StripeError as e:
-        logger.error(f"Stripe error: {e}")
-        raise HTTPException(status_code=400, detail=f"Stripe error: {str(e)}")
-    except Exception as e:
-        logger.error(f"Failed to confirm payment: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/cancel_subscription/")
