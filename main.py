@@ -25,6 +25,8 @@ import re
 import subprocess
 import json
 import time
+# Add these imports at the top of your main.py (if not already there)
+import stripe
 
 #================
 # PATCH: Add endpoints for admin/debugging transcript extraction/logs
@@ -107,6 +109,15 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     return user
 
 # --- Pydantic Models ---
+# Add these Pydantic models near your other BaseModel classes
+class PaymentIntentRequest(BaseModel):
+    amount: float
+    plan_name: str
+    price_id: Optional[str] = None
+
+class PaymentConfirmRequest(BaseModel):
+    payment_intent_id: str
+
 class UserCreate(BaseModel):
     username: str
     email: str
@@ -229,41 +240,6 @@ def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Option
         
         logger.error(f"All transcript methods failed for video: {video_id}")
         return None
-
-
-# # Also update the get_transcript_youtube_api function to handle formats better
-# def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Optional[str] = None) -> str:
-#     try:
-#         from youtube_transcript_api import YouTubeTranscriptApi
-#         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
-        
-#         if clean:
-#             # Clean format - just text
-#             text = " ".join([seg['text'].replace('\n', ' ') for seg in transcript])
-#             return " ".join(text.split())
-#         else:
-#             # Unclean format with timestamps
-#             if format == "srt":
-#                 return segments_to_srt(transcript)
-#             elif format == "vtt":
-#                 return segments_to_vtt(transcript)
-#             else:
-#                 # Default timestamp format [MM:SS]
-#                 lines = []
-#                 for seg in transcript:
-#                     t = int(seg['start'])
-#                     timestamp = f"[{t//60:02d}:{t%60:02d}]"
-#                     text_clean = seg['text'].replace('\n', ' ')
-#                     lines.append(f"{timestamp} {text_clean}")
-#                 return "\n".join(lines)
-#     except Exception as e:
-#         logger.warning(f"Transcript API failed: {e} - trying yt-dlp fallback...")
-#         fallback = get_transcript_with_ytdlp(video_id, clean)
-#         if fallback:
-#             return fallback
-#         else:
-#             logger.error(f"yt-dlp fallback also failed for video: {video_id}")
-#             return None
 
 def convert_timestamp_to_vtt(timestamp_text: str) -> str:
     """Convert [MM:SS] format to proper WEBVTT format"""
@@ -422,59 +398,6 @@ def segments_to_srt(transcript):
     
     return "\n".join(lines)
 
-# # Updated sections for main.py - Fix VTT format and improve transcript handling
-
-# def segments_to_vtt(transcript):
-#     """Convert segments to proper WebVTT format."""
-#     def sec_to_vtt(ts):
-#         h = int(ts // 3600)
-#         m = int((ts % 3600) // 60)
-#         s = int(ts % 60)
-#         ms = int((ts - int(ts)) * 1000)
-#         return f"{h:02}:{m:02}:{s:02}.{ms:03}"
-    
-#     lines = [
-#         "WEBVTT",
-#         "Kind: captions", 
-#         "Language: en",
-#         ""  # Empty line after headers
-#     ]
-    
-#     for seg in transcript:
-#         start = sec_to_vtt(seg["start"])
-#         end = sec_to_vtt(seg.get("start", 0) + seg.get("duration", 0))
-#         text = seg["text"].replace("\n", " ").strip()
-        
-#         # Add timestamp line
-#         lines.append(f"{start} --> {end}")
-#         # Add text line
-#         lines.append(text)
-#         # Add empty line between cue blocks
-#         lines.append("")
-    
-#     return "\n".join(lines)
-
-# def segments_to_srt(transcript):
-#     """Convert segments to SRT format."""
-#     def sec_to_srt(ts):
-#         h = int(ts // 3600)
-#         m = int((ts % 3600) // 60)
-#         s = int(ts % 60)
-#         ms = int((ts - int(ts)) * 1000)
-#         return f"{h:02}:{m:02}:{s:02},{ms:03}"
-
-#     lines = []
-#     for idx, seg in enumerate(transcript):
-#         start = sec_to_srt(seg["start"])
-#         end = sec_to_srt(seg.get("start", 0) + seg.get("duration", 0))
-#         text = seg["text"].replace("\n", " ").strip()
-        
-#         lines.append(f"{idx+1}")
-#         lines.append(f"{start} --> {end}")
-#         lines.append(text)
-#         lines.append("")  # Empty line between subtitles
-    
-#     return "\n".join(lines)
 
 
 # --- Usage keys mapping ---
@@ -664,7 +587,6 @@ def get_test_videos():
         ]
     }
 
-#===========================
 @app.get("/debug_transcript/{video_id}")
 def debug_transcript(video_id: str):
     """Try to fetch transcript directly from yt-dlp and return raw result."""
@@ -672,6 +594,139 @@ def debug_transcript(video_id: str):
     if not result:
         raise HTTPException(status_code=404, detail="Transcript not found or parsing failed")
     return {"video_id": video_id, "raw": result[:3000]}  # Limit long output
+
+#==========
+# Add these endpoints to your main.py
+
+@app.post("/create_payment_intent/")
+async def create_payment_intent(
+    request: PaymentIntentRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """Create a Stripe Payment Intent for subscription upgrade"""
+    try:
+        # Convert amount to cents (Stripe uses cents)
+        amount_cents = int(request.amount * 100)
+        
+        # Get or create Stripe customer
+        stripe_customer_id = getattr(current_user, 'stripe_customer_id', None)
+        if not stripe_customer_id:
+            # Create new Stripe customer
+            customer = stripe.Customer.create(
+                email=current_user.email,
+                metadata={'user_id': str(current_user.id)}
+            )
+            stripe_customer_id = customer.id
+            # Update user with Stripe customer ID (you may need to add this field to User model)
+            # current_user.stripe_customer_id = stripe_customer_id
+        
+        # Create payment intent
+        intent = stripe.PaymentIntent.create(
+            amount=amount_cents,
+            currency='usd',
+            customer=stripe_customer_id,
+            metadata={
+                'user_id': str(current_user.id),
+                'plan_name': request.plan_name,
+                'price_id': request.price_id or 'manual'
+            },
+            automatic_payment_methods={'enabled': True}
+        )
+        
+        logger.info(f"Created payment intent {intent.id} for user {current_user.id}")
+        
+        return {
+            "client_secret": intent.client_secret,
+            "payment_intent_id": intent.id
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to create payment intent: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/confirm_payment/")
+async def confirm_payment(
+    request: PaymentConfirmRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Confirm payment and upgrade user subscription"""
+    try:
+        # Retrieve payment intent from Stripe
+        intent = stripe.PaymentIntent.retrieve(request.payment_intent_id)
+        
+        if intent.status == 'succeeded':
+            # Update user subscription based on metadata
+            plan_name = intent.metadata.get('plan_name', '').lower()
+            
+            logger.info(f"Payment succeeded for user {current_user.id}, upgrading to {plan_name}")
+            
+            # Update subscription tier
+            if plan_name == 'pro':
+                current_user.subscription_tier = 'pro'
+            elif plan_name == 'premium':
+                current_user.subscription_tier = 'premium'
+            else:
+                logger.warning(f"Unknown plan name: {plan_name}")
+                current_user.subscription_tier = 'pro'  # Default to pro
+            
+            # Reset usage for new billing period
+            if hasattr(current_user, 'reset_monthly_usage'):
+                current_user.reset_monthly_usage()
+            else:
+                # Manual reset if method doesn't exist
+                current_user.usage_clean_transcripts = 0
+                current_user.usage_unclean_transcripts = 0
+                current_user.usage_audio_downloads = 0
+                current_user.usage_video_downloads = 0
+            
+            db.commit()
+            
+            return {
+                "success": True,
+                "subscription": {
+                    "tier": current_user.subscription_tier,
+                    "status": "active"
+                },
+                "message": f"Successfully upgraded to {plan_name} plan"
+            }
+        else:
+            logger.warning(f"Payment intent {intent.id} status: {intent.status}")
+            raise HTTPException(status_code=400, detail=f"Payment not completed. Status: {intent.status}")
+            
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error: {e}")
+        raise HTTPException(status_code=400, detail=f"Stripe error: {str(e)}")
+    except Exception as e:
+        logger.error(f"Failed to confirm payment: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/cancel_subscription/")
+async def cancel_subscription(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Cancel user subscription and downgrade to free tier"""
+    try:
+        logger.info(f"Cancelling subscription for user {current_user.id}")
+        
+        # In a full implementation, you'd also cancel the Stripe subscription
+        # stripe.Subscription.delete(subscription_id)
+        
+        # Downgrade to free tier
+        current_user.subscription_tier = 'free'
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": "Subscription cancelled successfully. You've been downgraded to the free tier."
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to cancel subscription: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+#==========
 
 @app.get("/downloads/")
 def recent_downloads(limit: int = 10, db: Session = Depends(get_db)):
@@ -689,13 +744,14 @@ def recent_downloads(limit: int = 10, db: Session = Depends(get_db)):
         }
         for d in downloads
     ]
-#===========================
+
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
 
 ## =========================
+
 ##==== FINAL MAIN.PY--ACTIVATED: 7/12/25 @ 11:49 PM SO KEEP IT!!=========
 
 # # main.py (COMPLETE PATCH) - unified usage, robust /subscription_status/, download history ready

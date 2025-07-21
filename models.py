@@ -10,7 +10,7 @@ class User(Base):
 
     # Primary fields
     id = Column(Integer, primary_key=True, index=True)
-    username = Column(String(150), unique=True, index=True, nullable=False)  # ✅ ADDED
+    username = Column(String(150), unique=True, index=True, nullable=False)
     email = Column(String(255), unique=True, index=True, nullable=False)
     full_name = Column(String(255), nullable=True)
     hashed_password = Column(String(255), nullable=False)
@@ -85,6 +85,7 @@ class User(Base):
         return limit == float('inf') or current_usage < limit
 
     def reset_monthly_usage(self):
+        """Reset monthly usage counters and update reset date"""
         self.usage_clean_transcripts = 0
         self.usage_unclean_transcripts = 0
         self.usage_audio_downloads = 0
@@ -92,6 +93,7 @@ class User(Base):
         self.usage_reset_date = datetime.utcnow()
 
     def increment_usage(self, action_type: str):
+        """Increment usage counter for a specific action type"""
         if hasattr(self, f'usage_{action_type}'):
             current = getattr(self, f'usage_{action_type}', 0)
             setattr(self, f'usage_{action_type}', current + 1)
