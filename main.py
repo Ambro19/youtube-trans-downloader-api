@@ -118,7 +118,6 @@ class PaymentIntentRequest(BaseModel):
     price_id: Optional[str] = None
     priceId: Optional[str] = None   # Alternative field name
 
-
 class PaymentConfirmRequest(BaseModel):
     payment_intent_id: str
 
