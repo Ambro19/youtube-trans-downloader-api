@@ -23,26 +23,6 @@ else:
 
 Base = declarative_base()
 
-# class User(Base):
-#     __tablename__ = "users"
-    
-#     # Core user fields (original)
-#     id = Column(Integer, primary_key=True, index=True)
-#     username = Column(String(50), unique=True, index=True, nullable=False)
-#     email = Column(String(100), unique=True, index=True, nullable=False)
-#     hashed_password = Column(String(255), nullable=False)
-#     created_at = Column(DateTime, nullable=False)
-    
-#     # 🔧 STRIPE INTEGRATION FIELDS (these were missing!)
-#     stripe_customer_id = Column(String(255), nullable=True, index=True)
-#     stripe_subscription_id = Column(String(255), nullable=True, index=True)
-    
-#     # 🔧 USER METADATA FIELDS (these were missing!)
-#     full_name = Column(String(100), nullable=True)
-#     phone_number = Column(String(20), nullable=True)
-#     is_active = Column(Boolean, default=True)
-#     email_verified = Column(Boolean, default=False)
-#     last_login = Column(DateTime, nullable=True)
 
 class Subscription(Base):
     __tablename__ = "subscriptions"
