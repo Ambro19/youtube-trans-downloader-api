@@ -648,3 +648,36 @@ AttributeError: module 'bcrypt' has no attribute '__about__'
 2025-06-18 01:58:53,501 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
 2025-06-18 01:58:53,502 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
 2025-06-18 01:58:53,502 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-07-22 18:50:12,052 - youtube_trans_downloader - INFO - Environment: development
+2025-07-22 18:50:12,053 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-07-22 18:50:12,053 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-07-22 18:50:12,053 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-07-22 18:50:12,241 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
+2025-07-22 18:50:12,394 - youtube_trans_downloader - INFO - Environment: development
+2025-07-22 18:50:12,395 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
+2025-07-22 18:50:12,395 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
+2025-07-22 18:50:12,395 - youtube_trans_downloader - INFO - Using SQLite database for development
+2025-07-22 19:02:39,081 - passlib.handlers.bcrypt - WARNING - (trapped) error reading bcrypt version
+Traceback (most recent call last):
+  File "C:\Users\xiggy\YOUTUBE-TRANSCRIPT-APP\venv\Lib\site-packages\passlib\handlers\bcrypt.py", line 620, in _load_backend_mixin
+    version = _bcrypt.__about__.__version__
+              ^^^^^^^^^^^^^^^^^
+AttributeError: module 'bcrypt' has no attribute '__about__'
+2025-07-22 19:02:39,531 - youtube_trans_downloader.main - INFO - User logged in: OneTechly
+2025-07-22 19:06:30,605 - youtube_trans_downloader.main - WARNING - Transcript API failed: 
+Could not retrieve a transcript for the video https://www.youtube.com/watch?v=p0libZdTuYE! This is most likely caused by:
+
+Subtitles are disabled for this video
+
+If you are sure that the described cause is not responsible for this error and that a transcript should be retrievable, please create an issue at https://github.com/jdepoix/youtube-transcript-api/issues. Please add which version of youtube_transcript_api you are using and provide the information needed to replicate the error. Also make sure that there are no open issues which already describe your problem! - trying yt-dlp fallback...
+2025-07-22 19:06:39,270 - transcript_utils - ERROR - yt-dlp fallback failed: yt-dlp output not found: p0libZdTuYE.en.json3 or .vtt
+2025-07-22 19:06:39,271 - youtube_trans_downloader.main - ERROR - All transcript methods failed for video: p0libZdTuYE
+2025-07-22 19:10:24,505 - youtube_trans_downloader.main - WARNING - Transcript API failed: no element found: line 1, column 0 - trying yt-dlp fallback...
+2025-07-22 19:10:30,743 - youtube_trans_downloader.main - INFO - User OneTechly downloaded transcript for 4AKrmbM0axc (clean_transcripts)
+2025-07-22 19:15:41,829 - youtube_trans_downloader.main - WARNING - Transcript API failed: no element found: line 1, column 0 - trying yt-dlp fallback...
+2025-07-22 19:15:47,681 - youtube_trans_downloader.main - INFO - User OneTechly downloaded transcript for 4AKrmbM0axc (unclean_transcripts)
+2025-07-22 19:23:58,784 - youtube_trans_downloader.main - INFO - User logged in: Xiggy
+2025-07-22 19:27:55,707 - youtube_trans_downloader.main - INFO - User logged in: OneTechly
+2025-07-22 19:30:10,509 - youtube_trans_downloader.main - WARNING - Transcript API failed: no element found: line 1, column 0 - trying yt-dlp fallback...
+2025-07-22 19:30:22,442 - youtube_trans_downloader.main - INFO - User OneTechly downloaded transcript for b8m9zhNAgKs (clean_transcripts)
+2025-07-22 19:46:12,661 - youtube_trans_downloader.main - WARNING - Transcript API failed: no element found: line 1, column 0 - trying yt-dlp fallback...

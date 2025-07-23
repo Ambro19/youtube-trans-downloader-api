@@ -7,3 +7,4 @@ __pycache__/
 youtube_trans_downloader.db
 .WEBVTT
 .en.vtt
+.log
