@@ -1,9 +1,11 @@
 """
-Enhanced Models with proper database schema for audio/video support
-================================================================
+Enhanced Models with consistent database naming
+==============================================
 
 This file contains all database models with proper schema definitions
 for tracking transcripts, audio, and video downloads.
+
+FIXED: Uses the correct database name (youtube_trans_downloader.db)
 """
 
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, Boolean, Text
@@ -16,8 +18,8 @@ import logging
 
 logger = logging.getLogger("youtube_trans_downloader")
 
-# Database Configuration
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./youtube_transcript_downloader.db")
+# Database Configuration - FIXED: Use your existing database name
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./youtube_trans_downloader.db")
 
 if DATABASE_URL.startswith("sqlite"):
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -128,7 +130,7 @@ class TranscriptDownload(Base):
     transcript_type = Column(String(20), nullable=False)  # clean, unclean, audio, video
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     
-    # File details
+    # File details (these columns may not exist in old databases - handle gracefully)
     file_size = Column(Integer, nullable=True)  # File size in bytes
     processing_time = Column(Float, nullable=True)  # Processing time in seconds
     download_method = Column(String(20), nullable=True)  # api, ytdlp, etc.
@@ -341,6 +343,58 @@ def upgrade_database_schema():
         return False
 
 # =============================================================================
+# SAFE DOWNLOAD RECORD CREATION
+# =============================================================================
+
+def create_download_record_safe(db, user_id, youtube_id, transcript_type, **kwargs):
+    """
+    Safely create a download record, handling missing columns gracefully
+    """
+    try:
+        # Create basic record with required fields only
+        download_record = TranscriptDownload(
+            user_id=user_id,
+            youtube_id=youtube_id,
+            transcript_type=transcript_type,
+            created_at=datetime.utcnow()
+        )
+        
+        # Add optional fields only if they exist in the database schema
+        optional_fields = {
+            'file_size': kwargs.get('file_size'),
+            'processing_time': kwargs.get('processing_time'),
+            'download_method': kwargs.get('download_method'),
+            'quality': kwargs.get('quality'),
+            'language': kwargs.get('language', 'en'),
+            'file_format': kwargs.get('file_format'),
+            'download_url': kwargs.get('download_url'),
+            'expires_at': kwargs.get('expires_at'),
+            'status': kwargs.get('status', 'completed'),
+            'error_message': kwargs.get('error_message'),
+            'video_title': kwargs.get('video_title'),
+            'video_duration': kwargs.get('video_duration'),
+            'ip_address': kwargs.get('ip_address'),
+            'user_agent': kwargs.get('user_agent')
+        }
+        
+        # Try to set each optional field
+        for field_name, field_value in optional_fields.items():
+            if field_value is not None:
+                try:
+                    setattr(download_record, field_name, field_value)
+                except AttributeError:
+                    # Column doesn't exist in database yet
+                    logger.debug(f"Column {field_name} not available, skipping")
+                    pass
+        
+        db.add(download_record)
+        return download_record
+        
+    except Exception as e:
+        logger.error(f"Error creating download record: {e}")
+        return None
+
+# =============================================================================
 # INITIALIZATION
 # =============================================================================
 
@@ -373,7 +427,9 @@ else:
     # Auto-initialize when imported
     initialize_database()
 
-#======================================
+
+
+#===================The LAST Models.py. Keep it ===================
 # from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float
 # from sqlalchemy.ext.declarative import declarative_base
 # from datetime import datetime
