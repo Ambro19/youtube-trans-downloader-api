@@ -6,4 +6,5 @@ __pycache__/
 *.pyc
 youtube_trans_downloader.db
 .WEBVTT
-app.log
+.app.log
+youtube_transcript_downloader.db

@@ -1,9 +1,0 @@
-2025-07-23 00:20:02,222 - youtube_trans_downloader - INFO - Environment: development
-2025-07-23 00:20:02,223 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
-2025-07-23 00:20:02,223 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
-2025-07-23 00:20:02,223 - youtube_trans_downloader - INFO - Using SQLite database for development
-2025-07-23 00:20:02,601 - youtube_trans_downloader - INFO - Starting server on 0.0.0.0:8000 (reload: True)
-2025-07-23 00:20:02,764 - youtube_trans_downloader - INFO - Environment: development
-2025-07-23 00:20:02,764 - youtube_trans_downloader - INFO - Starting YouTube Transcript Downloader API
-2025-07-23 00:20:02,765 - youtube_trans_downloader - INFO - Environment variables loaded from .env file
-2025-07-23 00:20:02,765 - youtube_trans_downloader - INFO - Using SQLite database for development
