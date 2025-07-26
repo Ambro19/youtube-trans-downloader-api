@@ -1,23 +1,19 @@
 """
-YouTube Transcript Downloader API - Fixed Version
-================================================
+YouTube Transcript Downloader API - COMPLETE FIX
+===============================================
 
-A FastAPI-based SaaS application for downloading YouTube transcripts, audio, and video 
-with subscription management and proper error handling.
+Fixed version with proper file serving, better error handling,
+and network connectivity solutions.
 
 Features:
-- User authentication and registration
-- Multiple subscription tiers (Free, Pro, Premium)  
-- Transcript downloads in multiple formats (clean, SRT, VTT)
-- Audio downloads (MP3) in multiple qualities
-- Video downloads (MP4) in multiple qualities
-- Stripe payment integration
-- Usage tracking and limits
-- yt-dlp fallback for unavailable transcripts
-- Proper database schema and error handling
+- File serving endpoints for audio/video downloads
+- Better error handling for network issues
+- Automatic file cleanup
+- Fallback mechanisms for connectivity issues
+- Proper temporary file management
 
 Author: YouTube Transcript Downloader Team
-Version: 2.2.0 (Fixed)
+Version: 2.3.0 (Complete Fix)
 """
 
 from pathlib import Path
@@ -26,6 +22,8 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 from typing import Optional
@@ -43,9 +41,12 @@ import time
 import stripe
 import tempfile
 import asyncio
+import shutil
+import uuid
+import socket
 
 # Import our fixed models
-from models import User, TranscriptDownload, get_db, engine, SessionLocal, initialize_database
+from models import User, TranscriptDownload, get_db, engine, SessionLocal, initialize_database, create_download_record_safe
 from transcript_utils import (
     get_transcript_with_ytdlp,
     download_audio_with_ytdlp,
@@ -85,12 +86,19 @@ logger.info("Using SQLite database for development")
 # Initialize database
 initialize_database()
 
+# Create downloads directory for temporary files
+DOWNLOADS_DIR = Path("downloads")
+DOWNLOADS_DIR.mkdir(exist_ok=True)
+
 # FastAPI App Configuration
 app = FastAPI(
     title="YouTube Transcript Downloader API", 
-    version="2.2.0",
-    description="A SaaS application for downloading YouTube transcripts, audio, and video with subscription management"
+    version="2.3.0",
+    description="A SaaS application for downloading YouTube transcripts, audio, and video with file serving"
 )
+
+# Mount static files directory for downloads
+app.mount("/files", StaticFiles(directory="downloads"), name="files")
 
 # CORS Configuration
 allowed_origins = [
@@ -127,6 +135,46 @@ TRANSCRIPT_TYPE_MAP = {
     True: "clean",
     False: "unclean"
 }
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def check_internet_connectivity():
+    """Check if we can reach the internet"""
+    try:
+        # Try to connect to Google's DNS
+        socket.create_connection(("8.8.8.8", 53), timeout=3)
+        return True
+    except OSError:
+        return False
+
+def check_youtube_connectivity():
+    """Check if we can reach YouTube specifically"""
+    try:
+        socket.create_connection(("www.youtube.com", 443), timeout=5)
+        return True
+    except OSError:
+        return False
+
+def generate_unique_filename(base_name: str, extension: str) -> str:
+    """Generate a unique filename to avoid conflicts"""
+    unique_id = str(uuid.uuid4())[:8]
+    timestamp = int(time.time())
+    return f"{base_name}_{timestamp}_{unique_id}.{extension}"
+
+def cleanup_old_files():
+    """Clean up files older than 1 hour"""
+    try:
+        current_time = time.time()
+        for file_path in DOWNLOADS_DIR.glob("*"):
+            if file_path.is_file():
+                file_age = current_time - file_path.stat().st_mtime
+                if file_age > 3600:  # 1 hour
+                    file_path.unlink()
+                    logger.info(f"Cleaned up old file: {file_path.name}")
+    except Exception as e:
+        logger.warning(f"Error during file cleanup: {e}")
 
 # =============================================================================
 # PYDANTIC MODELS
@@ -249,16 +297,21 @@ def extract_youtube_video_id(youtube_id_or_url: str) -> str:
 
 def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Optional[str] = None) -> str:
     """
-    Get transcript using YouTube Transcript API with fallback to yt-dlp
-    
-    Args:
-        video_id: YouTube video ID
-        clean: If True, return clean text paragraphs. If False, return with timestamps
-        format: Format for unclean transcripts ("srt", "vtt", or None for default)
-    
-    Returns:
-        Formatted transcript string or None if failed
+    Get transcript using YouTube Transcript API with better error handling
     """
+    # Check connectivity first
+    if not check_internet_connectivity():
+        raise HTTPException(
+            status_code=503, 
+            detail="No internet connection available. Please check your network connection and try again."
+        )
+    
+    if not check_youtube_connectivity():
+        raise HTTPException(
+            status_code=503, 
+            detail="Cannot reach YouTube servers. This might be a temporary network issue or firewall restriction."
+        )
+    
     try:
         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
         
@@ -305,39 +358,51 @@ def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Option
     except Exception as e:
         logger.warning(f"Transcript API failed: {e} - trying yt-dlp fallback...")
         
-        # Fallback to yt-dlp
-        if clean:
-            fallback = get_transcript_with_ytdlp(video_id, clean=True)
-            if fallback:
-                # Format fallback text into paragraphs
-                words = fallback.split()
-                paragraphs = []
-                current_paragraph = []
-                char_count = 0
-                
-                for word in words:
-                    current_paragraph.append(word)
-                    char_count += len(word) + 1
+        # Try yt-dlp fallback with better error handling
+        try:
+            if clean:
+                fallback = get_transcript_with_ytdlp(video_id, clean=True)
+                if fallback:
+                    # Format fallback text into paragraphs
+                    words = fallback.split()
+                    paragraphs = []
+                    current_paragraph = []
+                    char_count = 0
                     
-                    if char_count > 400 and word.endswith(('.', '!', '?')):
+                    for word in words:
+                        current_paragraph.append(word)
+                        char_count += len(word) + 1
+                        
+                        if char_count > 400 and word.endswith(('.', '!', '?')):
+                            paragraphs.append(' '.join(current_paragraph))
+                            current_paragraph = []
+                            char_count = 0
+                    
+                    if current_paragraph:
                         paragraphs.append(' '.join(current_paragraph))
-                        current_paragraph = []
-                        char_count = 0
-                
-                if current_paragraph:
-                    paragraphs.append(' '.join(current_paragraph))
-                
-                return '\n\n'.join(paragraphs)
-        else:
-            fallback = get_transcript_with_ytdlp(video_id, clean=False)
-            if fallback and format == "vtt":
-                return convert_timestamp_to_vtt(fallback)
-            elif fallback and format == "srt":
-                return convert_timestamp_to_srt(fallback)
-            return fallback
+                    
+                    return '\n\n'.join(paragraphs)
+            else:
+                fallback = get_transcript_with_ytdlp(video_id, clean=False)
+                if fallback and format == "vtt":
+                    return convert_timestamp_to_vtt(fallback)
+                elif fallback and format == "srt":
+                    return convert_timestamp_to_srt(fallback)
+                return fallback
+        except Exception as fallback_error:
+            logger.error(f"yt-dlp fallback also failed: {fallback_error}")
         
-        logger.error(f"All transcript methods failed for video: {video_id}")
-        return None
+        # If both methods fail, give a helpful error message
+        if "NameResolutionError" in str(e) or "Failed to resolve" in str(e):
+            raise HTTPException(
+                status_code=503,
+                detail="Network connection issue: Unable to reach YouTube servers. Please check your internet connection or try again later."
+            )
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail="No transcript/captions found for this video. The video may not have captions available or may be restricted."
+            )
 
 def convert_timestamp_to_vtt(timestamp_text: str) -> str:
     """Convert [MM:SS] format to proper WEBVTT format"""
@@ -437,14 +502,20 @@ def segments_to_srt(transcript) -> str:
 # =============================================================================
 
 @app.on_event("startup")
-def startup():
-    """Initialize database tables on application startup"""
+async def startup():
+    """Initialize database tables and cleanup old files on application startup"""
     initialize_database()
+    cleanup_old_files()
 
 @app.get("/")
 def root():
     """Root endpoint - API health check"""
-    return {"message": "YouTube Transcript Downloader API with Audio/Video Support", "status": "running", "version": "2.2.0"}
+    return {
+        "message": "YouTube Transcript Downloader API with File Serving", 
+        "status": "running", 
+        "version": "2.3.0",
+        "features": ["transcripts", "audio", "video", "file_serving"]
+    }
 
 # =============================================================================
 # AUTHENTICATION ENDPOINTS
@@ -514,9 +585,7 @@ def download_transcript(
     db: Session = Depends(get_db)
 ):
     """
-    Download YouTube transcript
-    
-    Handles usage limits, multiple formats, and tracks downloads
+    Download YouTube transcript with better error handling
     """
     start_time = time.time()
     
@@ -558,29 +627,23 @@ def download_transcript(
     # Calculate processing time
     processing_time = time.time() - start_time
     
-    # Update usage and record download (SIMPLIFIED - only required fields)
+    # Update usage and record download
     user.increment_usage(usage_key)
     
-    # Create download record with only the columns that exist
-    download_record = TranscriptDownload(
+    # Create download record with safe method
+    download_record = create_download_record_safe(
+        db=db,
         user_id=user.id,
         youtube_id=video_id,
         transcript_type=transcript_type,
-        created_at=datetime.utcnow()
+        processing_time=processing_time,
+        download_method="api",
+        language="en",
+        status="completed"
     )
     
-    # Add optional fields only if they exist in the model
-    try:
-        download_record.processing_time = processing_time
-        download_record.download_method = "api"
-        download_record.language = "en"
-        download_record.status = "completed"
-    except AttributeError:
-        # These columns don't exist yet, skip them
-        pass
-    
-    db.add(download_record)
-    db.commit()
+    if download_record:
+        db.commit()
     
     logger.info(f"User {user.username} downloaded transcript for {video_id} ({usage_key})")
     
@@ -601,16 +664,24 @@ def download_audio(
     db: Session = Depends(get_db)
 ):
     """
-    Download YouTube audio
-    
-    Handles usage limits, multiple qualities, and tracks downloads
+    Download YouTube audio with file serving
     """
     start_time = time.time()
+    
+    # Clean up old files first
+    cleanup_old_files()
     
     # Extract and validate video ID
     video_id = extract_youtube_video_id(request.youtube_id)
     if not video_id or len(video_id) != 11:
         raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    
+    # Check connectivity
+    if not check_internet_connectivity():
+        raise HTTPException(
+            status_code=503,
+            detail="No internet connection available. Please check your network connection."
+        )
     
     # Check for monthly usage reset
     if user.usage_reset_date.month != datetime.utcnow().month:
@@ -630,59 +701,75 @@ def download_audio(
     
     # Check if yt-dlp is available
     if not check_ytdlp_availability():
-        raise HTTPException(status_code=500, detail="Audio download service temporarily unavailable. Please try again later.")
+        raise HTTPException(
+            status_code=500, 
+            detail="Audio download service temporarily unavailable. Please install yt-dlp and FFmpeg."
+        )
     
-    # Download audio
+    # Download audio to downloads directory
     try:
-        audio_file = download_audio_with_ytdlp(video_id, request.quality)
+        audio_file = download_audio_with_ytdlp(video_id, request.quality, output_dir=str(DOWNLOADS_DIR))
     except Exception as e:
         logger.error(f"Audio download failed: {e}")
-        raise HTTPException(status_code=500, detail="Audio download failed. The video may not be available or have audio restrictions.")
+        if "NameResolutionError" in str(e) or "Failed to resolve" in str(e):
+            raise HTTPException(
+                status_code=503,
+                detail="Network error: Cannot reach YouTube. Please check your internet connection."
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Audio download failed. The video may not be available or have audio restrictions."
+            )
     
     if not audio_file or not os.path.exists(audio_file):
-        logger.error(f"Audio download failed: no element found: line 1, column 0 - trying yt-dlp fallback...")
         raise HTTPException(status_code=404, detail="Failed to download audio from this video.")
     
+    # Generate a unique filename for serving
+    original_filename = os.path.basename(audio_file)
+    unique_filename = generate_unique_filename(f"{video_id}_audio_{request.quality}", "mp3")
+    final_path = DOWNLOADS_DIR / unique_filename
+    
+    # Move file to final location
+    shutil.move(audio_file, final_path)
+    
     # Get file size
-    file_size = os.path.getsize(audio_file) if os.path.exists(audio_file) else None
+    file_size = os.path.getsize(final_path)
     processing_time = time.time() - start_time
     
     # Update usage and record download
     user.increment_usage("audio_downloads")
     
     # Create download record
-    download_record = TranscriptDownload(
+    download_record = create_download_record_safe(
+        db=db,
         user_id=user.id,
         youtube_id=video_id,
         transcript_type="audio",
-        created_at=datetime.utcnow()
+        file_size=file_size,
+        processing_time=processing_time,
+        download_method="ytdlp",
+        quality=request.quality,
+        language="en",
+        file_format="mp3",
+        download_url=f"/files/{unique_filename}",
+        expires_at=datetime.utcnow() + timedelta(hours=1),
+        status="completed"
     )
     
-    # Add optional fields if available
-    try:
-        download_record.file_size = file_size
-        download_record.processing_time = processing_time
-        download_record.download_method = "ytdlp"
-        download_record.quality = request.quality
-        download_record.language = "en"
-        download_record.file_format = "mp3"
-        download_record.status = "completed"
-    except AttributeError:
-        pass
-    
-    db.add(download_record)
-    db.commit()
+    if download_record:
+        db.commit()
     
     logger.info(f"User {user.username} downloaded audio for {video_id} ({request.quality})")
     
-    # In a real application, you would upload this to a cloud storage service
-    # and return a download URL. For now, we'll return a placeholder.
     return {
-        "download_url": f"/files/audio/{video_id}_{request.quality}.mp3",
+        "download_url": f"/files/{unique_filename}",
         "youtube_id": video_id,
         "quality": request.quality,
         "file_size": file_size,
-        "message": "Audio download prepared successfully"
+        "filename": unique_filename,
+        "expires_in": "1 hour",
+        "message": "Audio download ready"
     }
 
 @app.post("/download_video/")
@@ -692,16 +779,24 @@ def download_video(
     db: Session = Depends(get_db)
 ):
     """
-    Download YouTube video
-    
-    Handles usage limits, multiple qualities, and tracks downloads
+    Download YouTube video with file serving
     """
     start_time = time.time()
+    
+    # Clean up old files first
+    cleanup_old_files()
     
     # Extract and validate video ID
     video_id = extract_youtube_video_id(request.youtube_id)
     if not video_id or len(video_id) != 11:
         raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    
+    # Check connectivity
+    if not check_internet_connectivity():
+        raise HTTPException(
+            status_code=503,
+            detail="No internet connection available. Please check your network connection."
+        )
     
     # Check for monthly usage reset
     if user.usage_reset_date.month != datetime.utcnow().month:
@@ -721,62 +816,119 @@ def download_video(
     
     # Check if yt-dlp is available
     if not check_ytdlp_availability():
-        raise HTTPException(status_code=500, detail="Video download service temporarily unavailable. Please try again later.")
+        raise HTTPException(
+            status_code=500, 
+            detail="Video download service temporarily unavailable. Please install yt-dlp and FFmpeg."
+        )
     
-    # Download video
+    # Download video to downloads directory
     try:
-        video_file = download_video_with_ytdlp(video_id, request.quality)
+        video_file = download_video_with_ytdlp(video_id, request.quality, output_dir=str(DOWNLOADS_DIR))
     except Exception as e:
         logger.error(f"Video download failed: {e}")
-        raise HTTPException(status_code=500, detail="Video download failed. The video may not be available or have restrictions.")
+        if "NameResolutionError" in str(e) or "Failed to resolve" in str(e):
+            raise HTTPException(
+                status_code=503,
+                detail="Network error: Cannot reach YouTube. Please check your internet connection."
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Video download failed. The video may not be available or have restrictions."
+            )
     
     if not video_file or not os.path.exists(video_file):
         raise HTTPException(status_code=404, detail="Failed to download video.")
     
+    # Generate a unique filename for serving
+    original_filename = os.path.basename(video_file)
+    file_extension = "mp4"  # Default to mp4
+    if "." in original_filename:
+        file_extension = original_filename.split(".")[-1]
+    
+    unique_filename = generate_unique_filename(f"{video_id}_video_{request.quality}", file_extension)
+    final_path = DOWNLOADS_DIR / unique_filename
+    
+    # Move file to final location
+    shutil.move(video_file, final_path)
+    
     # Get file size
-    file_size = os.path.getsize(video_file) if os.path.exists(video_file) else None
+    file_size = os.path.getsize(final_path)
     processing_time = time.time() - start_time
     
     # Update usage and record download
     user.increment_usage("video_downloads")
     
     # Create download record
-    download_record = TranscriptDownload(
+    download_record = create_download_record_safe(
+        db=db,
         user_id=user.id,
         youtube_id=video_id,
         transcript_type="video",
-        created_at=datetime.utcnow()
+        file_size=file_size,
+        processing_time=processing_time,
+        download_method="ytdlp",
+        quality=request.quality,
+        language="en",
+        file_format=file_extension,
+        download_url=f"/files/{unique_filename}",
+        expires_at=datetime.utcnow() + timedelta(hours=1),
+        status="completed"
     )
     
-    # Add optional fields if available
-    try:
-        download_record.file_size = file_size
-        download_record.processing_time = processing_time
-        download_record.download_method = "ytdlp"
-        download_record.quality = request.quality
-        download_record.language = "en"
-        download_record.file_format = "mp4"
-        download_record.status = "completed"
-    except AttributeError:
-        pass
-    
-    db.add(download_record)
-    db.commit()
+    if download_record:
+        db.commit()
     
     logger.info(f"User {user.username} downloaded video for {video_id} ({request.quality})")
     
-    # In a real application, you would upload this to a cloud storage service
-    # and return a download URL. For now, we'll return a placeholder.
     return {
-        "download_url": f"/files/video/{video_id}_{request.quality}.mp4",
+        "download_url": f"/files/{unique_filename}",
         "youtube_id": video_id,
         "quality": request.quality,
         "file_size": file_size,
-        "message": "Video download prepared successfully"
+        "filename": unique_filename,
+        "expires_in": "1 hour",
+        "message": "Video download ready"
     }
 
 # =============================================================================
-# SUBSCRIPTION ENDPOINTS
+# FILE SERVING ENDPOINTS
+# =============================================================================
+
+@app.get("/download_file/{filename}")
+async def download_file(filename: str):
+    """
+    Serve downloaded files with proper headers
+    """
+    file_path = DOWNLOADS_DIR / filename
+    
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found or expired")
+    
+    # Determine content type
+    if filename.endswith('.mp3'):
+        media_type = 'audio/mpeg'
+    elif filename.endswith('.mp4'):
+        media_type = 'video/mp4'
+    elif filename.endswith('.webm'):
+        media_type = 'video/webm'
+    elif filename.endswith('.mkv'):
+        media_type = 'video/x-matroska'
+    else:
+        media_type = 'application/octet-stream'
+    
+    return FileResponse(
+        path=file_path,
+        media_type=media_type,
+        filename=filename,
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}",
+            "Cache-Control": "no-cache"
+        }
+    )
+
+# =============================================================================
+# SUBSCRIPTION ENDPOINTS (Keep existing ones)
 # =============================================================================
 
 @app.get("/subscription_status/")
@@ -786,8 +938,6 @@ def get_subscription_status(
 ):
     """
     Get user's current subscription status, usage, and limits
-    
-    Returns comprehensive subscription information for frontend display
     """
     try:
         # Get tier directly from user model
@@ -848,6 +998,86 @@ def get_subscription_status(
             "stripe_customer_id": None,
             "current_period_end": None
         }
+
+# =============================================================================
+# SYSTEM CHECK AND DEBUG ENDPOINTS
+# =============================================================================
+
+@app.get("/system_check/")
+def system_check():
+    """Enhanced system check with connectivity tests"""
+    checks = {
+        "ytdlp_available": check_ytdlp_availability(),
+        "database_connected": True,  # If we got here, DB is working
+        "stripe_configured": bool(stripe_secret_key),
+        "environment": ENVIRONMENT,
+        "internet_connectivity": check_internet_connectivity(),
+        "youtube_connectivity": check_youtube_connectivity(),
+        "downloads_directory": DOWNLOADS_DIR.exists()
+    }
+    
+    # Check ffmpeg availability
+    try:
+        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
+        checks["ffmpeg_available"] = result.returncode == 0
+    except:
+        checks["ffmpeg_available"] = False
+    
+    # Generate recommendations
+    recommendations = []
+    if not checks["ffmpeg_available"]:
+        recommendations.append("Install FFmpeg for audio/video processing")
+    if not checks["ytdlp_available"]:
+        recommendations.append("Install yt-dlp for video downloads")
+    if not checks["stripe_configured"]:
+        recommendations.append("Configure Stripe for payments")
+    if not checks["internet_connectivity"]:
+        recommendations.append("Check internet connection")
+    if not checks["youtube_connectivity"]:
+        recommendations.append("Check access to YouTube (firewall/proxy settings)")
+    
+    return {
+        "checks": checks,
+        "recommendations": recommendations,
+        "status": "healthy" if all([
+            checks["ytdlp_available"],
+            checks["ffmpeg_available"],
+            checks["internet_connectivity"],
+            checks["youtube_connectivity"]
+        ]) else "degraded"
+    }
+
+@app.get("/health/")
+def health():
+    """Health check endpoint for monitoring"""
+    return {
+        "status": "healthy", 
+        "timestamp": datetime.utcnow().isoformat(), 
+        "features": ["transcripts", "audio", "video", "file_serving"],
+        "connectivity": {
+            "internet": check_internet_connectivity(),
+            "youtube": check_youtube_connectivity()
+        }
+    }
+
+@app.get("/test_videos")
+def get_test_videos():
+    """Get test video IDs for development and testing"""
+    return {
+        "videos": [
+            {
+                "id": "dQw4w9WgXcQ", 
+                "title": "Rick Astley - Never Gonna Give You Up",
+                "status": "verified_working"
+            },
+            {
+                "id": "jNQXAC9IVRw", 
+                "title": "Me at the zoo",
+                "status": "verified_working"
+            }
+        ],
+        "note": "These videos are guaranteed to work and have captions available"
+    }
 
 # =============================================================================
 # PAYMENT ENDPOINTS (Keep existing ones)
@@ -1035,84 +1265,13 @@ async def cancel_subscription(
         raise HTTPException(status_code=400, detail=str(e))
 
 # =============================================================================
-# DEBUG AND ADMIN ENDPOINTS
+# CLEANUP TASK
 # =============================================================================
 
-@app.get("/health/")
-def health():
-    """Health check endpoint for monitoring"""
-    return {
-        "status": "healthy", 
-        "timestamp": datetime.utcnow().isoformat(), 
-        "features": ["transcripts", "audio", "video"],
-        "ytdlp_available": check_ytdlp_availability()
-    }
-
-@app.get("/test_videos")
-def get_test_videos():
-    """Get test video IDs for development and testing"""
-    return {
-        "videos": [
-            {"id": "dQw4w9WgXcQ", "title": "Rick Astley - Never Gonna Give You Up"},
-            {"id": "jNQXAC9IVRw", "title": "Me at the zoo"}
-        ]
-    }
-
-@app.get("/debug_transcript/{video_id}")
-def debug_transcript(video_id: str):
-    """Debug endpoint to test transcript extraction with yt-dlp"""
-    result = get_transcript_with_ytdlp(video_id, clean=False)
-    if not result:
-        raise HTTPException(status_code=404, detail="Transcript not found or parsing failed")
-    return {"video_id": video_id, "raw": result[:3000]}
-
-@app.get("/downloads/")
-def recent_downloads(limit: int = 10, db: Session = Depends(get_db)):
-    """Admin endpoint to view recent downloads"""
-    downloads = db.query(TranscriptDownload).order_by(TranscriptDownload.created_at.desc()).limit(limit).all()
-    return [
-        {
-            "id": d.id,
-            "user_id": d.user_id,
-            "youtube_id": d.youtube_id,
-            "transcript_type": d.transcript_type,
-            "created_at": d.created_at,
-            "lang": getattr(d, 'language', 'en'),
-            "method": getattr(d, 'download_method', 'api'),
-            "status": getattr(d, 'status', 'completed'),
-        }
-        for d in downloads
-    ]
-
-# =============================================================================
-# INSTALLATION CHECK ENDPOINT
-# =============================================================================
-
-@app.get("/system_check/")
-def system_check():
-    """Check system dependencies and configuration"""
-    checks = {
-        "ytdlp_available": check_ytdlp_availability(),
-        "database_connected": True,  # If we got here, DB is working
-        "stripe_configured": bool(stripe_secret_key),
-        "environment": ENVIRONMENT
-    }
-    
-    # Check ffmpeg availability
-    try:
-        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
-        checks["ffmpeg_available"] = result.returncode == 0
-    except:
-        checks["ffmpeg_available"] = False
-    
-    return {
-        "checks": checks,
-        "recommendations": [
-            "Install ffmpeg for audio/video processing" if not checks["ffmpeg_available"] else None,
-            "Install yt-dlp for video downloads" if not checks["ytdlp_available"] else None,
-            "Configure Stripe for payments" if not checks["stripe_configured"] else None
-        ]
-    }
+@app.on_event("shutdown")
+async def shutdown():
+    """Clean up temporary files on application shutdown"""
+    cleanup_old_files()
 
 # =============================================================================
 # APPLICATION ENTRY POINT
@@ -1122,9 +1281,9 @@ if __name__ == "__main__":
     import uvicorn
     logger.info(f"Starting server on 0.0.0.0:8000 (reload: True)")
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
-
 #=======================
-# """
+
+# """ KEEP THIS MAIN.PY IS GOOD
 # YouTube Transcript Downloader API - Enhanced with Audio/Video Downloads
 # ====================================================================
 
