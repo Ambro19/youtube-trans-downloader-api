@@ -86,10 +86,6 @@ logger.info("Using SQLite database for development")
 # Initialize database
 initialize_database()
 
-# Create downloads directory for temporary files
-DOWNLOADS_DIR = Path("downloads")
-DOWNLOADS_DIR.mkdir(exist_ok=True)
-
 # FastAPI App Configuration
 app = FastAPI(
     title="YouTube Transcript Downloader API", 
@@ -97,7 +93,8 @@ app = FastAPI(
     description="A SaaS application for downloading YouTube transcripts, audio, and video with file serving"
 )
 
-# Mount static files directory for downloads
+DOWNLOADS_DIR = Path("downloads")
+DOWNLOADS_DIR.mkdir(exist_ok=True)
 app.mount("/files", StaticFiles(directory="downloads"), name="files")
 
 # CORS Configuration
@@ -137,17 +134,18 @@ TRANSCRIPT_TYPE_MAP = {
 }
 
 # =============================================================================
-# UTILITY FUNCTIONS
+# SUPPORTING UTILITY FUNCTIONS (Add these if not already present)
 # =============================================================================
 
 def check_internet_connectivity():
     """Check if we can reach the internet"""
     try:
-        # Try to connect to Google's DNS
+        import socket
         socket.create_connection(("8.8.8.8", 53), timeout=3)
         return True
     except OSError:
         return False
+
 
 def check_youtube_connectivity():
     """Check if we can reach YouTube specifically"""
@@ -164,17 +162,28 @@ def generate_unique_filename(base_name: str, extension: str) -> str:
     return f"{base_name}_{timestamp}_{unique_id}.{extension}"
 
 def cleanup_old_files():
-    """Clean up files older than 1 hour"""
+    """Clean up files older than 2 hours"""
     try:
         current_time = time.time()
+        max_age = 2 * 3600  # 2 hours in seconds
+        
         for file_path in DOWNLOADS_DIR.glob("*"):
             if file_path.is_file():
                 file_age = current_time - file_path.stat().st_mtime
-                if file_age > 3600:  # 1 hour
+                if file_age > max_age:
                     file_path.unlink()
                     logger.info(f"Cleaned up old file: {file_path.name}")
     except Exception as e:
         logger.warning(f"Error during file cleanup: {e}")
+
+
+def generate_unique_filename(base_name: str, extension: str) -> str:
+    """Generate a unique filename to avoid conflicts"""
+    import uuid
+    unique_id = str(uuid.uuid4())[:8]
+    timestamp = int(time.time())
+    return f"{base_name}_{timestamp}_{unique_id}.{extension}"
+
 
 # =============================================================================
 # PYDANTIC MODELS
@@ -578,85 +587,7 @@ def read_users_me(current_user: User = Depends(get_current_user)):
 # TRANSCRIPT ENDPOINTS
 # =============================================================================
 
-@app.post("/download_transcript/")
-def download_transcript(
-    request: TranscriptRequest,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """
-    Download YouTube transcript with better error handling
-    """
-    start_time = time.time()
-    
-    # Extract and validate video ID
-    video_id = extract_youtube_video_id(request.youtube_id)
-    if not video_id or len(video_id) != 11:
-        raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
-    
-    # Determine usage type
-    usage_key = USAGE_KEYS[request.clean_transcript]
-    transcript_type = TRANSCRIPT_TYPE_MAP[request.clean_transcript]
-    
-    # Check for monthly usage reset
-    if user.usage_reset_date.month != datetime.utcnow().month:
-        user.reset_monthly_usage()
-        db.commit()
-    
-    # Check usage limits
-    plan_limits = user.get_plan_limits()
-    current_usage = getattr(user, f"usage_{usage_key}", 0)
-    allowed = plan_limits[usage_key]
-    
-    if allowed != float('inf') and current_usage >= allowed:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Monthly limit reached for {usage_key.replace('_',' ')}. Please upgrade your plan."
-        )
-    
-    # Get transcript from YouTube
-    transcript = get_transcript_youtube_api(
-        video_id,
-        clean=request.clean_transcript,
-        format=request.format if not request.clean_transcript else None
-    )
-    
-    if not transcript or len(transcript.strip()) < 10:
-        raise HTTPException(status_code=404, detail="No transcript/captions found for this video.")
-    
-    # Calculate processing time
-    processing_time = time.time() - start_time
-    
-    # Update usage and record download
-    user.increment_usage(usage_key)
-    
-    # Create download record with safe method
-    download_record = create_download_record_safe(
-        db=db,
-        user_id=user.id,
-        youtube_id=video_id,
-        transcript_type=transcript_type,
-        processing_time=processing_time,
-        download_method="api",
-        language="en",
-        status="completed"
-    )
-    
-    if download_record:
-        db.commit()
-    
-    logger.info(f"User {user.username} downloaded transcript for {video_id} ({usage_key})")
-    
-    return {
-        "transcript": transcript,
-        "youtube_id": video_id,
-        "message": "Transcript downloaded successfully"
-    }
-
-# =============================================================================
-# AUDIO/VIDEO DOWNLOAD ENDPOINTS
-# =============================================================================
-
+# COMPLETE AUDIO DOWNLOAD ENDPOINT - FULLY PATCHED
 @app.post("/download_audio/")
 def download_audio(
     request: AudioRequest,
@@ -664,7 +595,7 @@ def download_audio(
     db: Session = Depends(get_db)
 ):
     """
-    Download YouTube audio with file serving
+    Download YouTube audio with complete file serving support
     """
     start_time = time.time()
     
@@ -706,32 +637,83 @@ def download_audio(
             detail="Audio download service temporarily unavailable. Please install yt-dlp and FFmpeg."
         )
     
+    # Enhanced FFmpeg check with helpful error message
+    def check_ffmpeg_available():
+        try:
+            subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5, check=True)
+            subprocess.run(["ffprobe", "-version"], capture_output=True, timeout=5, check=True)
+            return True
+        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return False
+    
+    if not check_ffmpeg_available():
+        raise HTTPException(
+            status_code=500,
+            detail="FFmpeg not found. Audio downloads require FFmpeg. Please ensure FFmpeg is installed and accessible from the command line."
+        )
+    
     # Download audio to downloads directory
     try:
         audio_file = download_audio_with_ytdlp(video_id, request.quality, output_dir=str(DOWNLOADS_DIR))
     except Exception as e:
         logger.error(f"Audio download failed: {e}")
-        if "NameResolutionError" in str(e) or "Failed to resolve" in str(e):
+        
+        # Enhanced error handling with specific messages
+        error_msg = str(e).lower()
+        if "ffmpeg" in error_msg or "ffprobe" in error_msg:
+            raise HTTPException(
+                status_code=500,
+                detail="FFmpeg processing error. Please ensure FFmpeg is properly installed and accessible."
+            )
+        elif "network" in error_msg or "connection" in error_msg or "nameresolutionerror" in error_msg:
             raise HTTPException(
                 status_code=503,
                 detail="Network error: Cannot reach YouTube. Please check your internet connection."
             )
+        elif "timeout" in error_msg:
+            raise HTTPException(
+                status_code=408,
+                detail="Download timeout. The audio download took too long. Please try again."
+            )
         else:
             raise HTTPException(
                 status_code=500,
-                detail="Audio download failed. The video may not be available or have audio restrictions."
+                detail=f"Audio download failed: {str(e)}"
             )
     
     if not audio_file or not os.path.exists(audio_file):
-        raise HTTPException(status_code=404, detail="Failed to download audio from this video.")
+        raise HTTPException(
+            status_code=404, 
+            detail="Failed to download audio from this video. The video may not have audio available or may be restricted."
+        )
     
     # Generate a unique filename for serving
     original_filename = os.path.basename(audio_file)
     unique_filename = generate_unique_filename(f"{video_id}_audio_{request.quality}", "mp3")
     final_path = DOWNLOADS_DIR / unique_filename
     
-    # Move file to final location
-    shutil.move(audio_file, final_path)
+    # Move file to final location with error handling
+    try:
+        shutil.move(audio_file, final_path)
+    except Exception as e:
+        logger.error(f"Error moving audio file: {e}")
+        # Try copying instead
+        try:
+            shutil.copy2(audio_file, final_path)
+            os.remove(audio_file)
+        except Exception as copy_error:
+            logger.error(f"Error copying audio file: {copy_error}")
+            raise HTTPException(
+                status_code=500,
+                detail="Error processing downloaded audio file."
+            )
+    
+    # Verify final file exists and has content
+    if not final_path.exists() or final_path.stat().st_size == 0:
+        raise HTTPException(
+            status_code=500,
+            detail="Audio file processing failed. Please try again."
+        )
     
     # Get file size
     file_size = os.path.getsize(final_path)
@@ -740,36 +722,49 @@ def download_audio(
     # Update usage and record download
     user.increment_usage("audio_downloads")
     
-    # Create download record
-    download_record = create_download_record_safe(
-        db=db,
-        user_id=user.id,
-        youtube_id=video_id,
-        transcript_type="audio",
-        file_size=file_size,
-        processing_time=processing_time,
-        download_method="ytdlp",
-        quality=request.quality,
-        language="en",
-        file_format="mp3",
-        download_url=f"/files/{unique_filename}",
-        expires_at=datetime.utcnow() + timedelta(hours=1),
-        status="completed"
-    )
+    # Create download record with enhanced error handling
+    try:
+        download_record = create_download_record_safe(
+            db=db,
+            user_id=user.id,
+            youtube_id=video_id,
+            transcript_type="audio",
+            file_size=file_size,
+            processing_time=processing_time,
+            download_method="ytdlp",
+            quality=request.quality,
+            language="en",
+            file_format="mp3",
+            download_url=f"/files/{unique_filename}",
+            expires_at=datetime.utcnow() + timedelta(hours=1),
+            status="completed"
+        )
+        
+        if download_record:
+            db.commit()
+            
+    except Exception as db_error:
+        logger.error(f"Database error recording download: {db_error}")
+        # Don't fail the request if database recording fails
+        pass
     
-    if download_record:
-        db.commit()
+    logger.info(f"User {user.username} downloaded audio for {video_id} ({request.quality}) - {file_size} bytes")
     
-    logger.info(f"User {user.username} downloaded audio for {video_id} ({request.quality})")
-    
+    # Return enhanced response with all necessary information
     return {
         "download_url": f"/files/{unique_filename}",
+        "direct_download_url": f"/download_file/{unique_filename}",  # Alternative download endpoint
         "youtube_id": video_id,
         "quality": request.quality,
         "file_size": file_size,
+        "file_size_mb": round(file_size / (1024 * 1024), 2),  # Size in MB for display
         "filename": unique_filename,
+        "original_filename": f"{video_id}_audio_{request.quality}.mp3",
         "expires_in": "1 hour",
-        "message": "Audio download ready"
+        "expires_at": (datetime.utcnow() + timedelta(hours=1)).isoformat(),
+        "processing_time": round(processing_time, 2),
+        "message": "Audio download ready",
+        "success": True
     }
 
 @app.post("/download_video/")
@@ -898,12 +893,15 @@ def download_video(
 @app.get("/download_file/{filename}")
 async def download_file(filename: str):
     """
-    Serve downloaded files with proper headers
+    Serve downloaded files with proper headers for direct download
     """
     file_path = DOWNLOADS_DIR / filename
     
     if not file_path.exists():
-        raise HTTPException(status_code=404, detail="File not found or expired")
+        raise HTTPException(
+            status_code=404, 
+            detail="File not found or expired. Downloads expire after 1 hour."
+        )
     
     # Determine content type
     if filename.endswith('.mp3'):
@@ -917,13 +915,27 @@ async def download_file(filename: str):
     else:
         media_type = 'application/octet-stream'
     
+    # Generate a clean filename for download
+    clean_filename = filename
+    if '_' in filename:
+        # Extract video ID and quality from unique filename
+        parts = filename.split('_')
+        if len(parts) >= 4:
+            video_id = parts[0]
+            content_type = parts[1]  # 'audio' or 'video'
+            quality = parts[2]
+            extension = filename.split('.')[-1]
+            clean_filename = f"{video_id}_{content_type}_{quality}.{extension}"
+    
     return FileResponse(
         path=file_path,
         media_type=media_type,
-        filename=filename,
+        filename=clean_filename,
         headers={
-            "Content-Disposition": f"attachment; filename={filename}",
-            "Cache-Control": "no-cache"
+            "Content-Disposition": f"attachment; filename={clean_filename}",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0"
         }
     )
 
