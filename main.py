@@ -1293,6 +1293,7 @@ if __name__ == "__main__":
     import uvicorn
     logger.info(f"Starting server on 0.0.0.0:8000 (reload: True)")
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    
 #=======================
 
 # """ KEEP THIS MAIN.PY IS GOOD
