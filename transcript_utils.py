@@ -270,111 +270,88 @@ def format_transcript_vtt(raw_vtt: str) -> str:
 # AUDIO DOWNLOAD FUNCTIONS
 # =============================================================================
 
-def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir: str = None) -> Optional[str]:
+# Replace the audio quality mapping in your transcript_utils.py
+
+def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir: str = "downloads") -> str:
     """
-    Download audio from YouTube video using yt-dlp with automatic FFmpeg detection
+    Download audio from YouTube video using yt-dlp with better quality settings
     """
+    # FIXED: Better quality settings for playable audio files
+    quality_map = {
+        "high": {
+            "audio_quality": "0",  # Best quality (was 3)
+            "format": "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio"  # Best available
+        },
+        "medium": {
+            "audio_quality": "2",  # Good quality (was 5) 
+            "format": "bestaudio[abr<=128]/bestaudio[ext=m4a]/bestaudio"  # Max 128kbps
+        },
+        "low": {
+            "audio_quality": "5",  # Acceptable quality (was 9)
+            "format": "bestaudio[abr<=96]/bestaudio[ext=m4a]/bestaudio"   # Max 96kbps
+        }
+    }
+    
+    settings = quality_map.get(quality, quality_map["medium"])
+    
+    # Enhanced command for better compatibility
+    cmd = [
+        "yt-dlp",
+        "--extract-audio",
+        "--audio-format", "mp3",
+        "--audio-quality", settings["audio_quality"],
+        "--format", settings["format"],
+        "--output", f"{output_dir}/{video_id}_audio_%(quality)s.%(ext)s",
+        "--no-playlist",
+        "--no-warnings",
+        "--prefer-ffmpeg",  # Prefer FFmpeg for better compatibility
+        "--ffmpeg-location", ffmpeg_path,
+        "--embed-metadata",  # Add metadata for better file recognition
+        f"https://www.youtube.com/watch?v={video_id}"
+    ]
+    
+    logger.info(f"Starting audio download for {video_id} at {quality} quality")
+    logger.info(f"Command: {' '.join(cmd)}")
+    
     try:
-        url = f"https://www.youtube.com/watch?v={video_id}"
-        
-        # Get quality settings
-        audio_config = AUDIO_FORMATS.get(quality, AUDIO_FORMATS["medium"])
-        
-        # Create output directory
-        if output_dir is None:
-            output_dir = tempfile.mkdtemp()
-        
-        output_template = os.path.join(output_dir, f"{video_id}_audio_%(quality)s.%(ext)s")
-        
-        # Try to find FFmpeg location
-        ffmpeg_location = None
-        
-        # Check common FFmpeg locations
-        ffmpeg_paths = [
-            "C:\\ffmpeg",
-            "C:\\Program Files\\ffmpeg\\bin",
-            "C:\\Program Files (x86)\\ffmpeg\\bin",
-            None  # Let yt-dlp try to find it automatically
-        ]
-        
-        for path in ffmpeg_paths:
-            if path is None:
-                # Try without explicit path
-                test_cmd = ["ffmpeg", "-version"]
-            else:
-                # Try with explicit path
-                test_cmd = [os.path.join(path, "ffmpeg.exe"), "-version"]
-            
-            try:
-                result = subprocess.run(test_cmd, capture_output=True, timeout=5, check=True)
-                if result.returncode == 0:
-                    ffmpeg_location = path
-                    logger.info(f"✅ Found FFmpeg at: {ffmpeg_location if ffmpeg_location else 'system PATH'}")
-                    break
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
-                continue
-        
-        if ffmpeg_location is None:
-            logger.warning("⚠️ Could not verify FFmpeg location, trying anyway...")
-        
-        # Build yt-dlp command
-        cmd = [
-            "yt-dlp",
-            "--extract-audio",
-            "--audio-format", "mp3",
-            "--audio-quality", audio_config["quality"],
-            "--format", audio_config["format"],
-            "--output", output_template,
-            "--no-playlist",
-            "--no-warnings",
-        ]
-        
-        # Add FFmpeg location if found
-        if ffmpeg_location:
-            cmd.extend(["--ffmpeg-location", ffmpeg_location])
-        
-        cmd.append(url)
-        
-        logger.info(f"Starting audio download for {video_id} at {quality} quality")
-        logger.info(f"Command: {' '.join(cmd)}")
-        
+        # Run with timeout and better error handling
         result = subprocess.run(
             cmd, 
             capture_output=True, 
             text=True, 
-            timeout=300,  # 5 minutes timeout
-            check=False
+            timeout=300,  # 5 minute timeout
+            cwd=output_dir,
+            check=True
         )
         
-        if result.returncode == 0:
-            # Find the downloaded file
-            for filename in os.listdir(output_dir):
-                if filename.startswith(f"{video_id}_audio") and filename.endswith('.mp3'):
-                    file_path = os.path.join(output_dir, filename)
-                    file_size = os.path.getsize(file_path)
-                    
-                    logger.info(f"Audio download successful: {filename} ({file_size} bytes)")
-                    return file_path
+        # Find the output file
+        pattern = f"{video_id}_audio_*.mp3"
+        audio_files = list(Path(output_dir).glob(pattern))
         
-        # Enhanced error logging
-        logger.error(f"Audio download failed for {video_id}")
-        logger.error(f"Return code: {result.returncode}")
-        logger.error(f"STDOUT: {result.stdout}")
-        logger.error(f"STDERR: {result.stderr}")
-        
-        # Check for specific errors
-        if "ffmpeg" in result.stderr.lower() or "ffprobe" in result.stderr.lower():
-            logger.error("❌ FFmpeg/FFprobe error detected")
-            # Try to provide helpful error message
-            raise Exception(f"FFmpeg error: {result.stderr}")
-        
-        return None
-        
+        if audio_files:
+            audio_file = str(audio_files[0])
+            file_size = os.path.getsize(audio_file)
+            
+            # Verify the file is not corrupted (minimum size check)
+            if file_size < 1000:  # Less than 1KB is definitely corrupted
+                logger.error(f"Downloaded file too small ({file_size} bytes), likely corrupted")
+                if os.path.exists(audio_file):
+                    os.remove(audio_file)
+                raise Exception("Downloaded audio file is corrupted (too small)")
+            
+            logger.info(f"Audio download successful: {os.path.basename(audio_file)} ({file_size} bytes)")
+            return audio_file
+        else:
+            raise Exception("No audio file found after download")
+            
     except subprocess.TimeoutExpired:
-        logger.error(f"Audio download timeout for {video_id}")
-        return None
+        logger.error(f"Audio download timed out for {video_id}")
+        raise Exception("Download timed out")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"yt-dlp error: {e.stderr}")
+        raise Exception(f"Audio download failed: {e.stderr}")
     except Exception as e:
-        logger.error(f"Audio download error for {video_id}: {e}")
+        logger.error(f"Audio download error: {e}")
         raise
 
 # =============================================================================
