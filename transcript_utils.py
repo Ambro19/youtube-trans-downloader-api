@@ -272,15 +272,7 @@ def format_transcript_vtt(raw_vtt: str) -> str:
 
 def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir: str = None) -> Optional[str]:
     """
-    Download audio from YouTube video using yt-dlp
-    
-    Args:
-        video_id: YouTube video ID
-        quality: Audio quality ("high", "medium", "low")
-        output_dir: Output directory (uses temp dir if None)
-    
-    Returns:
-        Path to downloaded audio file or None if failed
+    Download audio from YouTube video using yt-dlp with automatic FFmpeg detection
     """
     try:
         url = f"https://www.youtube.com/watch?v={video_id}"
@@ -294,7 +286,38 @@ def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir
         
         output_template = os.path.join(output_dir, f"{video_id}_audio_%(quality)s.%(ext)s")
         
-        # Enhanced yt-dlp command for audio
+        # Try to find FFmpeg location
+        ffmpeg_location = None
+        
+        # Check common FFmpeg locations
+        ffmpeg_paths = [
+            "C:\\ffmpeg",
+            "C:\\Program Files\\ffmpeg\\bin",
+            "C:\\Program Files (x86)\\ffmpeg\\bin",
+            None  # Let yt-dlp try to find it automatically
+        ]
+        
+        for path in ffmpeg_paths:
+            if path is None:
+                # Try without explicit path
+                test_cmd = ["ffmpeg", "-version"]
+            else:
+                # Try with explicit path
+                test_cmd = [os.path.join(path, "ffmpeg.exe"), "-version"]
+            
+            try:
+                result = subprocess.run(test_cmd, capture_output=True, timeout=5, check=True)
+                if result.returncode == 0:
+                    ffmpeg_location = path
+                    logger.info(f"✅ Found FFmpeg at: {ffmpeg_location if ffmpeg_location else 'system PATH'}")
+                    break
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+                continue
+        
+        if ffmpeg_location is None:
+            logger.warning("⚠️ Could not verify FFmpeg location, trying anyway...")
+        
+        # Build yt-dlp command
         cmd = [
             "yt-dlp",
             "--extract-audio",
@@ -304,10 +327,16 @@ def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir
             "--output", output_template,
             "--no-playlist",
             "--no-warnings",
-            url
         ]
         
+        # Add FFmpeg location if found
+        if ffmpeg_location:
+            cmd.extend(["--ffmpeg-location", ffmpeg_location])
+        
+        cmd.append(url)
+        
         logger.info(f"Starting audio download for {video_id} at {quality} quality")
+        logger.info(f"Command: {' '.join(cmd)}")
         
         result = subprocess.run(
             cmd, 
@@ -327,7 +356,18 @@ def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir
                     logger.info(f"Audio download successful: {filename} ({file_size} bytes)")
                     return file_path
         
-        logger.error(f"Audio download failed for {video_id}: {result.stderr}")
+        # Enhanced error logging
+        logger.error(f"Audio download failed for {video_id}")
+        logger.error(f"Return code: {result.returncode}")
+        logger.error(f"STDOUT: {result.stdout}")
+        logger.error(f"STDERR: {result.stderr}")
+        
+        # Check for specific errors
+        if "ffmpeg" in result.stderr.lower() or "ffprobe" in result.stderr.lower():
+            logger.error("❌ FFmpeg/FFprobe error detected")
+            # Try to provide helpful error message
+            raise Exception(f"FFmpeg error: {result.stderr}")
+        
         return None
         
     except subprocess.TimeoutExpired:
@@ -335,7 +375,7 @@ def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir
         return None
     except Exception as e:
         logger.error(f"Audio download error for {video_id}: {e}")
-        return None
+        raise
 
 # =============================================================================
 # VIDEO DOWNLOAD FUNCTIONS
