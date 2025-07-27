@@ -305,7 +305,7 @@ def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir
         "--no-playlist",
         "--no-warnings",
         "--prefer-ffmpeg",  # Prefer FFmpeg for better compatibility
-        "--ffmpeg-location", ffmpeg_path,
+        #"--ffmpeg-location", ffmpeg_path,
         "--embed-metadata",  # Add metadata for better file recognition
         f"https://www.youtube.com/watch?v={video_id}"
     ]
