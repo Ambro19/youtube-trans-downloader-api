@@ -573,6 +573,116 @@ def read_users_me(current_user: User = Depends(get_current_user)):
     """Get current authenticated user information"""
     return current_user
 
+# Insert right after the authentication endpoints but before the audio download endpoint.
+# Add this endpoint to your main.py file (in the TRANSCRIPT ENDPOINTS section)
+
+@app.post("/download_transcript/")
+def download_transcript(
+    request: TranscriptRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Download YouTube transcript with enhanced error handling
+    """
+    start_time = time.time()
+    
+    # Extract and validate video ID
+    video_id = extract_youtube_video_id(request.youtube_id)
+    if not video_id or len(video_id) != 11:
+        raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    
+    # Check connectivity
+    if not check_internet_connectivity():
+        raise HTTPException(
+            status_code=503,
+            detail="No internet connection available. Please check your network connection."
+        )
+    
+    # Check for monthly usage reset
+    if user.usage_reset_date.month != datetime.utcnow().month:
+        user.reset_monthly_usage()
+        db.commit()
+    
+    # Check usage limits
+    plan_limits = user.get_plan_limits()
+    usage_key = "clean_transcripts" if request.clean_transcript else "unclean_transcripts"
+    current_usage = getattr(user, f"usage_{usage_key}", 0)
+    allowed = plan_limits.get(usage_key, 0)
+    
+    if allowed != float('inf') and current_usage >= allowed:
+        transcript_type = "clean" if request.clean_transcript else "unclean"
+        raise HTTPException(
+            status_code=403,
+            detail=f"Monthly limit reached for {transcript_type} transcripts. Please upgrade your plan."
+        )
+    
+    # Get transcript
+    try:
+        transcript_text = get_transcript_youtube_api(
+            video_id, 
+            clean=request.clean_transcript, 
+            format=request.format
+        )
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
+    except Exception as e:
+        logger.error(f"Transcript download failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to download transcript. The video may not have captions available."
+        )
+    
+    if not transcript_text:
+        raise HTTPException(
+            status_code=404,
+            detail="No transcript found for this video. The video may not have captions available."
+        )
+    
+    # Update usage and record download
+    user.increment_usage(usage_key)
+    processing_time = time.time() - start_time
+    
+    # Create download record
+    try:
+        download_record = create_download_record_safe(
+            db=db,
+            user_id=user.id,
+            youtube_id=video_id,
+            transcript_type="clean" if request.clean_transcript else "unclean",
+            file_size=len(transcript_text.encode('utf-8')),
+            processing_time=processing_time,
+            download_method="youtube_api",
+            quality=None,
+            language="en",
+            file_format=request.format or "txt",
+            download_url=None,
+            expires_at=None,
+            status="completed"
+        )
+        
+        if download_record:
+            db.commit()
+            
+    except Exception as db_error:
+        logger.error(f"Database error recording download: {db_error}")
+        # Don't fail the request if database recording fails
+        pass
+    
+    logger.info(f"User {user.username} downloaded {'clean' if request.clean_transcript else 'unclean'} transcript for {video_id}")
+    
+    return {
+        "transcript": transcript_text,
+        "youtube_id": video_id,
+        "clean_transcript": request.clean_transcript,
+        "format": request.format,
+        "processing_time": round(processing_time, 2),
+        "success": True
+    }
+
+
+
+
 # =============================================================================
 # AUDIO DOWNLOAD ENDPOINT - COMPLETELY FIXED
 # =============================================================================
@@ -903,112 +1013,6 @@ def download_video(
 # =============================================================================
 # FILE SERVING ENDPOINTS
 # =============================================================================
-
-# Add this endpoint to your main.py file (in the TRANSCRIPT ENDPOINTS section)
-
-@app.post("/download_transcript/")
-def download_transcript(
-    request: TranscriptRequest,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """
-    Download YouTube transcript with enhanced error handling
-    """
-    start_time = time.time()
-    
-    # Extract and validate video ID
-    video_id = extract_youtube_video_id(request.youtube_id)
-    if not video_id or len(video_id) != 11:
-        raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
-    
-    # Check connectivity
-    if not check_internet_connectivity():
-        raise HTTPException(
-            status_code=503,
-            detail="No internet connection available. Please check your network connection."
-        )
-    
-    # Check for monthly usage reset
-    if user.usage_reset_date.month != datetime.utcnow().month:
-        user.reset_monthly_usage()
-        db.commit()
-    
-    # Check usage limits
-    plan_limits = user.get_plan_limits()
-    usage_key = "clean_transcripts" if request.clean_transcript else "unclean_transcripts"
-    current_usage = getattr(user, f"usage_{usage_key}", 0)
-    allowed = plan_limits.get(usage_key, 0)
-    
-    if allowed != float('inf') and current_usage >= allowed:
-        transcript_type = "clean" if request.clean_transcript else "unclean"
-        raise HTTPException(
-            status_code=403,
-            detail=f"Monthly limit reached for {transcript_type} transcripts. Please upgrade your plan."
-        )
-    
-    # Get transcript
-    try:
-        transcript_text = get_transcript_youtube_api(
-            video_id, 
-            clean=request.clean_transcript, 
-            format=request.format
-        )
-    except HTTPException:
-        raise  # Re-raise HTTP exceptions as-is
-    except Exception as e:
-        logger.error(f"Transcript download failed: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to download transcript. The video may not have captions available."
-        )
-    
-    if not transcript_text:
-        raise HTTPException(
-            status_code=404,
-            detail="No transcript found for this video. The video may not have captions available."
-        )
-    
-    # Update usage and record download
-    user.increment_usage(usage_key)
-    processing_time = time.time() - start_time
-    
-    # Create download record
-    try:
-        download_record = create_download_record_safe(
-            db=db,
-            user_id=user.id,
-            youtube_id=video_id,
-            transcript_type="clean" if request.clean_transcript else "unclean",
-            file_size=len(transcript_text.encode('utf-8')),
-            processing_time=processing_time,
-            download_method="youtube_api",
-            quality=None,
-            language="en",
-            file_format=request.format or "txt",
-            download_url=None,
-            expires_at=None,
-            status="completed"
-        )
-        
-        if download_record:
-            db.commit()
-            
-    except Exception as db_error:
-        logger.error(f"Database error recording download: {db_error}")
-        # Don't fail the request if database recording fails
-        pass
-    
-    logger.info(f"User {user.username} downloaded {'clean' if request.clean_transcript else 'unclean'} transcript for {video_id}")
-    
-    return {
-        "transcript": transcript_text,
-        "youtube_id": video_id,
-        "clean_transcript": request.clean_transcript,
-        "format": request.format,
-        "processing_time": round(processing_time, 2),
-        "success": True
-    }
 
 @app.get("/download_file/{filename}")
 async def download_file(filename: str):
