@@ -13,7 +13,7 @@ Features:
 - Proper temporary file management
 
 Author: YouTube Transcript Downloader Team
-Version: 2.3.0 (Complete Fix)
+Version: 2.3.1 (Complete Fix - No Nested Folders)
 """
 
 from pathlib import Path
@@ -89,7 +89,7 @@ initialize_database()
 # FastAPI App Configuration
 app = FastAPI(
     title="YouTube Transcript Downloader API", 
-    version="2.3.0",
+    version="2.3.1",
     description="A SaaS application for downloading YouTube transcripts, audio, and video with file serving"
 )
 
@@ -134,7 +134,7 @@ TRANSCRIPT_TYPE_MAP = {
 }
 
 # =============================================================================
-# SUPPORTING UTILITY FUNCTIONS (Add these if not already present)
+# SUPPORTING UTILITY FUNCTIONS
 # =============================================================================
 
 def check_internet_connectivity():
@@ -145,7 +145,6 @@ def check_internet_connectivity():
         return True
     except OSError:
         return False
-
 
 def check_youtube_connectivity():
     """Check if we can reach YouTube specifically"""
@@ -175,15 +174,6 @@ def cleanup_old_files():
                     logger.info(f"Cleaned up old file: {file_path.name}")
     except Exception as e:
         logger.warning(f"Error during file cleanup: {e}")
-
-
-def generate_unique_filename(base_name: str, extension: str) -> str:
-    """Generate a unique filename to avoid conflicts"""
-    import uuid
-    unique_id = str(uuid.uuid4())[:8]
-    timestamp = int(time.time())
-    return f"{base_name}_{timestamp}_{unique_id}.{extension}"
-
 
 # =============================================================================
 # PYDANTIC MODELS
@@ -520,9 +510,9 @@ async def startup():
 def root():
     """Root endpoint - API health check"""
     return {
-        "message": "YouTube Transcript Downloader API with File Serving", 
+        "message": "YouTube Content Downloader API with File Serving", 
         "status": "running", 
-        "version": "2.3.0",
+        "version": "2.3.1",
         "features": ["transcripts", "audio", "video", "file_serving"]
     }
 
@@ -584,10 +574,9 @@ def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
 
 # =============================================================================
-# TRANSCRIPT ENDPOINTS
+# AUDIO DOWNLOAD ENDPOINT - COMPLETELY FIXED
 # =============================================================================
 
-# COMPLETE AUDIO DOWNLOAD ENDPOINT - FULLY PATCHED
 @app.post("/download_audio/")
 def download_audio(
     request: AudioRequest,
@@ -596,6 +585,7 @@ def download_audio(
 ):
     """
     Download YouTube audio with complete file serving support
+    FIXED: No more nested folders + better error handling
     """
     start_time = time.time()
     
@@ -652,9 +642,14 @@ def download_audio(
             detail="FFmpeg not found. Audio downloads require FFmpeg. Please ensure FFmpeg is installed and accessible from the command line."
         )
     
-    # Download audio to downloads directory
+    # FIXED: Download audio directly to the correct downloads directory
+    downloads_path = str(DOWNLOADS_DIR)
+    logger.info(f"Downloading audio to: {downloads_path}")
+    
     try:
-        audio_file = download_audio_with_ytdlp(video_id, request.quality, output_dir=str(DOWNLOADS_DIR))
+        audio_file_path = download_audio_with_ytdlp(video_id, request.quality, output_dir=downloads_path)
+        logger.info(f"Audio download returned path: {audio_file_path}")
+        
     except Exception as e:
         logger.error(f"Audio download failed: {e}")
         
@@ -681,26 +676,40 @@ def download_audio(
                 detail=f"Audio download failed: {str(e)}"
             )
     
-    if not audio_file or not os.path.exists(audio_file):
+    # FIXED: Better file path handling
+    if not audio_file_path or not os.path.exists(audio_file_path):
         raise HTTPException(
             status_code=404, 
             detail="Failed to download audio from this video. The video may not have audio available or may be restricted."
         )
     
+    # Convert to Path object for easier handling
+    audio_file = Path(audio_file_path)
+    
     # Generate a unique filename for serving
-    original_filename = os.path.basename(audio_file)
     unique_filename = generate_unique_filename(f"{video_id}_audio_{request.quality}", "mp3")
     final_path = DOWNLOADS_DIR / unique_filename
     
-    # Move file to final location with error handling
+    # FIXED: Better file moving with detailed logging
     try:
-        shutil.move(audio_file, final_path)
+        logger.info(f"Moving file from {audio_file} to {final_path}")
+        
+        if audio_file.samefile(final_path):
+            # File is already in the right place
+            logger.info("File is already in the correct location")
+        else:
+            # Move/copy file to final location
+            shutil.move(str(audio_file), str(final_path))
+            logger.info(f"File moved successfully to {final_path}")
+            
     except Exception as e:
         logger.error(f"Error moving audio file: {e}")
         # Try copying instead
         try:
-            shutil.copy2(audio_file, final_path)
-            os.remove(audio_file)
+            shutil.copy2(str(audio_file), str(final_path))
+            if audio_file.exists():
+                audio_file.unlink()
+            logger.info(f"File copied successfully to {final_path}")
         except Exception as copy_error:
             logger.error(f"Error copying audio file: {copy_error}")
             raise HTTPException(
@@ -710,13 +719,14 @@ def download_audio(
     
     # Verify final file exists and has content
     if not final_path.exists() or final_path.stat().st_size == 0:
+        logger.error(f"Final file verification failed: exists={final_path.exists()}, size={final_path.stat().st_size if final_path.exists() else 'N/A'}")
         raise HTTPException(
             status_code=500,
             detail="Audio file processing failed. Please try again."
         )
     
     # Get file size
-    file_size = os.path.getsize(final_path)
+    file_size = final_path.stat().st_size
     processing_time = time.time() - start_time
     
     # Update usage and record download
@@ -750,14 +760,14 @@ def download_audio(
     
     logger.info(f"User {user.username} downloaded audio for {video_id} ({request.quality}) - {file_size} bytes")
     
-    # Return enhanced response with all necessary information
+    # FIXED: Enhanced response with all necessary information
     return {
         "download_url": f"/files/{unique_filename}",
-        "direct_download_url": f"/download_file/{unique_filename}",  # Alternative download endpoint
+        "direct_download_url": f"/download_file/{unique_filename}",
         "youtube_id": video_id,
         "quality": request.quality,
         "file_size": file_size,
-        "file_size_mb": round(file_size / (1024 * 1024), 2),  # Size in MB for display
+        "file_size_mb": round(file_size / (1024 * 1024), 2),
         "filename": unique_filename,
         "original_filename": f"{video_id}_audio_{request.quality}.mp3",
         "expires_in": "1 hour",
@@ -766,6 +776,10 @@ def download_audio(
         "message": "Audio download ready",
         "success": True
     }
+
+# =============================================================================
+# VIDEO DOWNLOAD ENDPOINT
+# =============================================================================
 
 @app.post("/download_video/")
 def download_video(
@@ -890,6 +904,112 @@ def download_video(
 # FILE SERVING ENDPOINTS
 # =============================================================================
 
+# Add this endpoint to your main.py file (in the TRANSCRIPT ENDPOINTS section)
+
+@app.post("/download_transcript/")
+def download_transcript(
+    request: TranscriptRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Download YouTube transcript with enhanced error handling
+    """
+    start_time = time.time()
+    
+    # Extract and validate video ID
+    video_id = extract_youtube_video_id(request.youtube_id)
+    if not video_id or len(video_id) != 11:
+        raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    
+    # Check connectivity
+    if not check_internet_connectivity():
+        raise HTTPException(
+            status_code=503,
+            detail="No internet connection available. Please check your network connection."
+        )
+    
+    # Check for monthly usage reset
+    if user.usage_reset_date.month != datetime.utcnow().month:
+        user.reset_monthly_usage()
+        db.commit()
+    
+    # Check usage limits
+    plan_limits = user.get_plan_limits()
+    usage_key = "clean_transcripts" if request.clean_transcript else "unclean_transcripts"
+    current_usage = getattr(user, f"usage_{usage_key}", 0)
+    allowed = plan_limits.get(usage_key, 0)
+    
+    if allowed != float('inf') and current_usage >= allowed:
+        transcript_type = "clean" if request.clean_transcript else "unclean"
+        raise HTTPException(
+            status_code=403,
+            detail=f"Monthly limit reached for {transcript_type} transcripts. Please upgrade your plan."
+        )
+    
+    # Get transcript
+    try:
+        transcript_text = get_transcript_youtube_api(
+            video_id, 
+            clean=request.clean_transcript, 
+            format=request.format
+        )
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
+    except Exception as e:
+        logger.error(f"Transcript download failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to download transcript. The video may not have captions available."
+        )
+    
+    if not transcript_text:
+        raise HTTPException(
+            status_code=404,
+            detail="No transcript found for this video. The video may not have captions available."
+        )
+    
+    # Update usage and record download
+    user.increment_usage(usage_key)
+    processing_time = time.time() - start_time
+    
+    # Create download record
+    try:
+        download_record = create_download_record_safe(
+            db=db,
+            user_id=user.id,
+            youtube_id=video_id,
+            transcript_type="clean" if request.clean_transcript else "unclean",
+            file_size=len(transcript_text.encode('utf-8')),
+            processing_time=processing_time,
+            download_method="youtube_api",
+            quality=None,
+            language="en",
+            file_format=request.format or "txt",
+            download_url=None,
+            expires_at=None,
+            status="completed"
+        )
+        
+        if download_record:
+            db.commit()
+            
+    except Exception as db_error:
+        logger.error(f"Database error recording download: {db_error}")
+        # Don't fail the request if database recording fails
+        pass
+    
+    logger.info(f"User {user.username} downloaded {'clean' if request.clean_transcript else 'unclean'} transcript for {video_id}")
+    
+    return {
+        "transcript": transcript_text,
+        "youtube_id": video_id,
+        "clean_transcript": request.clean_transcript,
+        "format": request.format,
+        "processing_time": round(processing_time, 2),
+        "success": True
+    }
+
 @app.get("/download_file/{filename}")
 async def download_file(filename: str):
     """
@@ -940,7 +1060,7 @@ async def download_file(filename: str):
     )
 
 # =============================================================================
-# SUBSCRIPTION ENDPOINTS (Keep existing ones)
+# SUBSCRIPTION ENDPOINTS
 # =============================================================================
 
 @app.get("/subscription_status/")
@@ -1092,7 +1212,7 @@ def get_test_videos():
     }
 
 # =============================================================================
-# PAYMENT ENDPOINTS (Keep existing ones)
+# PAYMENT ENDPOINTS 
 # =============================================================================
 
 @app.post("/create_payment_intent/")
@@ -1292,9 +1412,7 @@ async def shutdown():
 if __name__ == "__main__":
     import uvicorn
     logger.info(f"Starting server on 0.0.0.0:8000 (reload: True)")
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
-    
-#=======================
+
 
 # """ KEEP THIS MAIN.PY IS GOOD
 # YouTube Transcript Downloader API - Enhanced with Audio/Video Downloads

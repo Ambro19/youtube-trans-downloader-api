@@ -25,12 +25,12 @@ AUDIO_FORMATS = {
     },
     'medium': {
         'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio',
-        'quality': '5',  # Medium quality
+        'quality': '2',  # Medium quality
         'bitrate': '192k'
     },
     'low': {
-        'format': 'worstaudio[ext=m4a]/worstaudio[ext=mp3]/worstaudio',
-        'quality': '9',  # Lowest quality
+        'format': 'bestaudio[abr<=96]/bestaudio[ext=m4a]/bestaudio',
+        'quality': '5',  # Low quality
         'bitrate': '96k'
     }
 }
@@ -267,32 +267,37 @@ def format_transcript_vtt(raw_vtt: str) -> str:
         return raw_vtt
 
 # =============================================================================
-# AUDIO DOWNLOAD FUNCTIONS
+# AUDIO DOWNLOAD FUNCTIONS - COMPLETELY FIXED
 # =============================================================================
-
-# Replace the audio quality mapping in your transcript_utils.py
 
 def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir: str = "downloads") -> str:
     """
     Download audio from YouTube video using yt-dlp with better quality settings
+    FIXED: No more nested folders + better file detection
     """
     # FIXED: Better quality settings for playable audio files
     quality_map = {
         "high": {
-            "audio_quality": "0",  # Best quality (was 3)
-            "format": "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio"  # Best available
+            "audio_quality": "0",  # Best quality
+            "format": "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio"
         },
         "medium": {
-            "audio_quality": "2",  # Good quality (was 5) 
-            "format": "bestaudio[abr<=128]/bestaudio[ext=m4a]/bestaudio"  # Max 128kbps
+            "audio_quality": "2",  # Good quality 
+            "format": "bestaudio[abr<=128]/bestaudio[ext=m4a]/bestaudio"
         },
         "low": {
-            "audio_quality": "5",  # Acceptable quality (was 9)
-            "format": "bestaudio[abr<=96]/bestaudio[ext=m4a]/bestaudio"   # Max 96kbps
+            "audio_quality": "5",  # Acceptable quality
+            "format": "bestaudio[abr<=96]/bestaudio[ext=m4a]/bestaudio"
         }
     }
     
     settings = quality_map.get(quality, quality_map["medium"])
+    
+    # Create output directory if it doesn't exist
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+    # FIXED: Use simple filename template - no nested paths
+    output_template = f"{video_id}_audio_%(quality)s.%(ext)s"
     
     # Enhanced command for better compatibility
     cmd = [
@@ -301,47 +306,70 @@ def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir
         "--audio-format", "mp3",
         "--audio-quality", settings["audio_quality"],
         "--format", settings["format"],
-        "--output", f"{output_dir}/{video_id}_audio_%(quality)s.%(ext)s",
+        "--output", output_template,  # FIXED: Simple template, no path
         "--no-playlist",
         "--no-warnings",
-        "--prefer-ffmpeg",  # Prefer FFmpeg for better compatibility
-        #"--ffmpeg-location", ffmpeg_path,
-        "--embed-metadata",  # Add metadata for better file recognition
+        "--prefer-ffmpeg",
+        "--embed-metadata",
         f"https://www.youtube.com/watch?v={video_id}"
     ]
     
     logger.info(f"Starting audio download for {video_id} at {quality} quality")
     logger.info(f"Command: {' '.join(cmd)}")
+    logger.info(f"Working directory: {output_dir}")
     
     try:
-        # Run with timeout and better error handling
+        # FIXED: Run in the output directory, but use simple filename template
         result = subprocess.run(
             cmd, 
             capture_output=True, 
             text=True, 
             timeout=300,  # 5 minute timeout
-            cwd=output_dir,
+            cwd=output_dir,  # This is fine now since output template is simple
             check=True
         )
         
-        # Find the output file
-        pattern = f"{video_id}_audio_*.mp3"
-        audio_files = list(Path(output_dir).glob(pattern))
+        logger.info(f"yt-dlp completed successfully")
+        logger.info(f"yt-dlp stdout: {result.stdout}")
         
-        if audio_files:
-            audio_file = str(audio_files[0])
-            file_size = os.path.getsize(audio_file)
+        # FIXED: Better file detection - list all files in output directory
+        output_path = Path(output_dir)
+        all_files = list(output_path.glob("*"))
+        logger.info(f"Files in output directory: {[f.name for f in all_files]}")
+        
+        # Look for audio files matching our pattern
+        audio_patterns = [
+            f"{video_id}_audio_*.mp3",
+            f"{video_id}*.mp3",  # Fallback pattern
+            "*.mp3"  # Last resort - newest mp3 file
+        ]
+        
+        audio_file = None
+        for pattern in audio_patterns:
+            audio_files = list(output_path.glob(pattern))
+            logger.info(f"Pattern '{pattern}' found files: {[f.name for f in audio_files]}")
+            
+            if audio_files:
+                # Get the most recently created file
+                audio_file = max(audio_files, key=lambda f: f.stat().st_mtime)
+                logger.info(f"Selected file: {audio_file.name}")
+                break
+        
+        if audio_file and audio_file.exists():
+            file_size = audio_file.stat().st_size
             
             # Verify the file is not corrupted (minimum size check)
             if file_size < 1000:  # Less than 1KB is definitely corrupted
                 logger.error(f"Downloaded file too small ({file_size} bytes), likely corrupted")
-                if os.path.exists(audio_file):
-                    os.remove(audio_file)
+                audio_file.unlink()  # Delete the corrupted file
                 raise Exception("Downloaded audio file is corrupted (too small)")
             
-            logger.info(f"Audio download successful: {os.path.basename(audio_file)} ({file_size} bytes)")
-            return audio_file
+            logger.info(f"Audio download successful: {audio_file.name} ({file_size} bytes)")
+            return str(audio_file)
         else:
+            # Enhanced debugging - list ALL files created
+            logger.error("No audio file found after download")
+            logger.error(f"All files in directory: {[f.name for f in output_path.iterdir() if f.is_file()]}")
             raise Exception("No audio file found after download")
             
     except subprocess.TimeoutExpired:
