@@ -39,8 +39,11 @@ defusedxml==0.7.1
 # Fast JSON handling (optional, used only if you import/use orjson)
 orjson==3.9.10
 
-# Optional: Frontend proxying or development
-# aiofiles==23.2.1
+# For async file operations
+aiofiles==23.2.0
+
+# For better MIME type detection (optional - can use built-in mimetypes instead)
+python-magic==0.4.27
 
 # Optional: Error reporting for production
 # sentry-sdk[fastapi]==1.40.0
