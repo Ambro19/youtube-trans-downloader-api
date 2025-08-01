@@ -270,10 +270,9 @@ def format_transcript_vtt(raw_vtt: str) -> str:
 # =============================================================================
 # AUDIO DOWNLOAD FUNCTIONS - COMPLETELY FIXED
 # =============================================================================
-
 def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: str = None) -> Optional[str]:
     """
-    Download video from YouTube using yt-dlp - SIMPLIFIED VERSION
+    Download video from YouTube using yt-dlp - ULTRA SIMPLE VERSION
     """
     try:
         url = f"https://www.youtube.com/watch?v={video_id}"
@@ -285,77 +284,62 @@ def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: 
         # Ensure output directory exists
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         
-        # Use simple filename template
-        output_template = f"{video_id}_video_{quality}.%(ext)s"
+        logger.info(f"Starting SIMPLE video download for {video_id}")
+        logger.info(f"URL: {url}")
+        logger.info(f"Output dir: {output_dir}")
         
-        logger.info(f"Starting video download for {video_id} at {quality} quality")
-        
-        # SIMPLIFIED: Just use "best" format - let yt-dlp decide
+        # ULTRA SIMPLE: Let yt-dlp choose everything
         cmd = [
             "yt-dlp",
-            "--format", "best",  # Simplified - just get the best available
-            "--output", output_template,
             "--no-playlist",
+            "--output", f"{video_id}_video.%(ext)s",
             url
         ]
         
         logger.info(f"Command: {' '.join(cmd)}")
-        logger.info(f"Working directory: {output_dir}")
         
         result = subprocess.run(
             cmd, 
             capture_output=True, 
             text=True, 
-            timeout=600,  # 10 minutes timeout
+            timeout=300,  # 5 minutes
             cwd=output_dir,
             check=False
         )
         
-        logger.info(f"yt-dlp return code: {result.returncode}")
-        logger.info(f"yt-dlp stdout: {result.stdout}")
+        logger.info(f"Return code: {result.returncode}")
+        logger.info(f"Stdout: {result.stdout}")
         
         if result.stderr:
-            logger.warning(f"yt-dlp stderr: {result.stderr}")
+            logger.info(f"Stderr: {result.stderr}")
         
         if result.returncode == 0:
-            # Find downloaded file
+            # Find ANY file that was created
             output_path = Path(output_dir)
             all_files = list(output_path.glob("*"))
-            logger.info(f"All files after download: {[f.name for f in all_files]}")
+            logger.info(f"All files created: {[f.name for f in all_files]}")
             
-            # Look for video files
-            video_files = []
-            for file in all_files:
-                if file.suffix.lower() in ['.mp4', '.webm', '.mkv', '.avi', '.mov', '.flv']:
-                    video_files.append(file)
-            
-            logger.info(f"Video files found: {[f.name for f in video_files]}")
-            
-            if video_files:
-                # Get the largest file (likely the video)
-                video_file = max(video_files, key=lambda f: f.stat().st_size)
-                file_size = video_file.stat().st_size
+            if all_files:
+                # Get the largest file (most likely the video)
+                largest_file = max(all_files, key=lambda f: f.stat().st_size)
+                file_size = largest_file.stat().st_size
                 
-                logger.info(f"Selected video file: {video_file.name} ({file_size} bytes)")
+                logger.info(f"Largest file: {largest_file.name} ({file_size} bytes)")
                 
-                # Basic size check
-                if file_size > 50000:  # At least 50KB
-                    return str(video_file)
+                if file_size > 1000:  # At least 1KB
+                    return str(largest_file)
                 else:
-                    logger.error(f"Video file too small: {file_size} bytes")
+                    logger.error(f"File too small: {file_size} bytes")
                     return None
             else:
-                logger.error("No video files found after download")
+                logger.error("No files created")
                 return None
         else:
-            logger.error(f"yt-dlp failed with return code {result.returncode}")
+            logger.error(f"yt-dlp failed: {result.stderr}")
             return None
             
-    except subprocess.TimeoutExpired:
-        logger.error(f"Video download timeout for {video_id}")
-        return None
     except Exception as e:
-        logger.error(f"Video download error for {video_id}: {e}")
+        logger.error(f"Exception in video download: {e}")
         return None
 
 # def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir: str = "downloads") -> str:
