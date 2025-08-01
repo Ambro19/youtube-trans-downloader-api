@@ -36,11 +36,12 @@ AUDIO_FORMATS = {
 }
 
 # Video quality settings for yt-dlp
+# Replace the VIDEO_FORMATS configuration with this more flexible version:
 VIDEO_FORMATS = {
-    '1080p': 'best[height<=1080][ext=mp4]/best[height<=1080]/best[ext=mp4]/best',
-    '720p': 'best[height<=720][ext=mp4]/best[height<=720]/best[ext=mp4]/best',
-    '480p': 'best[height<=480][ext=mp4]/best[height<=480]/best[ext=mp4]/best',
-    '360p': 'best[height<=360][ext=mp4]/best[height<=360]/best[ext=mp4]/best'
+    '1080p': 'best[height<=1080]/bestvideo[height<=1080]+bestaudio/best',
+    '720p': 'best[height<=720]/bestvideo[height<=720]+bestaudio/best',
+    '480p': 'best[height<=480]/bestvideo[height<=480]+bestaudio/best',
+    '360p': 'best[height<=360]/bestvideo[height<=360]+bestaudio/best'
 }
 
 # =============================================================================
@@ -383,72 +384,125 @@ def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir
         raise
 
 # =============================================================================
-# VIDEO DOWNLOAD FUNCTIONS
+# FIXED VIDEO DOWNLOAD FUNCTIONS - MORE FLEXIBLE FORMAT SELECTION
 # =============================================================================
 
 def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: str = None) -> Optional[str]:
     """
-    Download video from YouTube using yt-dlp
-    
-    Args:
-        video_id: YouTube video ID
-        quality: Video quality ("1080p", "720p", "480p", "360p")
-        output_dir: Output directory (uses temp dir if None)
-    
-    Returns:
-        Path to downloaded video file or None if failed
+    Download video from YouTube using yt-dlp with improved format selection
+    FIXED: More flexible format selection that works with older videos
     """
     try:
         url = f"https://www.youtube.com/watch?v={video_id}"
-        
-        # Get quality format
-        video_format = VIDEO_FORMATS.get(quality, VIDEO_FORMATS["720p"])
         
         # Create output directory
         if output_dir is None:
             output_dir = tempfile.mkdtemp()
         
-        output_template = os.path.join(output_dir, f"{video_id}_video_{quality}.%(ext)s")
+        # Ensure output directory exists
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
         
-        # Enhanced yt-dlp command for video
-        cmd = [
-            "yt-dlp",
-            "--format", video_format,
-            "--output", output_template,
-            "--no-playlist",
-            "--no-warnings",
-            "--merge-output-format", "mp4",
-            url
+        # Use simple filename template
+        output_template = f"{video_id}_video_{quality}.%(ext)s"
+        
+        # FIXED: More flexible format selection with fallbacks
+        format_options = [
+            # Try quality-specific format first
+            f"best[height<={quality[:-1]}]",  # Remove 'p' from quality
+            # Fallback to general formats
+            "best[ext=mp4]/best[ext=webm]/best[ext=mkv]/best",
+            # Last resort - just get the best available
+            "best"
         ]
         
-        logger.info(f"Starting video download for {video_id} at {quality} quality")
-        
-        result = subprocess.run(
-            cmd, 
-            capture_output=True, 
-            text=True, 
-            timeout=600,  # 10 minutes timeout
-            check=False
-        )
-        
-        if result.returncode == 0:
-            # Find the downloaded file
-            for filename in os.listdir(output_dir):
-                if filename.startswith(f"{video_id}_video_{quality}") and (
-                    filename.endswith('.mp4') or filename.endswith('.mkv') or filename.endswith('.webm')
-                ):
-                    file_path = os.path.join(output_dir, filename)
-                    file_size = os.path.getsize(file_path)
+        # Try each format option until one works
+        for format_option in format_options:
+            try:
+                logger.info(f"Trying format: {format_option} for {video_id} at {quality}")
+                
+                cmd = [
+                    "yt-dlp",
+                    "--format", format_option,
+                    "--output", output_template,
+                    "--no-playlist",
+                    "--no-warnings",
+                    "--prefer-ffmpeg",  # Use ffmpeg for post-processing if needed
+                    url
+                ]
+                
+                logger.info(f"Command: {' '.join(cmd)}")
+                logger.info(f"Working directory: {output_dir}")
+                
+                result = subprocess.run(
+                    cmd, 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=600,  # 10 minutes timeout
+                    cwd=output_dir,
+                    check=False
+                )
+                
+                logger.info(f"yt-dlp return code: {result.returncode}")
+                logger.info(f"yt-dlp stdout: {result.stdout}")
+                
+                if result.stderr:
+                    logger.info(f"yt-dlp stderr: {result.stderr}")
+                
+                if result.returncode == 0:
+                    # Success! Find the downloaded file
+                    output_path = Path(output_dir)
                     
-                    logger.info(f"Video download successful: {filename} ({file_size} bytes)")
-                    return file_path
+                    # Look for video files matching our pattern
+                    video_patterns = [
+                        f"{video_id}_video_{quality}.*",
+                        f"{video_id}*video*.*",
+                        f"{video_id}.*"
+                    ]
+                    
+                    video_file = None
+                    for pattern in video_patterns:
+                        video_files = list(output_path.glob(pattern))
+                        logger.info(f"Pattern '{pattern}' found files: {[f.name for f in video_files]}")
+                        
+                        # Filter for video file extensions
+                        video_files = [f for f in video_files if f.suffix.lower() in ['.mp4', '.webm', '.mkv', '.avi', '.mov']]
+                        
+                        if video_files:
+                            # Get the most recently created file
+                            video_file = max(video_files, key=lambda f: f.stat().st_mtime)
+                            logger.info(f"Selected video file: {video_file.name}")
+                            break
+                    
+                    if video_file and video_file.exists():
+                        file_size = video_file.stat().st_size
+                        
+                        # Verify the file is not corrupted (minimum size check)
+                        if file_size < 10000:  # Less than 10KB is likely corrupted
+                            logger.error(f"Downloaded file too small ({file_size} bytes), trying next format")
+                            video_file.unlink()  # Delete the corrupted file
+                            continue  # Try next format
+                        
+                        logger.info(f"Video download successful: {video_file.name} ({file_size} bytes)")
+                        return str(video_file)
+                    else:
+                        logger.warning(f"No video file found with format {format_option}, trying next format")
+                        continue
+                else:
+                    # Non-zero return code, try next format
+                    logger.warning(f"Format {format_option} failed, trying next format")
+                    continue
+                    
+            except subprocess.TimeoutExpired:
+                logger.error(f"Video download timeout with format {format_option}")
+                continue
+            except Exception as e:
+                logger.error(f"Error with format {format_option}: {e}")
+                continue
         
-        logger.error(f"Video download failed for {video_id}: {result.stderr}")
+        # If we get here, all formats failed
+        logger.error(f"All format options failed for video {video_id}")
         return None
         
-    except subprocess.TimeoutExpired:
-        logger.error(f"Video download timeout for {video_id}")
-        return None
     except Exception as e:
         logger.error(f"Video download error for {video_id}: {e}")
         return None
@@ -643,6 +697,42 @@ def format_transcript_clean(text: str) -> str:
     except Exception as e:
         logger.error(f"Error formatting clean transcript: {e}")
         return text
+
+# =============================================================================
+# ADDITIONAL HELPER FUNCTION - CHECK AVAILABLE FORMATS
+# =============================================================================
+
+def get_available_formats(video_id: str) -> Optional[str]:
+    """
+    Get available formats for a video (for debugging)
+    """
+    try:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        
+        cmd = [
+            "yt-dlp",
+            "--list-formats",
+            "--no-warnings",
+            url
+        ]
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False
+        )
+        
+        if result.returncode == 0:
+            return result.stdout
+        else:
+            logger.error(f"Failed to get formats: {result.stderr}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error getting available formats: {e}")
+        return None
 
 # =============================================================================
 # TESTING AND DEBUGGING
