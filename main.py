@@ -97,11 +97,11 @@ DOWNLOADS_DIR = Path("downloads")
 DOWNLOADS_DIR.mkdir(exist_ok=True)
 app.mount("/files", StaticFiles(directory="downloads"), name="files")
 
-# CORS Configuration - ADD YOUR NETWORK IP
+# CORS Configuration - COMPLETE FIX
 allowed_origins = [
     "http://localhost:3000", 
     "http://127.0.0.1:3000", 
-    "http://192.168.1.185:3000",  # ADD THIS LINE with your network IP
+    "http://192.168.1.185:3000",  # Your network IP
     FRONTEND_URL
 ] if ENVIRONMENT != "production" else [
     "https://youtube-trans-downloader-api.onrender.com", 
@@ -115,6 +115,26 @@ app.add_middleware(
     allow_methods=["*"], 
     allow_headers=["*"],
 )
+
+
+# # CORS Configuration - ADD YOUR NETWORK IP
+# allowed_origins = [
+#     "http://localhost:3000", 
+#     "http://127.0.0.1:3000", 
+#     "http://192.168.1.185:3000",  # ADD THIS LINE with your network IP
+#     FRONTEND_URL
+# ] if ENVIRONMENT != "production" else [
+#     "https://youtube-trans-downloader-api.onrender.com", 
+#     FRONTEND_URL
+# ]
+
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=allowed_origins, 
+#     allow_credentials=True,
+#     allow_methods=["*"], 
+#     allow_headers=["*"],
+# )
 
 
 # Security Configuration
