@@ -1441,14 +1441,27 @@ async def shutdown():
 
 # Update your run.py file to listen on all interfaces
 
+# if __name__ == "__main__":
+#     import uvicorn
+#     logger.info(f"Starting server on 0.0.0.0:8000 (reload: True)")
+    
+#     # IMPORTANT: Use 0.0.0.0 instead of localhost to accept connections from any IP
+#     uvicorn.run(
+#         "main:app", 
+#         host="0.0.0.0",  # This allows mobile devices to connect
+#         port=8000, 
+#         reload=True
+#     )
+
+# Your run.py should have exactly this:
 if __name__ == "__main__":
     import uvicorn
-    logger.info(f"Starting server on 0.0.0.0:8000 (reload: True)")
+    print("🔥 Starting server on 0.0.0.0:8000")
+    print("🔥 This allows mobile connections")
     
-    # IMPORTANT: Use 0.0.0.0 instead of localhost to accept connections from any IP
     uvicorn.run(
         "main:app", 
-        host="0.0.0.0",  # This allows mobile devices to connect
+        host="0.0.0.0",  # CRITICAL - must be 0.0.0.0
         port=8000, 
         reload=True
     )
