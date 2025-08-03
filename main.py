@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-YouTube Content Downloader API - UNICODE SAFE VERSION
+YouTube Transcript Downloader API - UNICODE SAFE VERSION
 ========================================================
 Fixed version with proper downloads path to user's Downloads folder
 without any Unicode escape issues.
@@ -69,7 +69,7 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 logger.info(f"Environment: {ENVIRONMENT}")
-logger.info("Starting YouTube Content Downloader API")
+logger.info("Starting YouTube Transcript Downloader API")
 logger.info("Environment variables loaded from .env file")
 logger.info("Using SQLite database for development")
 
@@ -78,7 +78,7 @@ initialize_database()
 
 # FastAPI App Configuration
 app = FastAPI(
-    title="YouTube Content Downloader API", 
+    title="YouTube Transcript Downloader API", 
     version="2.4.1",
     description="A SaaS application for downloading YouTube transcripts, audio, and video"
 )
@@ -263,6 +263,148 @@ def extract_youtube_video_id(youtube_id_or_url: str) -> str:
             return match.group(1)[:11]
     return youtube_id_or_url.strip()[:11]
 
+def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Optional[str] = None) -> str:
+    """Get transcript using YouTube Transcript API"""
+    logger.info(f"🔥 Getting transcript for {video_id}, clean={clean}, format={format}")
+    
+    if not check_internet_connectivity():
+        logger.error("❌ No internet connectivity")
+        raise HTTPException(
+            status_code=503, 
+            detail="No internet connection available. Please check your network connection."
+        )
+    
+    if not check_youtube_connectivity():
+        logger.error("❌ Cannot reach YouTube")
+        raise HTTPException(
+            status_code=503, 
+            detail="Cannot reach YouTube servers. Please try again later."
+        )
+    
+    try:
+        logger.info(f"🔥 Attempting to get transcript via YouTube API for {video_id}")
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+        logger.info(f"✅ Got transcript with {len(transcript)} segments")
+        
+        if clean:
+            logger.info("🔥 Processing clean transcript")
+            # Clean format - readable paragraphs
+            text = " ".join([seg['text'].replace('\n', ' ') for seg in transcript])
+            clean_text = " ".join(text.split())
+            
+            # Break into paragraphs
+            words = clean_text.split()
+            paragraphs = []
+            current_paragraph = []
+            char_count = 0
+            
+            for word in words:
+                current_paragraph.append(word)
+                char_count += len(word) + 1
+                
+                if char_count > 400 and word.endswith(('.', '!', '?')):
+                    paragraphs.append(' '.join(current_paragraph))
+                    current_paragraph = []
+                    char_count = 0
+            
+            if current_paragraph:
+                paragraphs.append(' '.join(current_paragraph))
+            
+            result = '\n\n'.join(paragraphs)
+            logger.info(f"✅ Clean transcript processed, length: {len(result)}")
+            return result
+        else:
+            logger.info(f"🔥 Processing unclean transcript with format: {format}")
+            # Unclean format with timestamps
+            if format == "srt":
+                result = segments_to_srt(transcript)
+            elif format == "vtt":
+                result = segments_to_vtt(transcript)
+            else:
+                # Default timestamp format [MM:SS]
+                lines = []
+                for seg in transcript:
+                    t = int(seg['start'])
+                    timestamp = f"[{t//60:02d}:{t%60:02d}]"
+                    text_clean = seg['text'].replace('\n', ' ')
+                    lines.append(f"{timestamp} {text_clean}")
+                result = "\n".join(lines)
+            
+            logger.info(f"✅ Unclean transcript processed, length: {len(result)}")
+            return result
+                
+    except Exception as e:
+        logger.error(f"❌ YouTube Transcript API failed: {e}")
+        logger.error(f"❌ Exception type: {type(e).__name__}")
+        
+        # Try yt-dlp fallback
+        try:
+            logger.info("🔄 Trying yt-dlp fallback")
+            if hasattr('transcript_utils', 'get_transcript_with_ytdlp'):
+                fallback = get_transcript_with_ytdlp(video_id, clean=clean)
+                if fallback:
+                    logger.info(f"✅ yt-dlp fallback succeeded, length: {len(fallback)}")
+                    return fallback
+        except Exception as fallback_error:
+            logger.error(f"❌ yt-dlp fallback failed: {fallback_error}")
+        
+        # If both methods fail
+        logger.error(f"❌ No transcript found for video {video_id}")
+        if "No transcripts were found" in str(e) or "TranscriptsDisabled" in str(e):
+            raise HTTPException(
+                status_code=404,
+                detail="This video does not have captions/transcripts available."
+            )
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail="No transcript/captions found for this video. The video may not have captions available."
+            )
+
+def segments_to_vtt(transcript) -> str:
+    """Convert transcript segments to WebVTT format"""
+    def sec_to_vtt(ts):
+        h = int(ts // 3600)
+        m = int((ts % 3600) // 60)
+        s = int(ts % 60)
+        ms = int((ts - int(ts)) * 1000)
+        return f"{h:02}:{m:02}:{s:02}.{ms:03}"
+    
+    lines = ["WEBVTT", "Kind: captions", "Language: en", ""]
+    
+    for seg in transcript:
+        start = sec_to_vtt(seg["start"])
+        end = sec_to_vtt(seg.get("start", 0) + seg.get("duration", 0))
+        text = seg["text"].replace("\n", " ").strip()
+        
+        lines.append(f"{start} --> {end}")
+        lines.append(text)
+        lines.append("")
+    
+    return "\n".join(lines)
+
+def segments_to_srt(transcript) -> str:
+    """Convert transcript segments to SRT format"""
+    def sec_to_srt(ts):
+        h = int(ts // 3600)
+        m = int((ts % 3600) // 60)
+        s = int(ts % 60)
+        ms = int((ts - int(ts)) * 1000)
+        return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+    lines = []
+    for idx, seg in enumerate(transcript):
+        start = sec_to_srt(seg["start"])
+        end = sec_to_srt(seg.get("start", 0) + seg.get("duration", 0))
+        text = seg["text"].replace("\n", " ").strip()
+        
+        lines.append(f"{idx+1}")
+        lines.append(f"{start} --> {end}")
+        lines.append(text)
+        lines.append("")
+    
+    return "\n".join(lines)
+
 # =============================================================================
 # FASTAPI ENDPOINTS
 # =============================================================================
@@ -320,6 +462,100 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 @app.get("/users/me", response_model=UserResponse)
 def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
+
+@app.post("/download_transcript/")
+def download_transcript(
+    request: TranscriptRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Download YouTube transcript"""
+    start_time = time.time()
+    
+    logger.info(f"🔥 Transcript request: {request.youtube_id}, clean: {request.clean_transcript}")
+    
+    # Extract and validate video ID
+    video_id = extract_youtube_video_id(request.youtube_id)
+    logger.info(f"🔥 Extracted video ID: {video_id}")
+    
+    if not video_id or len(video_id) != 11:
+        logger.error(f"❌ Invalid video ID: {video_id}")
+        raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    
+    # Check connectivity
+    if not check_internet_connectivity():
+        logger.error("❌ No internet connectivity")
+        raise HTTPException(
+            status_code=503,
+            detail="No internet connection available. Please check your network connection."
+        )
+    
+    logger.info("✅ Internet connectivity OK")
+    
+    # Check for monthly usage reset
+    current_month = datetime.utcnow().month
+    if hasattr(user, 'usage_reset_date') and user.usage_reset_date.month != current_month:
+        if hasattr(user, 'reset_monthly_usage'):
+            user.reset_monthly_usage()
+            db.commit()
+    
+    # Check usage limits (simplified for now)
+    usage_key = "clean_transcripts" if request.clean_transcript else "unclean_transcripts"
+    current_usage = getattr(user, f"usage_{usage_key}", 0)
+    logger.info(f"🔥 Current usage for {usage_key}: {current_usage}")
+    
+    # Basic limits check
+    if current_usage >= 100:  # Basic limit
+        transcript_type = "clean" if request.clean_transcript else "unclean"
+        raise HTTPException(
+            status_code=403,
+            detail=f"Monthly limit reached for {transcript_type} transcripts."
+        )
+    
+    # Get transcript
+    try:
+        logger.info(f"🔥 Attempting to get transcript for {video_id}")
+        transcript_text = get_transcript_youtube_api(
+            video_id, 
+            clean=request.clean_transcript, 
+            format=request.format
+        )
+        logger.info(f"✅ Transcript retrieved, length: {len(transcript_text) if transcript_text else 0}")
+        
+    except HTTPException as http_e:
+        logger.error(f"❌ HTTP Exception: {http_e.detail}")
+        raise  # Re-raise HTTP exceptions as-is
+    except Exception as e:
+        logger.error(f"❌ Transcript download failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to download transcript: {str(e)}"
+        )
+    
+    if not transcript_text:
+        logger.error("❌ Empty transcript returned")
+        raise HTTPException(
+            status_code=404,
+            detail="No transcript found for this video."
+        )
+    
+    # Update usage (simplified)
+    if hasattr(user, 'increment_usage'):
+        user.increment_usage(usage_key)
+        db.commit()
+    
+    processing_time = time.time() - start_time
+    
+    logger.info(f"✅ User {user.username} downloaded {'clean' if request.clean_transcript else 'unclean'} transcript for {video_id}")
+    
+    return {
+        "transcript": transcript_text,
+        "youtube_id": video_id,
+        "clean_transcript": request.clean_transcript,
+        "format": request.format,
+        "processing_time": round(processing_time, 2),
+        "success": True
+    }
 
 @app.post("/download_audio/")
 def download_audio(
@@ -551,6 +787,25 @@ def health():
         }
     }
 
+@app.get("/test_videos")
+def get_test_videos():
+    """Get test video IDs for development and testing"""
+    return {
+        "videos": [
+            {
+                "id": "dQw4w9WgXcQ", 
+                "title": "Rick Astley - Never Gonna Give You Up",
+                "status": "verified_working"
+            },
+            {
+                "id": "jNQXAC9IVRw", 
+                "title": "Me at the zoo",
+                "status": "verified_working"
+            }
+        ],
+        "note": "These videos are guaranteed to work and have captions available"
+    }
+
 if __name__ == "__main__":
     import uvicorn
     print("🔥 Starting server on 0.0.0.0:8000")
@@ -563,8 +818,6 @@ if __name__ == "__main__":
         port=8000, 
         reload=True
     )
-
-
 
 # """
 # YouTube Transcript Downloader API - DOWNLOADS PATH FIXED
