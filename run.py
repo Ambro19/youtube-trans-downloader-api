@@ -159,6 +159,7 @@ def main():
         print(f"💻 On this computer, use:")
         print(f"   http://localhost:8000")
         print("🔥 Make sure both devices are on the same WiFi network!")
+        print("📁 Files will be saved to your Downloads folder automatically!")
         print("="*60 + "\n")
         
         uvicorn.run(
@@ -179,7 +180,6 @@ def main():
 if __name__ == "__main__":
     main()
 
-#================ =====================  =============
 
 # """
 # 🔥 FULLY PATCHED run.py - Fixed for Mobile Connections
@@ -361,4 +361,6 @@ if __name__ == "__main__":
 
 # if __name__ == "__main__":
 #     main()
+
+# #================ =====================  =============
 
