@@ -69,7 +69,7 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 logger.info(f"Environment: {ENVIRONMENT}")
-logger.info("Starting YouTube Transcript Downloader API")
+logger.info("Starting YouTube Content Downloader API")
 logger.info("Environment variables loaded from .env file")
 logger.info("Using SQLite database for development")
 
@@ -78,7 +78,7 @@ initialize_database()
 
 # FastAPI App Configuration
 app = FastAPI(
-    title="YouTube Transcript Downloader API", 
+    title="YouTube Content Downloader API", 
     version="2.4.1",
     description="A SaaS application for downloading YouTube transcripts, audio, and video"
 )
