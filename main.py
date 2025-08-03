@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-YouTube Transcript Downloader API - UNICODE SAFE VERSION
+YouTube Content Downloader API - UNICODE SAFE VERSION
 ========================================================
 Fixed version with proper downloads path to user's Downloads folder
 without any Unicode escape issues.
