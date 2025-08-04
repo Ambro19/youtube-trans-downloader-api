@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 YouTube Content Downloader API - UNICODE SAFE VERSION
 ========================================================
