@@ -45,7 +45,7 @@ def check_dependencies():
     
     try:
         import youtube_transcript_api
-        logger.info("✅ YouTube Transcript API available")
+        logger.info("✅ YouTube Content API available")
     except ImportError:
         missing_deps.append("youtube-transcript-api")
     
@@ -114,7 +114,7 @@ def main():
     try:
         logger.info("🔥 MOBILE-READY STARTUP SEQUENCE")
         logger.info("Environment: development")
-        logger.info("Starting YouTube Transcript Downloader API")
+        logger.info("Starting YouTube Content Downloader API")
         logger.info("Environment variables loaded from .env file")
         logger.info("Using SQLite database for development")
         
