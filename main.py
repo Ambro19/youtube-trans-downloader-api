@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-YouTube Transcript Downloader API - UNICODE SAFE VERSION
+YouTube Content Downloader API - UNICODE SAFE VERSION
 ========================================================
 Fixed version with proper downloads path to user's Downloads folder
 without any Unicode escape issues.
@@ -69,7 +69,7 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 logger.info(f"Environment: {ENVIRONMENT}")
-logger.info("Starting YouTube Transcript Downloader API")
+logger.info("Starting YouTube Content Downloader API")
 logger.info("Environment variables loaded from .env file")
 logger.info("Using SQLite database for development")
 
@@ -78,7 +78,7 @@ initialize_database()
 
 # FastAPI App Configuration
 app = FastAPI(
-    title="YouTube Transcript Downloader API", 
+    title="YouTube Content Downloader API", 
     version="2.4.1",
     description="A SaaS application for downloading YouTube transcripts, audio, and video"
 )
@@ -161,8 +161,9 @@ def generate_unique_filename(base_name: str, extension: str) -> str:
     timestamp = int(time.time())
     return f"{base_name}_{timestamp}_{unique_id}.{extension}"
 
+# 🔥 ENHANCED cleanup function to prevent duplicate files
 def cleanup_old_files():
-    """Clean up files older than 2 hours"""
+    """Clean up files older than 2 hours and remove any duplicate/corrupted files"""
     try:
         current_time = time.time()
         max_age = 2 * 3600  # 2 hours in seconds
@@ -170,11 +171,56 @@ def cleanup_old_files():
         for file_path in DOWNLOADS_DIR.glob("*"):
             if file_path.is_file():
                 file_age = current_time - file_path.stat().st_mtime
+                file_size = file_path.stat().st_size
+                
+                # Remove old files
                 if file_age > max_age:
                     file_path.unlink()
                     logger.info(f"Cleaned up old file: {file_path.name}")
+                    continue
+                
+                # 🔥 NEW: Remove corrupted/tiny files that might be left behind
+                if file_size < 1000:  # Files smaller than 1KB are likely corrupted
+                    logger.info(f"Removing corrupted tiny file: {file_path.name} ({file_size} bytes)")
+                    file_path.unlink()
+                    continue
+                
+                # 🔥 NEW: Remove files with timestamps if clean version exists
+                filename = file_path.name
+                if '_' in filename and filename.count('_') >= 3:
+                    parts = filename.split('_')
+                    # Check if this looks like a timestamped file (ends with timestamp_uuid.ext)
+                    if len(parts) >= 4 and parts[-2].isdigit() and len(parts[-2]) >= 8:
+                        # Create expected clean filename
+                        if filename.startswith(parts[0]) and ('audio' in filename or 'video' in filename):
+                            # For files like: gKNiblHoQ6k_audio_low_1234567890_abc123.mp3
+                            # Create clean name: gKNiblHoQ6k_audio_low.mp3
+                            base_parts = []
+                            for part in parts:
+                                if part.isdigit() and len(part) >= 8:  # timestamp
+                                    break
+                                base_parts.append(part)
+                            
+                            if base_parts:
+                                extension = filename.split('.')[-1]
+                                clean_filename = '_'.join(base_parts) + '.' + extension
+                                clean_file_path = DOWNLOADS_DIR / clean_filename
+                                
+                                if clean_file_path.exists() and clean_file_path != file_path:
+                                    clean_size = clean_file_path.stat().st_size
+                                    timestamp_size = file_path.stat().st_size
+                                    
+                                    # Keep the larger file (more likely to be complete)
+                                    if clean_size >= timestamp_size:
+                                        logger.info(f"Removing duplicate timestamped file: {filename}")
+                                        file_path.unlink()
+                                    else:
+                                        logger.info(f"Timestamped file is larger, removing clean file: {clean_filename}")
+                                        clean_file_path.unlink()
+                        
     except Exception as e:
         logger.warning(f"Error during file cleanup: {e}")
+
 
 # =============================================================================
 # PYDANTIC MODELS
@@ -557,6 +603,10 @@ def download_transcript(
         "success": True
     }
 
+
+# Fixed download endpoints for main.py
+# Replace the existing download_audio and download_video endpoints with these fixed versions
+
 @app.post("/download_audio/")
 def download_audio(
     request: AudioRequest,
@@ -582,60 +632,250 @@ def download_audio(
             detail="Audio download service temporarily unavailable."
         )
     
-    downloads_path = str(DOWNLOADS_DIR)
-    logger.info(f"🔥 Downloading audio to: {downloads_path}")
-    
-    try:
-        audio_file_path = download_audio_with_ytdlp(video_id, request.quality, output_dir=downloads_path)
-        logger.info(f"🔥 Audio download returned: {audio_file_path}")
+    # 🔥 FIX: Use temp directory first, then move to final location
+    import tempfile
+    with tempfile.TemporaryDirectory() as temp_dir:
+        logger.info(f"🔥 Downloading audio to temp directory: {temp_dir}")
         
-    except Exception as e:
-        logger.error(f"Audio download failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Audio download failed: {str(e)}")
-    
-    if not audio_file_path or not os.path.exists(audio_file_path):
-        raise HTTPException(status_code=404, detail="Failed to download audio.")
-    
-    audio_file = Path(audio_file_path)
-    unique_filename = generate_unique_filename(f"{video_id}_audio_{request.quality}", "mp3")
-    final_path = DOWNLOADS_DIR / unique_filename
-    
-    try:
-        if audio_file.samefile(final_path):
-            logger.info("✅ File already in correct location")
-        else:
-            shutil.move(str(audio_file), str(final_path))
-            logger.info(f"✅ File moved to: {final_path}")
-    except Exception as e:
-        logger.error(f"❌ Error moving file: {e}")
         try:
-            shutil.copy2(str(audio_file), str(final_path))
-            if audio_file.exists():
-                audio_file.unlink()
-        except Exception as copy_error:
-            raise HTTPException(status_code=500, detail="Error processing file.")
+            audio_file_path = download_audio_with_ytdlp(video_id, request.quality, output_dir=temp_dir)
+            logger.info(f"🔥 Audio download returned: {audio_file_path}")
+            
+        except Exception as e:
+            logger.error(f"Audio download failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Audio download failed: {str(e)}")
+        
+        if not audio_file_path or not os.path.exists(audio_file_path):
+            raise HTTPException(status_code=404, detail="Failed to download audio.")
+        
+        # 🔥 FIX: Create final filename and move from temp to Downloads
+        temp_file = Path(audio_file_path)
+        file_size = temp_file.stat().st_size
+        
+        # Ensure file is not corrupted
+        if file_size < 1000:  # Less than 1KB is likely corrupted
+            raise HTTPException(status_code=500, detail="Downloaded file appears to be corrupted.")
+        
+        # Create clean final filename (no timestamps for user-facing files)
+        final_filename = f"{video_id}_audio_{request.quality}.mp3"
+        final_path = DOWNLOADS_DIR / final_filename
+        
+        # 🔥 CRITICAL FIX: Remove any existing file first, then copy new file
+        try:
+            if final_path.exists():
+                logger.info(f"🔥 Removing existing file: {final_path}")
+                final_path.unlink()
+            
+            logger.info(f"🔥 Copying completed file from {temp_file} to {final_path}")
+            shutil.copy2(str(temp_file), str(final_path))
+            logger.info(f"✅ File successfully copied to Downloads: {final_path}")
+            
+            # Verify the copied file
+            if not final_path.exists() or final_path.stat().st_size < 1000:
+                raise Exception("Copied file is missing or corrupted")
+                
+        except Exception as e:
+            logger.error(f"❌ Error copying audio to Downloads: {e}")
+            raise HTTPException(status_code=500, detail="Error processing audio file.")
+        
+        processing_time = time.time() - start_time
+        
+        logger.info(f"✅ Audio download complete: {final_path} ({file_size} bytes)")
+        
+        return {
+            "download_url": f"/files/{final_filename}",
+            "direct_download_url": f"/download_file/{final_filename}",
+            "youtube_id": video_id,
+            "quality": request.quality,
+            "file_size": file_size,
+            "file_size_mb": round(file_size / (1024 * 1024), 2),
+            "filename": final_filename,
+            "local_path": str(final_path),
+            "processing_time": round(processing_time, 2),
+            "message": "Audio ready for download",
+            "success": True
+        }
+
+# @app.post("/download_audio/")
+# def download_audio(
+#     request: AudioRequest,
+#     user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db)
+# ):
+#     start_time = time.time()
+#     cleanup_old_files()
     
-    if not final_path.exists():
-        raise HTTPException(status_code=500, detail="File processing failed.")
+#     video_id = extract_youtube_video_id(request.youtube_id)
+#     if not video_id or len(video_id) != 11:
+#         raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
     
-    file_size = final_path.stat().st_size
-    processing_time = time.time() - start_time
+#     if not check_internet_connectivity():
+#         raise HTTPException(
+#             status_code=503,
+#             detail="No internet connection available."
+#         )
     
-    logger.info(f"✅ Audio download complete: {final_path}")
+#     if not check_ytdlp_availability():
+#         raise HTTPException(
+#             status_code=500, 
+#             detail="Audio download service temporarily unavailable."
+#         )
     
-    return {
-        "download_url": f"/files/{unique_filename}",
-        "direct_download_url": f"/download_file/{unique_filename}",
-        "youtube_id": video_id,
-        "quality": request.quality,
-        "file_size": file_size,
-        "file_size_mb": round(file_size / (1024 * 1024), 2),
-        "filename": unique_filename,
-        "local_path": str(final_path),
-        "processing_time": round(processing_time, 2),
-        "message": "Audio ready for download",
-        "success": True
-    }
+#     downloads_path = str(DOWNLOADS_DIR)
+#     logger.info(f"🔥 Downloading audio to: {downloads_path}")
+    
+#     try:
+#         audio_file_path = download_audio_with_ytdlp(video_id, request.quality, output_dir=downloads_path)
+#         logger.info(f"🔥 Audio download returned: {audio_file_path}")
+        
+#     except Exception as e:
+#         logger.error(f"Audio download failed: {e}")
+#         raise HTTPException(status_code=500, detail=f"Audio download failed: {str(e)}")
+    
+#     if not audio_file_path or not os.path.exists(audio_file_path):
+#         raise HTTPException(status_code=404, detail="Failed to download audio.")
+    
+#     audio_file = Path(audio_file_path)
+#     unique_filename = generate_unique_filename(f"{video_id}_audio_{request.quality}", "mp3")
+#     final_path = DOWNLOADS_DIR / unique_filename
+    
+#     try:
+#         if audio_file.samefile(final_path):
+#             logger.info("✅ File already in correct location")
+#         else:
+#             shutil.move(str(audio_file), str(final_path))
+#             logger.info(f"✅ File moved to: {final_path}")
+#     except Exception as e:
+#         logger.error(f"❌ Error moving file: {e}")
+#         try:
+#             shutil.copy2(str(audio_file), str(final_path))
+#             if audio_file.exists():
+#                 audio_file.unlink()
+#         except Exception as copy_error:
+#             raise HTTPException(status_code=500, detail="Error processing file.")
+    
+#     if not final_path.exists():
+#         raise HTTPException(status_code=500, detail="File processing failed.")
+    
+#     file_size = final_path.stat().st_size
+#     processing_time = time.time() - start_time
+    
+#     logger.info(f"✅ Audio download complete: {final_path}")
+    
+#     return {
+#         "download_url": f"/files/{unique_filename}",
+#         "direct_download_url": f"/download_file/{unique_filename}",
+#         "youtube_id": video_id,
+#         "quality": request.quality,
+#         "file_size": file_size,
+#         "file_size_mb": round(file_size / (1024 * 1024), 2),
+#         "filename": unique_filename,
+#         "local_path": str(final_path),
+#         "processing_time": round(processing_time, 2),
+#         "message": "Audio ready for download",
+#         "success": True
+#     }
+
+
+# @app.post("/download_video/")
+# def download_video(
+#     request: VideoRequest,
+#     user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db)
+# ):
+#     start_time = time.time()
+#     cleanup_old_files()
+    
+#     video_id = extract_youtube_video_id(request.youtube_id)
+#     if not video_id or len(video_id) != 11:
+#         raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    
+#     if not check_internet_connectivity():
+#         raise HTTPException(status_code=503, detail="No internet connection available.")
+    
+#     if not check_ytdlp_availability():
+#         raise HTTPException(status_code=500, detail="Video download service unavailable.")
+    
+#     downloads_path = str(DOWNLOADS_DIR)
+#     logger.info(f"🔥 Downloading video to: {downloads_path}")
+    
+#     try:
+#         video_file = download_video_with_ytdlp(video_id, request.quality, output_dir=downloads_path)
+#     except Exception as e:
+#         logger.error(f"Video download failed: {e}")
+#         raise HTTPException(status_code=500, detail="Video download failed.")
+    
+#     if not video_file or not os.path.exists(video_file):
+#         raise HTTPException(status_code=404, detail="Failed to download video.")
+    
+#     original_filename = os.path.basename(video_file)
+#     file_extension = "mp4"
+#     if "." in original_filename:
+#         file_extension = original_filename.split(".")[-1]
+    
+#     unique_filename = generate_unique_filename(f"{video_id}_video_{request.quality}", file_extension)
+#     final_path = DOWNLOADS_DIR / unique_filename
+    
+#     try:
+#         shutil.move(video_file, final_path)
+#         logger.info(f"✅ Video moved to: {final_path}")
+#     except Exception as e:
+#         logger.error(f"❌ Error moving video: {e}")
+#         raise HTTPException(status_code=500, detail="Error processing video.")
+    
+#     file_size = os.path.getsize(final_path)
+#     processing_time = time.time() - start_time
+    
+#     logger.info(f"✅ Video download complete: {final_path}")
+    
+#     return {
+#         "download_url": f"/files/{unique_filename}",
+#         "direct_download_url": f"/download_file/{unique_filename}",
+#         "youtube_id": video_id,
+#         "quality": request.quality,
+#         "file_size": file_size,
+#         "file_size_mb": round(file_size / (1024 * 1024), 2),
+#         "filename": unique_filename,
+#         "local_path": str(final_path),
+#         "processing_time": round(processing_time, 2),
+#         "message": "Video ready for download",
+#         "success": True
+#     }
+
+# @app.get("/download_file/{filename}")
+# async def download_file(filename: str):
+#     file_path = DOWNLOADS_DIR / filename
+    
+#     if not file_path.exists():
+#         raise HTTPException(status_code=404, detail="File not found.")
+    
+#     if filename.endswith('.mp3'):
+#         media_type = 'audio/mpeg'
+#     elif filename.endswith('.mp4'):
+#         media_type = 'video/mp4'
+#     else:
+#         media_type = 'application/octet-stream'
+    
+#     clean_filename = filename
+#     if '_' in filename:
+#         parts = filename.split('_')
+#         if len(parts) >= 4:
+#             video_id = parts[0]
+#             content_type = parts[1]
+#             quality = parts[2]
+#             extension = filename.split('.')[-1]
+#             clean_filename = f"{video_id}_{content_type}_{quality}.{extension}"
+    
+#     return FileResponse(
+#         path=file_path,
+#         media_type=media_type,
+#         filename=clean_filename,
+#         headers={
+#             "Content-Disposition": f"attachment; filename={clean_filename}",
+#             "Cache-Control": "no-cache, no-store, must-revalidate"
+#         }
+#     )
+
 
 @app.post("/download_video/")
 def download_video(
@@ -656,85 +896,75 @@ def download_video(
     if not check_ytdlp_availability():
         raise HTTPException(status_code=500, detail="Video download service unavailable.")
     
-    downloads_path = str(DOWNLOADS_DIR)
-    logger.info(f"🔥 Downloading video to: {downloads_path}")
-    
-    try:
-        video_file = download_video_with_ytdlp(video_id, request.quality, output_dir=downloads_path)
-    except Exception as e:
-        logger.error(f"Video download failed: {e}")
-        raise HTTPException(status_code=500, detail="Video download failed.")
-    
-    if not video_file or not os.path.exists(video_file):
-        raise HTTPException(status_code=404, detail="Failed to download video.")
-    
-    original_filename = os.path.basename(video_file)
-    file_extension = "mp4"
-    if "." in original_filename:
-        file_extension = original_filename.split(".")[-1]
-    
-    unique_filename = generate_unique_filename(f"{video_id}_video_{request.quality}", file_extension)
-    final_path = DOWNLOADS_DIR / unique_filename
-    
-    try:
-        shutil.move(video_file, final_path)
-        logger.info(f"✅ Video moved to: {final_path}")
-    except Exception as e:
-        logger.error(f"❌ Error moving video: {e}")
-        raise HTTPException(status_code=500, detail="Error processing video.")
-    
-    file_size = os.path.getsize(final_path)
-    processing_time = time.time() - start_time
-    
-    logger.info(f"✅ Video download complete: {final_path}")
-    
-    return {
-        "download_url": f"/files/{unique_filename}",
-        "direct_download_url": f"/download_file/{unique_filename}",
-        "youtube_id": video_id,
-        "quality": request.quality,
-        "file_size": file_size,
-        "file_size_mb": round(file_size / (1024 * 1024), 2),
-        "filename": unique_filename,
-        "local_path": str(final_path),
-        "processing_time": round(processing_time, 2),
-        "message": "Video ready for download",
-        "success": True
-    }
-
-@app.get("/download_file/{filename}")
-async def download_file(filename: str):
-    file_path = DOWNLOADS_DIR / filename
-    
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="File not found.")
-    
-    if filename.endswith('.mp3'):
-        media_type = 'audio/mpeg'
-    elif filename.endswith('.mp4'):
-        media_type = 'video/mp4'
-    else:
-        media_type = 'application/octet-stream'
-    
-    clean_filename = filename
-    if '_' in filename:
-        parts = filename.split('_')
-        if len(parts) >= 4:
-            video_id = parts[0]
-            content_type = parts[1]
-            quality = parts[2]
-            extension = filename.split('.')[-1]
-            clean_filename = f"{video_id}_{content_type}_{quality}.{extension}"
-    
-    return FileResponse(
-        path=file_path,
-        media_type=media_type,
-        filename=clean_filename,
-        headers={
-            "Content-Disposition": f"attachment; filename={clean_filename}",
-            "Cache-Control": "no-cache, no-store, must-revalidate"
+    # 🔥 FIX: Use temp directory first, then move to Downloads
+    import tempfile
+    with tempfile.TemporaryDirectory() as temp_dir:
+        logger.info(f"🔥 Downloading video to temp directory: {temp_dir}")
+        
+        try:
+            video_file_path = download_video_with_ytdlp(video_id, request.quality, output_dir=temp_dir)
+            logger.info(f"🔥 Video download returned: {video_file_path}")
+        except Exception as e:
+            logger.error(f"Video download failed: {e}")
+            raise HTTPException(status_code=500, detail="Video download failed.")
+        
+        if not video_file_path or not os.path.exists(video_file_path):
+            raise HTTPException(status_code=404, detail="Failed to download video.")
+        
+        # 🔥 FIX: Create final filename and move from temp to Downloads
+        temp_file = Path(video_file_path)
+        file_size = temp_file.stat().st_size
+        
+        # Ensure file is not corrupted
+        if file_size < 10000:  # Less than 10KB is likely corrupted for video
+            raise HTTPException(status_code=500, detail="Downloaded video appears to be corrupted.")
+        
+        # Determine file extension from the actual downloaded file
+        original_filename = os.path.basename(video_file_path)
+        file_extension = "mp4"  # default
+        if "." in original_filename:
+            file_extension = original_filename.split(".")[-1]
+        
+        # Create clean final filename (no timestamps for user-facing files)
+        final_filename = f"{video_id}_video_{request.quality}.{file_extension}"
+        final_path = DOWNLOADS_DIR / final_filename
+        
+        # 🔥 CRITICAL FIX: Remove any existing file first, then copy new file
+        try:
+            if final_path.exists():
+                logger.info(f"🔥 Removing existing file: {final_path}")
+                final_path.unlink()
+            
+            logger.info(f"🔥 Copying completed file from {temp_file} to {final_path}")
+            shutil.copy2(str(temp_file), str(final_path))
+            logger.info(f"✅ File successfully copied to Downloads: {final_path}")
+            
+            # Verify the copied file
+            if not final_path.exists() or final_path.stat().st_size < 10000:
+                raise Exception("Copied file is missing or corrupted")
+                
+        except Exception as e:
+            logger.error(f"❌ Error copying video to Downloads: {e}")
+            raise HTTPException(status_code=500, detail="Error processing video file.")
+        
+        processing_time = time.time() - start_time
+        
+        logger.info(f"✅ Video download complete: {final_path} ({file_size} bytes)")
+        
+        return {
+            "download_url": f"/files/{final_filename}",
+            "direct_download_url": f"/download_file/{final_filename}",
+            "youtube_id": video_id,
+            "quality": request.quality,
+            "file_size": file_size,
+            "file_size_mb": round(file_size / (1024 * 1024), 2),
+            "filename": final_filename,
+            "local_path": str(final_path),
+            "processing_time": round(processing_time, 2),
+            "message": "Video ready for download",
+            "success": True
         }
-    )
+
 
 @app.get("/subscription_status/")
 def get_subscription_status(current_user: User = Depends(get_current_user)):
@@ -818,6 +1048,7 @@ if __name__ == "__main__":
         port=8000, 
         reload=True
     )
+
 
 # """
 # YouTube Transcript Downloader API - DOWNLOADS PATH FIXED
