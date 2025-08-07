@@ -391,10 +391,11 @@ def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir
         logger.error(f"❌ Audio download error: {e}")
         raise
 
-# 🔥 FIXED VIDEO DOWNLOAD FUNCTION - WITH AUDIO
+# 🔥 FIXED VIDEO DOWNLOAD FUNCTION - WITH AUDIO (SIMPLIFIED FORMAT SELECTION)
 def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: str = None) -> Optional[str]:
     """
     🔥 FIXED: Download video from YouTube using yt-dlp - WITH AUDIO PRESERVED
+    🔥 SIMPLIFIED: More flexible format selection that works with all videos
     """
     if output_dir is None:
         output_dir = str(DEFAULT_DOWNLOADS_DIR)
@@ -410,28 +411,39 @@ def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: 
         logger.info(f"🔥 Output dir: {output_dir}")
         logger.info(f"🔥 Quality: {quality}")
         
-        # 🔥 CRITICAL FIX: Enhanced format selection that PRESERVES AUDIO
-        format_settings = {
-            '1080p': 'best[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]+bestaudio/best[height<=1080]',
-            '720p': 'best[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]+bestaudio/best[height<=720]',
-            '480p': 'best[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]+bestaudio/best[height<=480]',
-            '360p': 'best[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/best[height<=360]+bestaudio/best[height<=360]'
+        # 🔥 SIMPLIFIED: More flexible format selection with multiple fallbacks
+        quality_map = {
+            '1080p': '1080',
+            '720p': '720', 
+            '480p': '480',
+            '360p': '360'
         }
         
-        format_selector = format_settings.get(quality, format_settings['720p'])
+        height_limit = quality_map.get(quality, '720')
+        
+        # 🔥 MUCH SIMPLER: Progressive fallbacks that work with most videos
+        format_options = [
+            f"best[height<={height_limit}]",  # Best quality up to specified height
+            f"worst[height>={height_limit}]", # Fallback: worst quality at least that height
+            "best[height<=720]",              # Fallback: 720p max
+            "best[height<=480]",              # Fallback: 480p max
+            "best",                           # Final fallback: best available
+        ]
+        
+        format_selector = "/".join(format_options)
         
         # Use predictable output filename
         output_template = f"{video_id}_video_{quality}.%(ext)s"
         
-        # 🔥 ENHANCED COMMAND: Ensures audio is preserved
+        # 🔥 SIMPLIFIED COMMAND: Focus on reliability over specificity
         cmd = [
             "yt-dlp",
             "--no-playlist",
             "--output", output_template,
-            "--format", format_selector,  # 🔥 FIX: Use enhanced format selector
+            "--format", format_selector,     # 🔥 FIX: Use simplified format selector
             "--merge-output-format", "mp4",  # Prefer mp4 for compatibility
-            "--embed-metadata",  # 🔥 ADD: Embed metadata like title
-            "--add-metadata",    # 🔥 ADD: Add metadata to file
+            "--embed-metadata",              # 🔥 ADD: Embed metadata like title
+            "--add-metadata",                # 🔥 ADD: Add metadata to file
             "--no-warnings",
             url
         ]
@@ -452,6 +464,50 @@ def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: 
             logger.info(f"🔥 yt-dlp stdout: {result.stdout}")
         if result.stderr:
             logger.info(f"🔥 yt-dlp stderr: {result.stderr}")
+        
+        # 🔥 NEW: If download failed, try to get available formats for debugging
+        if result.returncode != 0:
+            logger.warning(f"⚠️ Video download failed, checking available formats...")
+            try:
+                formats_cmd = [
+                    "yt-dlp", "--list-formats", "--no-warnings", url
+                ]
+                formats_result = subprocess.run(
+                    formats_cmd, capture_output=True, text=True, timeout=30, check=False
+                )
+                if formats_result.stdout:
+                    logger.info(f"🔥 Available formats for {video_id}:")
+                    logger.info(formats_result.stdout[:1000])  # Log first 1000 chars
+                    
+                    # 🔥 Try one more time with just "best" format
+                    logger.info(f"🔥 Attempting fallback download with 'best' format...")
+                    fallback_cmd = [
+                        "yt-dlp",
+                        "--no-playlist", 
+                        "--output", output_template,
+                        "--format", "best",
+                        "--no-warnings",
+                        url
+                    ]
+                    
+                    fallback_result = subprocess.run(
+                        fallback_cmd, 
+                        capture_output=True, 
+                        text=True, 
+                        timeout=300,
+                        cwd=output_dir,
+                        check=False
+                    )
+                    
+                    logger.info(f"🔥 Fallback exit code: {fallback_result.returncode}")
+                    if fallback_result.stdout:
+                        logger.info(f"🔥 Fallback stdout: {fallback_result.stdout}")
+                    
+                    # Update result to the fallback result
+                    result = fallback_result
+                    
+            except Exception as debug_e:
+                logger.warning(f"Could not get format debug info: {debug_e}")
         
         # 🔥 FIX: Find the actual downloaded file
         output_path = Path(output_dir)
