@@ -1098,6 +1098,40 @@ def health():
         }
     }
 
+# 🔥 NEW: Direct file download endpoint
+@app.get("/download_file/{filename}")
+def download_file_direct(filename: str, current_user: User = Depends(get_current_user)):
+    """Direct file download endpoint for downloaded files"""
+    try:
+        file_path = DOWNLOADS_DIR / filename
+        
+        if not file_path.exists():
+            logger.error(f"❌ File not found: {file_path}")
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        if not file_path.is_file():
+            logger.error(f"❌ Path is not a file: {file_path}")
+            raise HTTPException(status_code=404, detail="Invalid file path")
+        
+        # Security check: ensure file is in downloads directory
+        if not str(file_path.resolve()).startswith(str(DOWNLOADS_DIR.resolve())):
+            logger.error(f"❌ Security violation: {file_path}")
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        logger.info(f"🔥 Serving file: {filename} ({file_path.stat().st_size} bytes)")
+        
+        return FileResponse(
+            path=str(file_path),
+            filename=filename,
+            media_type='application/octet-stream'
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error serving file {filename}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
 @app.get("/test_videos")
 def get_test_videos():
     """Get test video IDs for development and testing"""
@@ -1106,15 +1140,38 @@ def get_test_videos():
             {
                 "id": "dQw4w9WgXcQ", 
                 "title": "Rick Astley - Never Gonna Give You Up",
-                "status": "verified_working"
+                "status": "verified_working",
+                "supports": ["transcript", "audio", "video"],
+                "note": "Perfect for testing all features"
             },
             {
                 "id": "jNQXAC9IVRw", 
                 "title": "Me at the zoo",
-                "status": "verified_working"
+                "status": "verified_working",
+                "supports": ["transcript", "audio", "video"],
+                "note": "First YouTube video ever - works for all features"
+            },
+            {
+                "id": "9bZkp7q19f0",
+                "title": "PSY - GANGNAM STYLE",
+                "status": "verified_working", 
+                "supports": ["transcript", "audio", "video"],
+                "note": "Popular video with multiple quality options"
+            },
+            {
+                "id": "L_jWHffIx5E",
+                "title": "Smash Mouth - All Star",
+                "status": "verified_working",
+                "supports": ["transcript", "audio", "video"], 
+                "note": "Another reliable test video"
             }
         ],
-        "note": "These videos are guaranteed to work and have captions available"
+        "recommendations": {
+            "for_video_testing": ["dQw4w9WgXcQ", "jNQXAC9IVRw", "9bZkp7q19f0", "L_jWHffIx5E"],
+            "for_audio_testing": ["dQw4w9WgXcQ", "jNQXAC9IVRw", "9bZkp7q19f0"],
+            "for_transcript_testing": ["dQw4w9WgXcQ", "jNQXAC9IVRw", "9bZkp7q19f0"]
+        },
+        "note": "All these videos work for all features - use any for comprehensive testing"
     }
 
 if __name__ == "__main__":
@@ -1129,6 +1186,1141 @@ if __name__ == "__main__":
         port=8000, 
         reload=True
     )
+
+
+
+#============================================
+# """
+# 2. YouTube Content Downloader API - FIXED VERSION
+# ==============================================
+# 🔥 FIXES:
+# - ✅ Usage tracking now works properly (updates counters)
+# - ✅ Video downloads now include audio
+# - ✅ Proper video metadata and titles
+# - ✅ Following transcript download success pattern
+# - ✅ Enhanced download success responses
+# """
+
+# from pathlib import Path
+# from youtube_transcript_api import YouTubeTranscriptApi
+
+# from fastapi import FastAPI, HTTPException, Depends, status
+# from fastapi.middleware.cors import CORSMiddleware
+# from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+# from fastapi.responses import FileResponse
+# from fastapi.staticfiles import StaticFiles
+# from sqlalchemy.orm import Session
+# from datetime import datetime, timedelta
+# from typing import Optional
+# import os
+# import jwt
+# from jwt.exceptions import PyJWTError
+# from pydantic import BaseModel
+# from passlib.context import CryptContext
+# import logging
+# from dotenv import load_dotenv
+# import re
+# import subprocess
+# import json
+# import time
+# import stripe
+# import tempfile
+# import asyncio
+# import shutil
+# import uuid
+# import socket
+
+# # Import our models
+# from models import User, TranscriptDownload, get_db, engine, SessionLocal, initialize_database, create_download_record_safe
+# from transcript_utils import (
+#     get_transcript_with_ytdlp,
+#     download_audio_with_ytdlp,
+#     download_video_with_ytdlp,
+#     check_ytdlp_availability,
+#     get_video_info
+# )
+
+# # Load environment variables
+# load_dotenv()
+
+# # =============================================================================
+# # CONFIGURATION
+# # =============================================================================
+
+# # Stripe Configuration
+# stripe_secret_key = os.getenv("STRIPE_SECRET_KEY")
+# if stripe_secret_key:
+#     stripe.api_key = stripe_secret_key
+#     print("✅ Stripe configured successfully")
+# else:
+#     print("⚠️ Warning: STRIPE_SECRET_KEY not found in environment variables")
+
+# # Logging Configuration
+# logging.basicConfig(level=logging.INFO)
+# logger = logging.getLogger("youtube_trans_downloader.main")
+
+# # Environment Configuration
+# ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+# FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+# logger.info(f"Environment: {ENVIRONMENT}")
+# logger.info("Starting YouTube Content Downloader API")
+# logger.info("Environment variables loaded from .env file")
+# logger.info("Using SQLite database for development")
+
+# # Initialize database
+# initialize_database()
+
+# # FastAPI App Configuration
+# app = FastAPI(
+#     title="YouTube Content Downloader API", 
+#     version="2.5.0",
+#     description="A SaaS application for downloading YouTube transcripts, audio, and video"
+# )
+
+# # DOWNLOADS DIRECTORY SETUP - UNICODE SAFE
+# try:
+#     # Get user's home directory
+#     home_dir = Path.home()
+#     downloads_dir = home_dir / "Downloads"
+#     downloads_dir.mkdir(exist_ok=True)
+#     DOWNLOADS_DIR = downloads_dir
+    
+#     # Test write access
+#     test_file = DOWNLOADS_DIR / "test_write.tmp"
+#     test_file.write_text("test")
+#     test_file.unlink()
+    
+#     logger.info("🔥 Using user Downloads folder")
+#     logger.info(f"🔥 Path: {str(DOWNLOADS_DIR)}")
+    
+# except Exception as e:
+#     logger.warning(f"Cannot use Downloads folder: {e}")
+#     # Fallback to local directory
+#     DOWNLOADS_DIR = Path("downloads")
+#     DOWNLOADS_DIR.mkdir(exist_ok=True)
+#     logger.info(f"🔥 Using fallback directory: {str(DOWNLOADS_DIR)}")
+
+# # Mount static files
+# app.mount("/files", StaticFiles(directory=str(DOWNLOADS_DIR)), name="files")
+
+# # CORS Configuration
+# allowed_origins = [
+#     "http://localhost:3000", 
+#     "http://127.0.0.1:3000", 
+#     "http://192.168.1.185:3000",
+#     FRONTEND_URL
+# ] if ENVIRONMENT != "production" else [
+#     "https://youtube-trans-downloader-api.onrender.com", 
+#     FRONTEND_URL
+# ]
+
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=allowed_origins, 
+#     allow_credentials=True,
+#     allow_methods=["*"], 
+#     allow_headers=["*"],
+# )
+
+# # Security Configuration
+# SECRET_KEY = os.getenv("SECRET_KEY", "devsecret")
+# ALGORITHM = "HS256"
+# ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
+# oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+# pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# # =============================================================================
+# # 🔥 FIXED USAGE TRACKING FUNCTIONS
+# # =============================================================================
+
+# def increment_user_usage(db: Session, user: User, usage_type: str):
+#     """
+#     🔥 FIXED: Properly increment user usage and commit to database
+#     """
+#     try:
+#         logger.info(f"🔥 Incrementing usage for user {user.username}: {usage_type}")
+        
+#         # Get current usage
+#         current_usage = getattr(user, f"usage_{usage_type}", 0) or 0
+#         new_usage = current_usage + 1
+        
+#         # Set new usage
+#         setattr(user, f"usage_{usage_type}", new_usage)
+        
+#         # Update usage reset date if needed
+#         current_date = datetime.utcnow()
+#         if not hasattr(user, 'usage_reset_date') or user.usage_reset_date is None:
+#             user.usage_reset_date = current_date
+#         elif user.usage_reset_date.month != current_date.month:
+#             # Reset monthly usage
+#             user.usage_clean_transcripts = 0
+#             user.usage_unclean_transcripts = 0
+#             user.usage_audio_downloads = 0
+#             user.usage_video_downloads = 0
+#             user.usage_reset_date = current_date
+            
+#             # Set the new usage for this type
+#             setattr(user, f"usage_{usage_type}", 1)
+#             new_usage = 1
+        
+#         # Commit to database
+#         db.commit()
+#         db.refresh(user)
+        
+#         logger.info(f"✅ Usage updated: {usage_type} = {new_usage}")
+#         return new_usage
+        
+#     except Exception as e:
+#         logger.error(f"❌ Error incrementing usage: {e}")
+#         db.rollback()
+#         return current_usage
+
+# def check_usage_limit(user: User, usage_type: str) -> tuple[bool, int, int]:
+#     """
+#     🔥 FIXED: Check if user has reached usage limit
+#     Returns: (can_use, current_usage, limit)
+#     """
+#     try:
+#         # Get subscription tier
+#         tier = getattr(user, 'subscription_tier', 'free')
+        
+#         # Define limits
+#         limits = {
+#             'free': {
+#                 'clean_transcripts': 5,
+#                 'unclean_transcripts': 3,
+#                 'audio_downloads': 2,
+#                 'video_downloads': 1
+#             },
+#             'pro': {
+#                 'clean_transcripts': 100,
+#                 'unclean_transcripts': 50,
+#                 'audio_downloads': 50,
+#                 'video_downloads': 20
+#             },
+#             'premium': {
+#                 'clean_transcripts': float('inf'),
+#                 'unclean_transcripts': float('inf'),
+#                 'audio_downloads': float('inf'),
+#                 'video_downloads': float('inf')
+#             }
+#         }
+        
+#         current_usage = getattr(user, f"usage_{usage_type}", 0) or 0
+#         limit = limits.get(tier, limits['free']).get(usage_type, 0)
+        
+#         can_use = current_usage < limit
+        
+#         logger.info(f"🔥 Usage check: {usage_type} = {current_usage}/{limit}, can_use = {can_use}")
+        
+#         return can_use, current_usage, limit
+        
+#     except Exception as e:
+#         logger.error(f"❌ Error checking usage limit: {e}")
+#         return False, 0, 0
+
+# # =============================================================================
+# # UTILITY FUNCTIONS
+# # =============================================================================
+
+# def check_internet_connectivity():
+#     """Check if we can reach the internet"""
+#     try:
+#         socket.create_connection(("8.8.8.8", 53), timeout=3)
+#         return True
+#     except OSError:
+#         return False
+
+# def check_youtube_connectivity():
+#     """Check if we can reach YouTube specifically"""
+#     try:
+#         socket.create_connection(("www.youtube.com", 443), timeout=5)
+#         return True
+#     except OSError:
+#         return False
+
+# def generate_unique_filename(base_name: str, extension: str) -> str:
+#     """Generate a unique filename to avoid conflicts"""
+#     unique_id = str(uuid.uuid4())[:8]
+#     timestamp = int(time.time())
+#     return f"{base_name}_{timestamp}_{unique_id}.{extension}"
+
+# def find_working_audio_file(video_id: str, quality: str) -> Optional[Path]:
+#     """Find any existing working audio file for this video/quality combination"""
+#     try:
+#         patterns = [
+#             f"{video_id}_audio_{quality}.mp3",
+#             f"{video_id}_audio_{quality}.m4a",
+#             f"{video_id}_audio_{quality}*.mp3",
+#             f"{video_id}_audio_{quality}*.m4a",
+#             f"{video_id}*audio*{quality}*.mp3",
+#             f"{video_id}*audio*.mp3",
+#         ]
+        
+#         for pattern in patterns:
+#             files = list(DOWNLOADS_DIR.glob(pattern))
+#             for file_path in files:
+#                 if file_path.is_file():
+#                     file_size = file_path.stat().st_size
+#                     if file_size > 100000:  # 100KB minimum
+#                         logger.info(f"🔥 Found working audio file: {file_path.name} ({file_size} bytes)")
+#                         return file_path
+        
+#         return None
+        
+#     except Exception as e:
+#         logger.error(f"Error finding working audio file: {e}")
+#         return None
+
+# def find_working_video_file(video_id: str, quality: str) -> Optional[Path]:
+#     """Find any existing working video file for this video/quality combination"""
+#     try:
+#         patterns = [
+#             f"{video_id}_video_{quality}.mp4",
+#             f"{video_id}_video_{quality}.webm",
+#             f"{video_id}_video_{quality}*.mp4",
+#             f"{video_id}_video_{quality}*.webm",
+#             f"{video_id}*video*{quality}*.*",
+#             f"{video_id}*video*.*",
+#         ]
+        
+#         for pattern in patterns:
+#             files = list(DOWNLOADS_DIR.glob(pattern))
+#             for file_path in files:
+#                 if file_path.is_file():
+#                     file_size = file_path.stat().st_size
+#                     if file_size > 1000000:  # 1MB minimum
+#                         logger.info(f"🔥 Found working video file: {file_path.name} ({file_size} bytes)")
+#                         return file_path
+        
+#         return None
+        
+#     except Exception as e:
+#         logger.error(f"Error finding working video file: {e}")
+#         return None
+
+# def cleanup_existing_files(video_id: str, file_type: str, quality: str):
+#     """Remove any existing corrupted or conflicting files"""
+#     try:
+#         if file_type == "audio":
+#             patterns = [
+#                 f"{video_id}_audio_{quality}*",
+#                 f"{video_id}*audio*{quality}*",
+#             ]
+#         else:  # video
+#             patterns = [
+#                 f"{video_id}_video_{quality}*",
+#                 f"{video_id}*video*{quality}*",
+#             ]
+        
+#         for pattern in patterns:
+#             for file_path in DOWNLOADS_DIR.glob(pattern):
+#                 if file_path.is_file():
+#                     file_size = file_path.stat().st_size
+                    
+#                     is_corrupted = (file_type == "audio" and file_size < 100000) or (file_type == "video" and file_size < 1000000)
+#                     has_windows_rename = "(" in file_path.name and ")" in file_path.name
+                    
+#                     if is_corrupted or has_windows_rename:
+#                         try:
+#                             logger.info(f"🔥 Removing {'corrupted' if is_corrupted else 'renamed'} file: {file_path.name}")
+#                             file_path.unlink()
+#                         except Exception as e:
+#                             logger.warning(f"Could not remove {file_path.name}: {e}")
+                            
+#     except Exception as e:
+#         logger.warning(f"Error during cleanup: {e}")
+
+# def cleanup_old_files():
+#     """Enhanced cleanup that prevents all duplicate issues"""
+#     try:
+#         current_time = time.time()
+#         max_age = 2 * 3600  # 2 hours
+        
+#         for file_path in DOWNLOADS_DIR.glob("*"):
+#             if file_path.is_file():
+#                 filename = file_path.name
+#                 file_size = file_path.stat().st_size
+#                 file_age = current_time - file_path.stat().st_mtime
+                
+#                 # Remove old files
+#                 if file_age > max_age:
+#                     try:
+#                         file_path.unlink()
+#                         logger.info(f"Cleaned up old file: {filename}")
+#                         continue
+#                     except:
+#                         pass
+                
+#                 # Remove Windows duplicate files
+#                 if "(" in filename and ")" in filename:
+#                     try:
+#                         file_path.unlink()
+#                         logger.info(f"Removed Windows duplicate: {filename}")
+#                         continue
+#                     except:
+#                         pass
+                
+#                 # Remove tiny corrupted files
+#                 min_size = 100000 if "audio" in filename else 1000000
+#                 if file_size < min_size and ("audio" in filename or "video" in filename):
+#                     try:
+#                         file_path.unlink()
+#                         logger.info(f"Removed corrupted file: {filename} ({file_size} bytes)")
+#                     except:
+#                         pass
+                        
+#     except Exception as e:
+#         logger.warning(f"Error during cleanup: {e}")
+
+# # =============================================================================
+# # PYDANTIC MODELS
+# # =============================================================================
+
+# class UserCreate(BaseModel):
+#     username: str
+#     email: str
+#     password: str
+
+# class UserResponse(BaseModel):
+#     id: int
+#     username: str = None
+#     email: str
+#     created_at: Optional[datetime] = None
+    
+#     class Config:
+#         from_attributes = True
+
+# class Token(BaseModel):
+#     access_token: str
+#     token_type: str
+
+# class TranscriptRequest(BaseModel):
+#     youtube_id: str
+#     clean_transcript: bool = True
+#     format: Optional[str] = None
+
+# class AudioRequest(BaseModel):
+#     youtube_id: str
+#     quality: str = "medium"
+
+# class VideoRequest(BaseModel):
+#     youtube_id: str
+#     quality: str = "720p"
+
+# # =============================================================================
+# # HELPER FUNCTIONS
+# # =============================================================================
+
+# def get_user(db: Session, username: str) -> Optional[User]:
+#     return db.query(User).filter(User.username == username).first()
+
+# def verify_password(plain_password: str, hashed_password: str) -> bool:
+#     return pwd_context.verify(plain_password, hashed_password)
+
+# def get_password_hash(password: str) -> str:
+#     return pwd_context.hash(password)
+
+# def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+#     to_encode = data.copy()
+#     expire = datetime.utcnow() + (expires_delta if expires_delta else timedelta(minutes=15))
+#     to_encode.update({"exp": expire})
+#     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+# def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+#     credentials_exception = HTTPException(
+#         status_code=status.HTTP_401_UNAUTHORIZED, 
+#         detail="Could not validate credentials",
+#         headers={"WWW-Authenticate": "Bearer"},
+#     )
+#     try:
+#         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+#         username: str = payload.get("sub")
+#         if username is None:
+#             raise credentials_exception
+#     except PyJWTError:
+#         raise credentials_exception
+    
+#     user = get_user(db, username)
+#     if user is None:
+#         raise credentials_exception
+#     return user
+
+# def extract_youtube_video_id(youtube_id_or_url: str) -> str:
+#     patterns = [
+#         r'(?:youtube\.com\/watch\?v=)([^&\n?#]+)',
+#         r'(?:youtu\.be\/)([^&\n?#]+)',
+#         r'(?:youtube\.com\/embed\/)([^&\n?#]+)',
+#         r'(?:youtube\.com\/shorts\/)([^&\n?#]+)',
+#         r'[?&]v=([^&\n?#]+)'
+#     ]
+#     for pattern in patterns:
+#         match = re.search(pattern, youtube_id_or_url)
+#         if match:
+#             return match.group(1)[:11]
+#     return youtube_id_or_url.strip()[:11]
+
+# def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Optional[str] = None) -> str:
+#     """Get transcript using YouTube Transcript API"""
+#     logger.info(f"🔥 Getting transcript for {video_id}, clean={clean}, format={format}")
+    
+#     if not check_internet_connectivity():
+#         logger.error("❌ No internet connectivity")
+#         raise HTTPException(
+#             status_code=503, 
+#             detail="No internet connection available. Please check your network connection."
+#         )
+    
+#     if not check_youtube_connectivity():
+#         logger.error("❌ Cannot reach YouTube")
+#         raise HTTPException(
+#             status_code=503, 
+#             detail="Cannot reach YouTube servers. Please try again later."
+#         )
+    
+#     try:
+#         logger.info(f"🔥 Attempting to get transcript via YouTube API for {video_id}")
+#         transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+#         logger.info(f"✅ Got transcript with {len(transcript)} segments")
+        
+#         if clean:
+#             logger.info("🔥 Processing clean transcript")
+#             text = " ".join([seg['text'].replace('\n', ' ') for seg in transcript])
+#             clean_text = " ".join(text.split())
+            
+#             words = clean_text.split()
+#             paragraphs = []
+#             current_paragraph = []
+#             char_count = 0
+            
+#             for word in words:
+#                 current_paragraph.append(word)
+#                 char_count += len(word) + 1
+                
+#                 if char_count > 400 and word.endswith(('.', '!', '?')):
+#                     paragraphs.append(' '.join(current_paragraph))
+#                     current_paragraph = []
+#                     char_count = 0
+            
+#             if current_paragraph:
+#                 paragraphs.append(' '.join(current_paragraph))
+            
+#             result = '\n\n'.join(paragraphs)
+#             logger.info(f"✅ Clean transcript processed, length: {len(result)}")
+#             return result
+#         else:
+#             logger.info(f"🔥 Processing unclean transcript with format: {format}")
+#             if format == "srt":
+#                 result = segments_to_srt(transcript)
+#             elif format == "vtt":
+#                 result = segments_to_vtt(transcript)
+#             else:
+#                 lines = []
+#                 for seg in transcript:
+#                     t = int(seg['start'])
+#                     timestamp = f"[{t//60:02d}:{t%60:02d}]"
+#                     text_clean = seg['text'].replace('\n', ' ')
+#                     lines.append(f"{timestamp} {text_clean}")
+#                 result = "\n".join(lines)
+            
+#             logger.info(f"✅ Unclean transcript processed, length: {len(result)}")
+#             return result
+                
+#     except Exception as e:
+#         logger.error(f"❌ YouTube Transcript API failed: {e}")
+        
+#         try:
+#             logger.info("🔄 Trying yt-dlp fallback")
+#             if hasattr('transcript_utils', 'get_transcript_with_ytdlp'):
+#                 fallback = get_transcript_with_ytdlp(video_id, clean=clean)
+#                 if fallback:
+#                     logger.info(f"✅ yt-dlp fallback succeeded, length: {len(fallback)}")
+#                     return fallback
+#         except Exception as fallback_error:
+#             logger.error(f"❌ yt-dlp fallback failed: {fallback_error}")
+        
+#         logger.error(f"❌ No transcript found for video {video_id}")
+#         if "No transcripts were found" in str(e) or "TranscriptsDisabled" in str(e):
+#             raise HTTPException(
+#                 status_code=404,
+#                 detail="This video does not have captions/transcripts available."
+#             )
+#         else:
+#             raise HTTPException(
+#                 status_code=404,
+#                 detail="No transcript/captions found for this video. The video may not have captions available."
+#             )
+
+# def segments_to_vtt(transcript) -> str:
+#     """Convert transcript segments to WebVTT format"""
+#     def sec_to_vtt(ts):
+#         h = int(ts // 3600)
+#         m = int((ts % 3600) // 60)
+#         s = int(ts % 60)
+#         ms = int((ts - int(ts)) * 1000)
+#         return f"{h:02}:{m:02}:{s:02}.{ms:03}"
+    
+#     lines = ["WEBVTT", "Kind: captions", "Language: en", ""]
+    
+#     for seg in transcript:
+#         start = sec_to_vtt(seg["start"])
+#         end = sec_to_vtt(seg.get("start", 0) + seg.get("duration", 0))
+#         text = seg["text"].replace("\n", " ").strip()
+        
+#         lines.append(f"{start} --> {end}")
+#         lines.append(text)
+#         lines.append("")
+    
+#     return "\n".join(lines)
+
+# def segments_to_srt(transcript) -> str:
+#     """Convert transcript segments to SRT format"""
+#     def sec_to_srt(ts):
+#         h = int(ts // 3600)
+#         m = int((ts % 3600) // 60)
+#         s = int(ts % 60)
+#         ms = int((ts - int(ts)) * 1000)
+#         return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+#     lines = []
+#     for idx, seg in enumerate(transcript):
+#         start = sec_to_srt(seg["start"])
+#         end = sec_to_srt(seg.get("start", 0) + seg.get("duration", 0))
+#         text = seg["text"].replace("\n", " ").strip()
+        
+#         lines.append(f"{idx+1}")
+#         lines.append(f"{start} --> {end}")
+#         lines.append(text)
+#         lines.append("")
+    
+#     return "\n".join(lines)
+
+# # =============================================================================
+# # FASTAPI ENDPOINTS
+# # =============================================================================
+
+# @app.on_event("startup")
+# async def startup():
+#     initialize_database()
+#     cleanup_old_files()
+
+# @app.get("/")
+# def root():
+#     return {
+#         "message": "YouTube Content Downloader API", 
+#         "status": "running", 
+#         "version": "2.5.0",
+#         "features": ["transcripts", "audio", "video", "downloads"],
+#         "downloads_path": str(DOWNLOADS_DIR)
+#     }
+
+# @app.post("/register")
+# def register(user: UserCreate, db: Session = Depends(get_db)):
+#     if db.query(User).filter(User.username == user.username).first():
+#         raise HTTPException(status_code=400, detail="Username already exists.")
+    
+#     if db.query(User).filter(User.email == user.email).first():
+#         raise HTTPException(status_code=400, detail="Email already exists.")
+    
+#     user_obj = User(
+#         username=user.username,
+#         email=user.email,
+#         hashed_password=get_password_hash(user.password),
+#         created_at=datetime.utcnow()
+#     )
+#     db.add(user_obj)
+#     db.commit()
+#     db.refresh(user_obj)
+    
+#     logger.info(f"New user registered: {user.username} ({user.email})")
+#     return {"message": "User registered successfully."}
+
+# @app.post("/token")
+# def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+#     user = db.query(User).filter(User.username == form_data.username).first()
+#     if not user or not verify_password(form_data.password, user.hashed_password):
+#         raise HTTPException(status_code=401, detail="Incorrect username or password")
+    
+#     access_token = create_access_token(
+#         data={"sub": user.username},
+#         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+#     )
+    
+#     logger.info(f"User logged in: {user.username}")
+#     return {"access_token": access_token, "token_type": "bearer"}
+
+# @app.get("/users/me", response_model=UserResponse)
+# def read_users_me(current_user: User = Depends(get_current_user)):
+#     return current_user
+
+# @app.post("/download_transcript/")
+# def download_transcript(
+#     request: TranscriptRequest,
+#     user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db)
+# ):
+#     """Download YouTube transcript - FIXED VERSION"""
+#     start_time = time.time()
+    
+#     logger.info(f"🔥 Transcript request: {request.youtube_id}, clean: {request.clean_transcript}")
+    
+#     video_id = extract_youtube_video_id(request.youtube_id)
+#     logger.info(f"🔥 Extracted video ID: {video_id}")
+    
+#     if not video_id or len(video_id) != 11:
+#         logger.error(f"❌ Invalid video ID: {video_id}")
+#         raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    
+#     if not check_internet_connectivity():
+#         logger.error("❌ No internet connectivity")
+#         raise HTTPException(
+#             status_code=503,
+#             detail="No internet connection available. Please check your network connection."
+#         )
+    
+#     logger.info("✅ Internet connectivity OK")
+    
+#     # 🔥 FIXED: Check usage limits properly
+#     usage_key = "clean_transcripts" if request.clean_transcript else "unclean_transcripts"
+#     can_use, current_usage, limit = check_usage_limit(user, usage_key)
+    
+#     if not can_use:
+#         transcript_type = "clean" if request.clean_transcript else "unclean"
+#         raise HTTPException(
+#             status_code=403,
+#             detail=f"Monthly limit reached for {transcript_type} transcripts ({current_usage}/{limit})."
+#         )
+    
+#     # Get transcript
+#     try:
+#         logger.info(f"🔥 Attempting to get transcript for {video_id}")
+#         transcript_text = get_transcript_youtube_api(
+#             video_id, 
+#             clean=request.clean_transcript, 
+#             format=request.format
+#         )
+#         logger.info(f"✅ Transcript retrieved, length: {len(transcript_text) if transcript_text else 0}")
+        
+#     except HTTPException as http_e:
+#         logger.error(f"❌ HTTP Exception: {http_e.detail}")
+#         raise
+#     except Exception as e:
+#         logger.error(f"❌ Transcript download failed: {e}")
+#         raise HTTPException(
+#             status_code=500,
+#             detail=f"Failed to download transcript: {str(e)}"
+#         )
+    
+#     if not transcript_text:
+#         logger.error("❌ Empty transcript returned")
+#         raise HTTPException(
+#             status_code=404,
+#             detail="No transcript found for this video."
+#         )
+    
+#     # 🔥 FIXED: Update usage properly
+#     new_usage = increment_user_usage(db, user, usage_key)
+    
+#     processing_time = time.time() - start_time
+    
+#     logger.info(f"✅ User {user.username} downloaded {'clean' if request.clean_transcript else 'unclean'} transcript for {video_id}")
+    
+#     return {
+#         "transcript": transcript_text,
+#         "youtube_id": video_id,
+#         "clean_transcript": request.clean_transcript,
+#         "format": request.format,
+#         "processing_time": round(processing_time, 2),
+#         "success": True,
+#         "usage_updated": new_usage,
+#         "usage_type": usage_key
+#     }
+
+# @app.post("/download_audio/")
+# def download_audio(
+#     request: AudioRequest,
+#     user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db)
+# ):
+#     """🔥 FIXED: Audio download with proper usage tracking and success handling"""
+#     start_time = time.time()
+    
+#     video_id = extract_youtube_video_id(request.youtube_id)
+#     if not video_id or len(video_id) != 11:
+#         raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    
+#     if not check_internet_connectivity():
+#         raise HTTPException(status_code=503, detail="No internet connection available.")
+    
+#     if not check_ytdlp_availability():
+#         raise HTTPException(status_code=500, detail="Audio download service temporarily unavailable.")
+    
+#     # 🔥 FIXED: Check usage limits properly
+#     can_use, current_usage, limit = check_usage_limit(user, "audio_downloads")
+    
+#     if not can_use:
+#         raise HTTPException(
+#             status_code=403,
+#             detail=f"Monthly limit reached for audio downloads ({current_usage}/{limit})."
+#         )
+    
+#     # Get video info for title display
+#     video_info = None
+#     try:
+#         video_info = get_video_info(video_id)
+#         logger.info(f"🔥 Got video info: {video_info.get('title', 'Unknown') if video_info else 'Failed to get info'}")
+#     except Exception as e:
+#         logger.warning(f"Could not get video info: {e}")
+    
+#     # Define expected filename
+#     final_filename = f"{video_id}_audio_{request.quality}.mp3"
+#     final_path = DOWNLOADS_DIR / final_filename
+    
+#     # Check if a working file already exists
+#     existing_working_file = find_working_audio_file(video_id, request.quality)
+    
+#     if existing_working_file:
+#         logger.info(f"🔥 Found existing working file: {existing_working_file}")
+#         file_size = existing_working_file.stat().st_size
+        
+#         # If the existing file is not in the expected location, copy it there
+#         if existing_working_file != final_path:
+#             logger.info(f"🔥 Moving existing working file to standard location")
+#             try:
+#                 if final_path.exists():
+#                     final_path.unlink()
+                
+#                 shutil.copy2(str(existing_working_file), str(final_path))
+                
+#                 if existing_working_file != final_path:
+#                     existing_working_file.unlink()
+                    
+#                 logger.info(f"✅ Moved working file to: {final_path}")
+#             except Exception as e:
+#                 logger.error(f"Error moving file: {e}")
+#                 final_path = existing_working_file
+#                 final_filename = existing_working_file.name
+        
+#         # 🔥 FIXED: Update usage for existing file too
+#         new_usage = increment_user_usage(db, user, "audio_downloads")
+        
+#         processing_time = time.time() - start_time
+        
+#         return {
+#             "download_url": f"/files/{final_filename}",
+#             "direct_download_url": f"/download_file/{final_filename}",
+#             "youtube_id": video_id,
+#             "quality": request.quality,
+#             "file_size": file_size,
+#             "file_size_mb": round(file_size / (1024 * 1024), 2),
+#             "filename": final_filename,
+#             "local_path": str(final_path),
+#             "processing_time": round(processing_time, 2),
+#             "message": "Audio ready for download (existing file)",
+#             "success": True,
+#             "title": video_info.get('title', 'Unknown Title') if video_info else 'Unknown Title',
+#             "uploader": video_info.get('uploader', 'Unknown') if video_info else 'Unknown',
+#             "duration": video_info.get('duration', 0) if video_info else 0,
+#             "usage_updated": new_usage,
+#             "usage_type": "audio_downloads"
+#         }
+    
+#     # No working file exists, so download a new one
+#     logger.info(f"🔥 No working file found, downloading new audio for {video_id}")
+    
+#     cleanup_existing_files(video_id, "audio", request.quality)
+    
+#     # Download to temp directory first
+#     with tempfile.TemporaryDirectory() as temp_dir:
+#         try:
+#             logger.info(f"🔥 Downloading to temp: {temp_dir}")
+            
+#             audio_file_path = download_audio_with_ytdlp(video_id, request.quality, output_dir=temp_dir)
+            
+#             if not audio_file_path or not os.path.exists(audio_file_path):
+#                 raise HTTPException(status_code=404, detail="Failed to download audio.")
+            
+#             temp_file = Path(audio_file_path)
+#             file_size = temp_file.stat().st_size
+            
+#             if file_size < 1000:
+#                 raise HTTPException(status_code=500, detail="Downloaded file appears to be corrupted.")
+            
+#             logger.info(f"🔥 Moving completed download to: {final_path}")
+#             shutil.copy2(str(temp_file), str(final_path))
+            
+#             if not final_path.exists() or final_path.stat().st_size != file_size:
+#                 raise HTTPException(status_code=500, detail="File copy verification failed.")
+            
+#             logger.info(f"✅ Audio download successful: {final_path} ({file_size} bytes)")
+            
+#         except Exception as e:
+#             logger.error(f"❌ Download failed: {e}")
+#             raise HTTPException(status_code=500, detail=f"Audio download failed: {str(e)}")
+    
+#     # 🔥 FIXED: Update usage after successful download
+#     new_usage = increment_user_usage(db, user, "audio_downloads")
+    
+#     processing_time = time.time() - start_time
+    
+#     return {
+#         "download_url": f"/files/{final_filename}",
+#         "direct_download_url": f"/download_file/{final_filename}",
+#         "youtube_id": video_id,
+#         "quality": request.quality,
+#         "file_size": file_size,
+#         "file_size_mb": round(file_size / (1024 * 1024), 2),
+#         "filename": final_filename,
+#         "local_path": str(final_path),
+#         "processing_time": round(processing_time, 2),
+#         "message": "Audio ready for download",
+#         "success": True,
+#         "title": video_info.get('title', 'Unknown Title') if video_info else 'Unknown Title',
+#         "uploader": video_info.get('uploader', 'Unknown') if video_info else 'Unknown',
+#         "duration": video_info.get('duration', 0) if video_info else 0,
+#         "usage_updated": new_usage,
+#         "usage_type": "audio_downloads"
+#     }
+
+# @app.post("/download_video/")
+# def download_video(
+#     request: VideoRequest,
+#     user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db)
+# ):
+#     """🔥 FIXED: Video download with proper usage tracking and audio preservation"""
+#     start_time = time.time()
+    
+#     video_id = extract_youtube_video_id(request.youtube_id)
+#     if not video_id or len(video_id) != 11:
+#         raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    
+#     if not check_internet_connectivity():
+#         raise HTTPException(status_code=503, detail="No internet connection available.")
+    
+#     if not check_ytdlp_availability():
+#         raise HTTPException(status_code=500, detail="Video download service unavailable.")
+    
+#     # 🔥 FIXED: Check usage limits properly
+#     can_use, current_usage, limit = check_usage_limit(user, "video_downloads")
+    
+#     if not can_use:
+#         raise HTTPException(
+#             status_code=403,
+#             detail=f"Monthly limit reached for video downloads ({current_usage}/{limit})."
+#         )
+    
+#     # Get video info for title display
+#     video_info = None
+#     try:
+#         video_info = get_video_info(video_id)
+#         logger.info(f"🔥 Got video info: {video_info.get('title', 'Unknown') if video_info else 'Failed to get info'}")
+#     except Exception as e:
+#         logger.warning(f"Could not get video info: {e}")
+    
+#     # Define expected filename
+#     final_filename = f"{video_id}_video_{request.quality}.mp4"
+#     final_path = DOWNLOADS_DIR / final_filename
+    
+#     # Check if a working file already exists
+#     existing_working_file = find_working_video_file(video_id, request.quality)
+    
+#     if existing_working_file:
+#         logger.info(f"🔥 Found existing working file: {existing_working_file}")
+#         file_size = existing_working_file.stat().st_size
+        
+#         # If the existing file is not in the expected location, copy it there
+#         if existing_working_file != final_path:
+#             logger.info(f"🔥 Moving existing working file to standard location")
+#             try:
+#                 if final_path.exists():
+#                     final_path.unlink()
+                
+#                 shutil.copy2(str(existing_working_file), str(final_path))
+                
+#                 if existing_working_file != final_path:
+#                     existing_working_file.unlink()
+                    
+#                 logger.info(f"✅ Moved working file to: {final_path}")
+#             except Exception as e:
+#                 logger.error(f"Error moving file: {e}")
+#                 final_path = existing_working_file
+#                 final_filename = existing_working_file.name
+        
+#         # 🔥 FIXED: Update usage for existing file too
+#         new_usage = increment_user_usage(db, user, "video_downloads")
+        
+#         processing_time = time.time() - start_time
+        
+#         return {
+#             "download_url": f"/files/{final_filename}",
+#             "direct_download_url": f"/download_file/{final_filename}",
+#             "youtube_id": video_id,
+#             "quality": request.quality,
+#             "file_size": file_size,
+#             "file_size_mb": round(file_size / (1024 * 1024), 2),
+#             "filename": final_filename,
+#             "local_path": str(final_path),
+#             "processing_time": round(processing_time, 2),
+#             "message": "Video ready for download (existing file)",
+#             "success": True,
+#             "title": video_info.get('title', 'Unknown Title') if video_info else 'Unknown Title',
+#             "uploader": video_info.get('uploader', 'Unknown') if video_info else 'Unknown',
+#             "duration": video_info.get('duration', 0) if video_info else 0,
+#             "usage_updated": new_usage,
+#             "usage_type": "video_downloads"
+#         }
+    
+#     # No working file exists, so download a new one
+#     logger.info(f"🔥 No working file found, downloading new video for {video_id}")
+    
+#     cleanup_existing_files(video_id, "video", request.quality)
+    
+#     # Download to temp directory first
+#     with tempfile.TemporaryDirectory() as temp_dir:
+#         try:
+#             logger.info(f"🔥 Downloading to temp: {temp_dir}")
+            
+#             video_file_path = download_video_with_ytdlp(video_id, request.quality, output_dir=temp_dir)
+            
+#             if not video_file_path or not os.path.exists(video_file_path):
+#                 raise HTTPException(status_code=404, detail="Failed to download video.")
+            
+#             temp_file = Path(video_file_path)
+#             file_size = temp_file.stat().st_size
+            
+#             if file_size < 10000:
+#                 raise HTTPException(status_code=500, detail="Downloaded video appears to be corrupted.")
+            
+#             # Determine extension from downloaded file
+#             original_ext = temp_file.suffix
+#             if original_ext:
+#                 final_filename = f"{video_id}_video_{request.quality}{original_ext}"
+#                 final_path = DOWNLOADS_DIR / final_filename
+            
+#             logger.info(f"🔥 Moving completed download to: {final_path}")
+#             shutil.copy2(str(temp_file), str(final_path))
+            
+#             if not final_path.exists() or final_path.stat().st_size != file_size:
+#                 raise HTTPException(status_code=500, detail="File copy verification failed.")
+            
+#             logger.info(f"✅ Video download successful: {final_path} ({file_size} bytes)")
+            
+#         except Exception as e:
+#             logger.error(f"❌ Download failed: {e}")
+#             raise HTTPException(status_code=500, detail=f"Video download failed: {str(e)}")
+    
+#     # 🔥 FIXED: Update usage after successful download
+#     new_usage = increment_user_usage(db, user, "video_downloads")
+    
+#     processing_time = time.time() - start_time
+    
+#     return {
+#         "download_url": f"/files/{final_filename}",
+#         "direct_download_url": f"/download_file/{final_filename}",
+#         "youtube_id": video_id,
+#         "quality": request.quality,
+#         "file_size": file_size,
+#         "file_size_mb": round(file_size / (1024 * 1024), 2),
+#         "filename": final_filename,
+#         "local_path": str(final_path),
+#         "processing_time": round(processing_time, 2),
+#         "message": "Video ready for download",
+#         "success": True,
+#         "title": video_info.get('title', 'Unknown Title') if video_info else 'Unknown Title',
+#         "uploader": video_info.get('uploader', 'Unknown') if video_info else 'Unknown',
+#         "duration": video_info.get('duration', 0) if video_info else 0,
+#         "usage_updated": new_usage,
+#         "usage_type": "video_downloads"
+#     }
+
+# @app.get("/subscription_status/")
+# def get_subscription_status(current_user: User = Depends(get_current_user)):
+#     """🔥 FIXED: Get subscription status with proper usage data"""
+#     try:
+#         tier = getattr(current_user, 'subscription_tier', 'free')
+        
+#         # 🔥 FIXED: Get actual usage from database
+#         usage = {
+#             "clean_transcripts": getattr(current_user, "usage_clean_transcripts", 0) or 0,
+#             "unclean_transcripts": getattr(current_user, "usage_unclean_transcripts", 0) or 0,
+#             "audio_downloads": getattr(current_user, "usage_audio_downloads", 0) or 0,
+#             "video_downloads": getattr(current_user, "usage_video_downloads", 0) or 0
+#         }
+        
+#         SUBSCRIPTION_LIMITS = {
+#             "free": {"clean_transcripts": 5, "unclean_transcripts": 3, "audio_downloads": 2, "video_downloads": 1},
+#             "pro": {"clean_transcripts": 100, "unclean_transcripts": 50, "audio_downloads": 50, "video_downloads": 20},
+#             "premium": {"clean_transcripts": float('inf'), "unclean_transcripts": float('inf'), "audio_downloads": float('inf'), "video_downloads": float('inf')}
+#         }
+        
+#         limits = SUBSCRIPTION_LIMITS.get(tier, SUBSCRIPTION_LIMITS["free"])
+#         json_limits = {k: ('unlimited' if v == float('inf') else v) for k, v in limits.items()}
+        
+#         logger.info(f"🔥 Subscription status for {current_user.username}: tier={tier}, usage={usage}")
+        
+#         return {
+#             "tier": tier,
+#             "status": "active" if tier != "free" else "inactive",
+#             "usage": usage,
+#             "limits": json_limits,
+#             "downloads_folder": str(DOWNLOADS_DIR)
+#         }
+        
+#     except Exception as e:
+#         logger.error(f"Error getting subscription status: {e}")
+#         return {
+#             "tier": "free",
+#             "status": "inactive",
+#             "usage": {"clean_transcripts": 0, "unclean_transcripts": 0, "audio_downloads": 0, "video_downloads": 0},
+#             "limits": {"clean_transcripts": 5, "unclean_transcripts": 3, "audio_downloads": 2, "video_downloads": 1},
+#             "downloads_folder": str(DOWNLOADS_DIR)
+#         }
+
+# @app.get("/health/")
+# def health():
+#     return {
+#         "status": "healthy", 
+#         "timestamp": datetime.utcnow().isoformat(),
+#         "downloads_path": str(DOWNLOADS_DIR),
+#         "connectivity": {
+#             "internet": check_internet_connectivity(),
+#             "youtube": check_youtube_connectivity()
+#         }
+#     }
+
+# @app.get("/test_videos")
+# def get_test_videos():
+#     """Get test video IDs for development and testing"""
+#     return {
+#         "videos": [
+#             {
+#                 "id": "dQw4w9WgXcQ", 
+#                 "title": "Rick Astley - Never Gonna Give You Up",
+#                 "status": "verified_working"
+#             },
+#             {
+#                 "id": "jNQXAC9IVRw", 
+#                 "title": "Me at the zoo",
+#                 "status": "verified_working"
+#             }
+#         ],
+#         "note": "These videos are guaranteed to work and have captions available"
+#     }
+
+# if __name__ == "__main__":
+#     import uvicorn
+#     print("🔥 Starting server on 0.0.0.0:8000")
+#     print("🔥 Mobile access enabled")
+#     print(f"🔥 Downloads folder: {str(DOWNLOADS_DIR)}")
+    
+#     uvicorn.run(
+#         "main:app", 
+#         host="0.0.0.0",
+#         port=8000, 
+#         reload=True
+#     )
 
 
 # """
