@@ -380,10 +380,10 @@ def find_working_audio_file(video_id: str, quality: str) -> Optional[Path]:
 #     except Exception as e:
 #         logger.error(f"Error finding working video file: {e}")
 #         return None
-#======================== Working Video &  audio ============================
-
+#======================== Working Video & audio ============================
 
 # 🔥 FIXED: Enhanced cleanup that removes ALL old versions
+
 def cleanup_existing_files(video_id: str, file_type: str, quality: str):
     """Remove any existing files for this video/quality to prevent duplicates"""
     try:
@@ -419,6 +419,44 @@ def cleanup_existing_files(video_id: str, file_type: str, quality: str):
                             
     except Exception as e:
         logger.warning(f"Error during cleanup: {e}")
+
+
+# # 🔥 FIXED: Enhanced cleanup that removes ALL old versions
+# def cleanup_existing_files(video_id: str, file_type: str, quality: str):
+#     """Remove any existing files for this video/quality to prevent duplicates"""
+#     try:
+#         if file_type == "audio":
+#             patterns = [
+#                 f"{video_id}_audio_{quality}*",
+#                 f"{video_id}*audio*{quality}*",
+#                 f"{video_id}*audio*.*",  # Remove any old audio files for this video
+#             ]
+#         else:  # video
+#             patterns = [
+#                 f"{video_id}_video_{quality}*",
+#                 f"{video_id}*video*{quality}*", 
+#                 f"{video_id}*video*.*",  # Remove any old video files for this video
+#             ]
+        
+#         removed_count = 0
+#         for pattern in patterns:
+#             for file_path in DOWNLOADS_DIR.glob(pattern):
+#                 if file_path.is_file():
+#                     try:
+#                         file_size = file_path.stat().st_size
+#                         logger.info(f"🔥 Removing old file: {file_path.name} ({file_size} bytes)")
+#                         file_path.unlink()
+#                         removed_count += 1
+#                     except Exception as e:
+#                         logger.warning(f"Could not remove {file_path.name}: {e}")
+        
+#         if removed_count > 0:
+#             logger.info(f"🔥 Cleaned up {removed_count} old files for {video_id}")
+#         else:
+#             logger.info(f"🔥 No old files found to clean up for {video_id}")
+                            
+#     except Exception as e:
+#         logger.warning(f"Error during cleanup: {e}")
 
 # 🔥 FIXED: Enhanced cleanup with age-based and duplicate removal
 def cleanup_old_files():
@@ -810,6 +848,18 @@ def segments_to_srt(transcript) -> str:
     
     return "\n".join(lines)
 
+# 🔥 NEW: Helper function to update file timestamp to current time
+def update_file_timestamp(file_path: Path):
+    """Update file modification time to current time so it appears in 'Today' section"""
+    try:
+        current_time = time.time()
+        os.utime(str(file_path), (current_time, current_time))
+        logger.info(f"🔥 Updated timestamp for: {file_path.name}")
+    except Exception as e:
+        logger.warning(f"Could not update timestamp for {file_path.name}: {e}")
+
+
+
 # =============================================================================
 # FASTAPI ENDPOINTS
 # =============================================================================
@@ -952,14 +1002,14 @@ def download_transcript(
     }
 
 #==========================================
-# 🔥 UPDATED: Modified video download endpoint with better file management
+# 🔥 UPDATED: Modified video download endpoint with timestamp fix
 @app.post("/download_video/")
 def download_video(
     request: VideoRequest,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """🔥 FIXED: Video download with proper file management (no duplicates)"""
+    """🔥 FIXED: Video download with proper file management and timestamp update"""
     start_time = time.time()
     
     video_id = extract_youtube_video_id(request.youtube_id)
@@ -1008,13 +1058,17 @@ def download_video(
         if existing_working_file != final_path:
             logger.info(f"🔥 Moving existing file to standard location")
             try:
-                shutil.copy2(str(existing_working_file), str(final_path))
+                # 🔥 FIXED: Use shutil.copy() instead of copy2() to not preserve old timestamps
+                shutil.copy(str(existing_working_file), str(final_path))
                 existing_working_file.unlink()  # Remove the old file
                 logger.info(f"✅ Moved working file to: {final_path}")
             except Exception as e:
                 logger.error(f"Error moving file: {e}")
                 final_path = existing_working_file
                 final_filename = existing_working_file.name
+        
+        # 🔥 NEW: Update timestamp to current time so it appears in "Today"
+        update_file_timestamp(final_path)
         
         # 🔥 FIXED: Update usage for existing file too
         new_usage = increment_user_usage(db, user, "video_downloads")
@@ -1040,7 +1094,7 @@ def download_video(
             "usage_type": "video_downloads"
         }
     
-    # 🔥 FIXED: Download to final location directly (no temp directory needed)
+    # 🔥 FIXED: Download to final location directly
     logger.info(f"🔥 No existing file found, downloading new video for {video_id}")
     
     try:
@@ -1064,12 +1118,16 @@ def download_video(
                 if final_path.exists():
                     final_path.unlink()  # Remove any conflicting file
                 
+                # 🔥 FIXED: Use move instead of copy to avoid timestamp issues
                 downloaded_file.rename(final_path)
                 logger.info(f"✅ File renamed to: {final_path}")
             except Exception as e:
                 logger.warning(f"Could not rename file: {e}, using original name")
                 final_path = downloaded_file
                 final_filename = downloaded_file.name
+        
+        # 🔥 NEW: Update timestamp to current time so it appears in "Today"
+        update_file_timestamp(final_path)
         
         logger.info(f"✅ Video download successful: {final_path} ({file_size} bytes)")
         
@@ -1101,14 +1159,14 @@ def download_video(
         "usage_type": "video_downloads"
     }
 
-# 🔥 UPDATED: Modified audio download endpoint with same file management
+# 🔥 UPDATED: Modified audio download endpoint with timestamp fix
 @app.post("/download_audio/")
 def download_audio(
     request: AudioRequest,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """🔥 FIXED: Audio download with proper file management (no duplicates)"""
+    """🔥 FIXED: Audio download with proper file management and timestamp update"""
     start_time = time.time()
     
     video_id = extract_youtube_video_id(request.youtube_id)
@@ -1157,13 +1215,17 @@ def download_audio(
         if existing_working_file != final_path:
             logger.info(f"🔥 Moving existing file to standard location")
             try:
-                shutil.copy2(str(existing_working_file), str(final_path))
+                # 🔥 FIXED: Use shutil.copy() instead of copy2() to not preserve old timestamps
+                shutil.copy(str(existing_working_file), str(final_path))
                 existing_working_file.unlink()  # Remove the old file
                 logger.info(f"✅ Moved working file to: {final_path}")
             except Exception as e:
                 logger.error(f"Error moving file: {e}")
                 final_path = existing_working_file
                 final_filename = existing_working_file.name
+        
+        # 🔥 NEW: Update timestamp to current time so it appears in "Today"
+        update_file_timestamp(final_path)
         
         # 🔥 FIXED: Update usage for existing file too
         new_usage = increment_user_usage(db, user, "audio_downloads")
@@ -1213,12 +1275,16 @@ def download_audio(
                 if final_path.exists():
                     final_path.unlink()  # Remove any conflicting file
                 
+                # 🔥 FIXED: Use move instead of copy to avoid timestamp issues
                 downloaded_file.rename(final_path)
                 logger.info(f"✅ File renamed to: {final_path}")
             except Exception as e:
                 logger.warning(f"Could not rename file: {e}, using original name")
                 final_path = downloaded_file
                 final_filename = downloaded_file.name
+        
+        # 🔥 NEW: Update timestamp to current time so it appears in "Today"
+        update_file_timestamp(final_path)
         
         logger.info(f"✅ Audio download successful: {final_path} ({file_size} bytes)")
         
@@ -1248,7 +1314,7 @@ def download_audio(
         "duration": video_info.get('duration', 0) if video_info else 0,
         "usage_updated": new_usage,
         "usage_type": "audio_downloads"
-    }
+    } 
 #===================================
 
 #=========================== Protected Audio Download ========================
