@@ -254,53 +254,35 @@ def generate_unique_filename(base_name: str, extension: str) -> str:
     timestamp = int(time.time())
     return f"{base_name}_{timestamp}_{unique_id}.{extension}"
 
-def find_working_audio_file(video_id: str, quality: str) -> Optional[Path]:
-    """Find any existing working audio file for this video/quality combination"""
-    try:
-        patterns = [
-            f"{video_id}_audio_{quality}.mp3",
-            f"{video_id}_audio_{quality}.m4a",
-            f"{video_id}_audio_{quality}*.mp3",
-            f"{video_id}_audio_{quality}*.m4a",
-            f"{video_id}*audio*{quality}*.mp3",
-            f"{video_id}*audio*.mp3",
-        ]
-        
-        for pattern in patterns:
-            files = list(DOWNLOADS_DIR.glob(pattern))
-            for file_path in files:
-                if file_path.is_file():
-                    file_size = file_path.stat().st_size
-                    if file_size > 100000:  # 100KB minimum
-                        logger.info(f"🔥 Found working audio file: {file_path.name} ({file_size} bytes)")
-                        return file_path
-        
-        return None
-        
-    except Exception as e:
-        logger.error(f"Error finding working audio file: {e}")
-        return None
-
+# 🔥 FIXED: Enhanced file finding with Windows rename detection
 def find_working_video_file(video_id: str, quality: str) -> Optional[Path]:
     """Find any existing working video file for this video/quality combination"""
     try:
         patterns = [
             f"{video_id}_video_{quality}.mp4",
-            f"{video_id}_video_{quality}.webm",
-            f"{video_id}_video_{quality}*.mp4",
-            f"{video_id}_video_{quality}*.webm",
-            f"{video_id}*video*{quality}*.*",
-            f"{video_id}*video*.*",
+            f"{video_id}_video_{quality}.webm", 
+            f"{video_id}_video_{quality}*.mp4",      # Includes (1), (2), etc.
+            f"{video_id}_video_{quality}*.webm",     # Includes (1), (2), etc.
+            f"{video_id}*video*{quality}*.mp4",      # Broader search
+            f"{video_id}*video*{quality}*.webm",     # Broader search
+            f"{video_id}*video*.mp4",                # Any video with this ID
+            f"{video_id}*video*.webm",               # Any video with this ID
         ]
         
+        found_files = []
         for pattern in patterns:
             files = list(DOWNLOADS_DIR.glob(pattern))
             for file_path in files:
                 if file_path.is_file():
                     file_size = file_path.stat().st_size
-                    if file_size > 1000000:  # 1MB minimum
-                        logger.info(f"🔥 Found working video file: {file_path.name} ({file_size} bytes)")
-                        return file_path
+                    if file_size > 1000000:  # 1MB minimum for valid video
+                        found_files.append(file_path)
+                        
+        if found_files:
+            # Return the most recent valid file
+            latest_file = max(found_files, key=lambda f: f.stat().st_mtime)
+            logger.info(f"🔥 Found existing video file: {latest_file.name} ({latest_file.stat().st_size} bytes)")
+            return latest_file
         
         return None
         
@@ -308,43 +290,146 @@ def find_working_video_file(video_id: str, quality: str) -> Optional[Path]:
         logger.error(f"Error finding working video file: {e}")
         return None
 
+def find_working_audio_file(video_id: str, quality: str) -> Optional[Path]:
+    """Find any existing working audio file for this video/quality combination"""
+    try:
+        patterns = [
+            f"{video_id}_audio_{quality}.mp3",
+            f"{video_id}_audio_{quality}.m4a",
+            f"{video_id}_audio_{quality}*.mp3",     # Includes (1), (2), etc.
+            f"{video_id}_audio_{quality}*.m4a",     # Includes (1), (2), etc.
+            f"{video_id}*audio*{quality}*.mp3",     # Broader search
+            f"{video_id}*audio*{quality}*.m4a",     # Broader search
+            f"{video_id}*audio*.mp3",               # Any audio with this ID
+            f"{video_id}*audio*.m4a",               # Any audio with this ID
+        ]
+        
+        found_files = []
+        for pattern in patterns:
+            files = list(DOWNLOADS_DIR.glob(pattern))
+            for file_path in files:
+                if file_path.is_file():
+                    file_size = file_path.stat().st_size
+                    if file_size > 100000:  # 100KB minimum for valid audio
+                        found_files.append(file_path)
+                        
+        if found_files:
+            # Return the most recent valid file
+            latest_file = max(found_files, key=lambda f: f.stat().st_mtime)
+            logger.info(f"🔥 Found existing audio file: {latest_file.name} ({latest_file.stat().st_size} bytes)")
+            return latest_file
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error finding working audio file: {e}")
+        return None
+
+
+#========================== Working Video &  audio ==========================
+# def find_working_audio_file(video_id: str, quality: str) -> Optional[Path]:
+#     """Find any existing working audio file for this video/quality combination"""
+#     try:
+#         patterns = [
+#             f"{video_id}_audio_{quality}.mp3",
+#             f"{video_id}_audio_{quality}.m4a",
+#             f"{video_id}_audio_{quality}*.mp3",
+#             f"{video_id}_audio_{quality}*.m4a",
+#             f"{video_id}*audio*{quality}*.mp3",
+#             f"{video_id}*audio*.mp3",
+#         ]
+        
+#         for pattern in patterns:
+#             files = list(DOWNLOADS_DIR.glob(pattern))
+#             for file_path in files:
+#                 if file_path.is_file():
+#                     file_size = file_path.stat().st_size
+#                     if file_size > 100000:  # 100KB minimum
+#                         logger.info(f"🔥 Found working audio file: {file_path.name} ({file_size} bytes)")
+#                         return file_path
+        
+#         return None
+        
+#     except Exception as e:
+#         logger.error(f"Error finding working audio file: {e}")
+#         return None
+
+# def find_working_video_file(video_id: str, quality: str) -> Optional[Path]:
+#     """Find any existing working video file for this video/quality combination"""
+#     try:
+#         patterns = [
+#             f"{video_id}_video_{quality}.mp4",
+#             f"{video_id}_video_{quality}.webm",
+#             f"{video_id}_video_{quality}*.mp4",
+#             f"{video_id}_video_{quality}*.webm",
+#             f"{video_id}*video*{quality}*.*",
+#             f"{video_id}*video*.*",
+#         ]
+        
+#         for pattern in patterns:
+#             files = list(DOWNLOADS_DIR.glob(pattern))
+#             for file_path in files:
+#                 if file_path.is_file():
+#                     file_size = file_path.stat().st_size
+#                     if file_size > 1000000:  # 1MB minimum
+#                         logger.info(f"🔥 Found working video file: {file_path.name} ({file_size} bytes)")
+#                         return file_path
+        
+#         return None
+        
+#     except Exception as e:
+#         logger.error(f"Error finding working video file: {e}")
+#         return None
+#======================== Working Video &  audio ============================
+
+
+# 🔥 FIXED: Enhanced cleanup that removes ALL old versions
 def cleanup_existing_files(video_id: str, file_type: str, quality: str):
-    """Remove any existing corrupted or conflicting files"""
+    """Remove any existing files for this video/quality to prevent duplicates"""
     try:
         if file_type == "audio":
             patterns = [
                 f"{video_id}_audio_{quality}*",
                 f"{video_id}*audio*{quality}*",
+                f"{video_id}*audio*.*",  # Remove any old audio files for this video
             ]
         else:  # video
             patterns = [
                 f"{video_id}_video_{quality}*",
-                f"{video_id}*video*{quality}*",
+                f"{video_id}*video*{quality}*", 
+                f"{video_id}*video*.*",  # Remove any old video files for this video
             ]
         
+        removed_count = 0
         for pattern in patterns:
             for file_path in DOWNLOADS_DIR.glob(pattern):
                 if file_path.is_file():
-                    file_size = file_path.stat().st_size
-                    
-                    is_corrupted = (file_type == "audio" and file_size < 100000) or (file_type == "video" and file_size < 1000000)
-                    has_windows_rename = "(" in file_path.name and ")" in file_path.name
-                    
-                    if is_corrupted or has_windows_rename:
-                        try:
-                            logger.info(f"🔥 Removing {'corrupted' if is_corrupted else 'renamed'} file: {file_path.name}")
-                            file_path.unlink()
-                        except Exception as e:
-                            logger.warning(f"Could not remove {file_path.name}: {e}")
+                    try:
+                        file_size = file_path.stat().st_size
+                        logger.info(f"🔥 Removing old file: {file_path.name} ({file_size} bytes)")
+                        file_path.unlink()
+                        removed_count += 1
+                    except Exception as e:
+                        logger.warning(f"Could not remove {file_path.name}: {e}")
+        
+        if removed_count > 0:
+            logger.info(f"🔥 Cleaned up {removed_count} old files for {video_id}")
+        else:
+            logger.info(f"🔥 No old files found to clean up for {video_id}")
                             
     except Exception as e:
         logger.warning(f"Error during cleanup: {e}")
 
+# 🔥 FIXED: Enhanced cleanup with age-based and duplicate removal
 def cleanup_old_files():
     """Enhanced cleanup that prevents all duplicate issues"""
     try:
         current_time = time.time()
-        max_age = 2 * 3600  # 2 hours
+        max_age = 24 * 3600  # 24 hours (reduced from 2 hours for less aggressive cleanup)
+        
+        # Track files by video ID to remove duplicates
+        video_files = {}  # video_id -> list of files
+        audio_files = {}  # video_id -> list of files
         
         for file_path in DOWNLOADS_DIR.glob("*"):
             if file_path.is_file():
@@ -352,7 +437,7 @@ def cleanup_old_files():
                 file_size = file_path.stat().st_size
                 file_age = current_time - file_path.stat().st_mtime
                 
-                # Remove old files
+                # Remove very old files
                 if file_age > max_age:
                     try:
                         file_path.unlink()
@@ -361,8 +446,8 @@ def cleanup_old_files():
                     except:
                         pass
                 
-                # Remove Windows duplicate files
-                if "(" in filename and ")" in filename:
+                # Remove Windows duplicate files (1), (2), etc. - but keep the original
+                if "(" in filename and ")" in filename and any(ext in filename for ext in ['.mp4', '.mp3', '.m4a', '.webm']):
                     try:
                         file_path.unlink()
                         logger.info(f"Removed Windows duplicate: {filename}")
@@ -372,15 +457,136 @@ def cleanup_old_files():
                 
                 # Remove tiny corrupted files
                 min_size = 100000 if "audio" in filename else 1000000
-                if file_size < min_size and ("audio" in filename or "video" in filename):
+                if file_size < min_size and any(ext in filename for ext in ['.mp4', '.mp3', '.m4a', '.webm']):
                     try:
                         file_path.unlink()
                         logger.info(f"Removed corrupted file: {filename} ({file_size} bytes)")
+                        continue
+                    except:
+                        pass
+                
+                # Track video and audio files by video ID for duplicate detection
+                if "_video_" in filename:
+                    # Extract video ID (first 11 characters before _video_)
+                    video_id = filename.split("_video_")[0]
+                    if video_id not in video_files:
+                        video_files[video_id] = []
+                    video_files[video_id].append(file_path)
+                elif "_audio_" in filename:
+                    # Extract video ID (first 11 characters before _audio_)
+                    video_id = filename.split("_audio_")[0]
+                    if video_id not in audio_files:
+                        audio_files[video_id] = []
+                    audio_files[video_id].append(file_path)
+        
+        # Remove duplicates, keeping only the newest file for each video ID
+        for video_id, files in video_files.items():
+            if len(files) > 1:
+                # Sort by modification time, keep the newest
+                files.sort(key=lambda f: f.stat().st_mtime)
+                files_to_remove = files[:-1]  # Remove all but the newest
+                
+                for file_path in files_to_remove:
+                    try:
+                        logger.info(f"Removing duplicate video: {file_path.name}")
+                        file_path.unlink()
+                    except:
+                        pass
+        
+        for video_id, files in audio_files.items():
+            if len(files) > 1:
+                # Sort by modification time, keep the newest  
+                files.sort(key=lambda f: f.stat().st_mtime)
+                files_to_remove = files[:-1]  # Remove all but the newest
+                
+                for file_path in files_to_remove:
+                    try:
+                        logger.info(f"Removing duplicate audio: {file_path.name}")
+                        file_path.unlink()
                     except:
                         pass
                         
     except Exception as e:
         logger.warning(f"Error during cleanup: {e}")
+
+
+# ========================== Cleanup Existing & Old files =========================
+#
+# def cleanup_existing_files(video_id: str, file_type: str, quality: str):
+#     """Remove any existing corrupted or conflicting files"""
+#     try:
+#         if file_type == "audio":
+#             patterns = [
+#                 f"{video_id}_audio_{quality}*",
+#                 f"{video_id}*audio*{quality}*",
+#             ]
+#         else:  # video
+#             patterns = [
+#                 f"{video_id}_video_{quality}*",
+#                 f"{video_id}*video*{quality}*",
+#             ]
+        
+#         for pattern in patterns:
+#             for file_path in DOWNLOADS_DIR.glob(pattern):
+#                 if file_path.is_file():
+#                     file_size = file_path.stat().st_size
+                    
+#                     is_corrupted = (file_type == "audio" and file_size < 100000) or (file_type == "video" and file_size < 1000000)
+#                     has_windows_rename = "(" in file_path.name and ")" in file_path.name
+                    
+#                     if is_corrupted or has_windows_rename:
+#                         try:
+#                             logger.info(f"🔥 Removing {'corrupted' if is_corrupted else 'renamed'} file: {file_path.name}")
+#                             file_path.unlink()
+#                         except Exception as e:
+#                             logger.warning(f"Could not remove {file_path.name}: {e}")
+                            
+#     except Exception as e:
+#         logger.warning(f"Error during cleanup: {e}")
+
+# def cleanup_old_files():
+#     """Enhanced cleanup that prevents all duplicate issues"""
+#     try:
+#         current_time = time.time()
+#         max_age = 2 * 3600  # 2 hours
+        
+#         for file_path in DOWNLOADS_DIR.glob("*"):
+#             if file_path.is_file():
+#                 filename = file_path.name
+#                 file_size = file_path.stat().st_size
+#                 file_age = current_time - file_path.stat().st_mtime
+                
+#                 # Remove old files
+#                 if file_age > max_age:
+#                     try:
+#                         file_path.unlink()
+#                         logger.info(f"Cleaned up old file: {filename}")
+#                         continue
+#                     except:
+#                         pass
+                
+#                 # Remove Windows duplicate files
+#                 if "(" in filename and ")" in filename:
+#                     try:
+#                         file_path.unlink()
+#                         logger.info(f"Removed Windows duplicate: {filename}")
+#                         continue
+#                     except:
+#                         pass
+                
+#                 # Remove tiny corrupted files
+#                 min_size = 100000 if "audio" in filename else 1000000
+#                 if file_size < min_size and ("audio" in filename or "video" in filename):
+#                     try:
+#                         file_path.unlink()
+#                         logger.info(f"Removed corrupted file: {filename} ({file_size} bytes)")
+#                     except:
+#                         pass
+                        
+#     except Exception as e:
+#         logger.warning(f"Error during cleanup: {e}")
+#
+# =================== Cleanup Existing & Old files =================
 
 # =============================================================================
 # PYDANTIC MODELS
@@ -745,159 +951,15 @@ def download_transcript(
         "usage_type": usage_key
     }
 
-@app.post("/download_audio/")
-def download_audio(
-    request: AudioRequest,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """🔥 FIXED: Audio download with proper usage tracking and success handling"""
-    start_time = time.time()
-    
-    video_id = extract_youtube_video_id(request.youtube_id)
-    if not video_id or len(video_id) != 11:
-        raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
-    
-    if not check_internet_connectivity():
-        raise HTTPException(status_code=503, detail="No internet connection available.")
-    
-    if not check_ytdlp_availability():
-        raise HTTPException(status_code=500, detail="Audio download service temporarily unavailable.")
-    
-    # 🔥 FIXED: Check usage limits properly
-    can_use, current_usage, limit = check_usage_limit(user, "audio_downloads")
-    
-    if not can_use:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Monthly limit reached for audio downloads ({current_usage}/{limit})."
-        )
-    
-    # Get video info for title display
-    video_info = None
-    try:
-        video_info = get_video_info(video_id)
-        logger.info(f"🔥 Got video info: {video_info.get('title', 'Unknown') if video_info else 'Failed to get info'}")
-    except Exception as e:
-        logger.warning(f"Could not get video info: {e}")
-    
-    # Define expected filename
-    final_filename = f"{video_id}_audio_{request.quality}.mp3"
-    final_path = DOWNLOADS_DIR / final_filename
-    
-    # Check if a working file already exists
-    existing_working_file = find_working_audio_file(video_id, request.quality)
-    
-    if existing_working_file:
-        logger.info(f"🔥 Found existing working file: {existing_working_file}")
-        file_size = existing_working_file.stat().st_size
-        
-        # If the existing file is not in the expected location, copy it there
-        if existing_working_file != final_path:
-            logger.info(f"🔥 Moving existing working file to standard location")
-            try:
-                if final_path.exists():
-                    final_path.unlink()
-                
-                shutil.copy2(str(existing_working_file), str(final_path))
-                
-                if existing_working_file != final_path:
-                    existing_working_file.unlink()
-                    
-                logger.info(f"✅ Moved working file to: {final_path}")
-            except Exception as e:
-                logger.error(f"Error moving file: {e}")
-                final_path = existing_working_file
-                final_filename = existing_working_file.name
-        
-        # 🔥 FIXED: Update usage for existing file too
-        new_usage = increment_user_usage(db, user, "audio_downloads")
-        
-        processing_time = time.time() - start_time
-        
-        return {
-            "download_url": f"/files/{final_filename}",
-            "direct_download_url": f"/download_file/{final_filename}",
-            "youtube_id": video_id,
-            "quality": request.quality,
-            "file_size": file_size,
-            "file_size_mb": round(file_size / (1024 * 1024), 2),
-            "filename": final_filename,
-            "local_path": str(final_path),
-            "processing_time": round(processing_time, 2),
-            "message": "Audio ready for download (existing file)",
-            "success": True,
-            "title": video_info.get('title', 'Unknown Title') if video_info else 'Unknown Title',
-            "uploader": video_info.get('uploader', 'Unknown') if video_info else 'Unknown',
-            "duration": video_info.get('duration', 0) if video_info else 0,
-            "usage_updated": new_usage,
-            "usage_type": "audio_downloads"
-        }
-    
-    # No working file exists, so download a new one
-    logger.info(f"🔥 No working file found, downloading new audio for {video_id}")
-    
-    cleanup_existing_files(video_id, "audio", request.quality)
-    
-    # Download to temp directory first
-    with tempfile.TemporaryDirectory() as temp_dir:
-        try:
-            logger.info(f"🔥 Downloading to temp: {temp_dir}")
-            
-            audio_file_path = download_audio_with_ytdlp(video_id, request.quality, output_dir=temp_dir)
-            
-            if not audio_file_path or not os.path.exists(audio_file_path):
-                raise HTTPException(status_code=404, detail="Failed to download audio.")
-            
-            temp_file = Path(audio_file_path)
-            file_size = temp_file.stat().st_size
-            
-            if file_size < 1000:
-                raise HTTPException(status_code=500, detail="Downloaded file appears to be corrupted.")
-            
-            logger.info(f"🔥 Moving completed download to: {final_path}")
-            shutil.copy2(str(temp_file), str(final_path))
-            
-            if not final_path.exists() or final_path.stat().st_size != file_size:
-                raise HTTPException(status_code=500, detail="File copy verification failed.")
-            
-            logger.info(f"✅ Audio download successful: {final_path} ({file_size} bytes)")
-            
-        except Exception as e:
-            logger.error(f"❌ Download failed: {e}")
-            raise HTTPException(status_code=500, detail=f"Audio download failed: {str(e)}")
-    
-    # 🔥 FIXED: Update usage after successful download
-    new_usage = increment_user_usage(db, user, "audio_downloads")
-    
-    processing_time = time.time() - start_time
-    
-    return {
-        "download_url": f"/files/{final_filename}",
-        "direct_download_url": f"/download_file/{final_filename}",
-        "youtube_id": video_id,
-        "quality": request.quality,
-        "file_size": file_size,
-        "file_size_mb": round(file_size / (1024 * 1024), 2),
-        "filename": final_filename,
-        "local_path": str(final_path),
-        "processing_time": round(processing_time, 2),
-        "message": "Audio ready for download",
-        "success": True,
-        "title": video_info.get('title', 'Unknown Title') if video_info else 'Unknown Title',
-        "uploader": video_info.get('uploader', 'Unknown') if video_info else 'Unknown',
-        "duration": video_info.get('duration', 0) if video_info else 0,
-        "usage_updated": new_usage,
-        "usage_type": "audio_downloads"
-    }
-
+#==========================================
+# 🔥 UPDATED: Modified video download endpoint with better file management
 @app.post("/download_video/")
 def download_video(
     request: VideoRequest,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """🔥 FIXED: Video download with proper usage tracking and audio preservation"""
+    """🔥 FIXED: Video download with proper file management (no duplicates)"""
     start_time = time.time()
     
     video_id = extract_youtube_video_id(request.youtube_id)
@@ -931,25 +993,23 @@ def download_video(
     final_filename = f"{video_id}_video_{request.quality}.mp4"
     final_path = DOWNLOADS_DIR / final_filename
     
-    # Check if a working file already exists
+    # 🔥 FIXED: First clean up any existing files to prevent conflicts
+    logger.info(f"🔥 Cleaning up any existing files for {video_id}...")
+    cleanup_existing_files(video_id, "video", request.quality)
+    
+    # 🔥 FIXED: Check if a working file still exists after cleanup
     existing_working_file = find_working_video_file(video_id, request.quality)
     
     if existing_working_file:
-        logger.info(f"🔥 Found existing working file: {existing_working_file}")
+        logger.info(f"🔥 Found existing working file after cleanup: {existing_working_file}")
         file_size = existing_working_file.stat().st_size
         
-        # If the existing file is not in the expected location, copy it there
+        # Move to standard location if needed
         if existing_working_file != final_path:
-            logger.info(f"🔥 Moving existing working file to standard location")
+            logger.info(f"🔥 Moving existing file to standard location")
             try:
-                if final_path.exists():
-                    final_path.unlink()
-                
                 shutil.copy2(str(existing_working_file), str(final_path))
-                
-                if existing_working_file != final_path:
-                    existing_working_file.unlink()
-                    
+                existing_working_file.unlink()  # Remove the old file
                 logger.info(f"✅ Moved working file to: {final_path}")
             except Exception as e:
                 logger.error(f"Error moving file: {e}")
@@ -980,44 +1040,42 @@ def download_video(
             "usage_type": "video_downloads"
         }
     
-    # No working file exists, so download a new one
-    logger.info(f"🔥 No working file found, downloading new video for {video_id}")
+    # 🔥 FIXED: Download to final location directly (no temp directory needed)
+    logger.info(f"🔥 No existing file found, downloading new video for {video_id}")
     
-    cleanup_existing_files(video_id, "video", request.quality)
-    
-    # Download to temp directory first
-    with tempfile.TemporaryDirectory() as temp_dir:
-        try:
-            logger.info(f"🔥 Downloading to temp: {temp_dir}")
-            
-            video_file_path = download_video_with_ytdlp(video_id, request.quality, output_dir=temp_dir)
-            
-            if not video_file_path or not os.path.exists(video_file_path):
-                raise HTTPException(status_code=404, detail="Failed to download video.")
-            
-            temp_file = Path(video_file_path)
-            file_size = temp_file.stat().st_size
-            
-            if file_size < 10000:
-                raise HTTPException(status_code=500, detail="Downloaded video appears to be corrupted.")
-            
-            # Determine extension from downloaded file
-            original_ext = temp_file.suffix
-            if original_ext:
-                final_filename = f"{video_id}_video_{request.quality}{original_ext}"
-                final_path = DOWNLOADS_DIR / final_filename
-            
-            logger.info(f"🔥 Moving completed download to: {final_path}")
-            shutil.copy2(str(temp_file), str(final_path))
-            
-            if not final_path.exists() or final_path.stat().st_size != file_size:
-                raise HTTPException(status_code=500, detail="File copy verification failed.")
-            
-            logger.info(f"✅ Video download successful: {final_path} ({file_size} bytes)")
-            
-        except Exception as e:
-            logger.error(f"❌ Download failed: {e}")
-            raise HTTPException(status_code=500, detail=f"Video download failed: {str(e)}")
+    try:
+        logger.info(f"🔥 Downloading directly to: {DOWNLOADS_DIR}")
+        
+        video_file_path = download_video_with_ytdlp(video_id, request.quality, output_dir=str(DOWNLOADS_DIR))
+        
+        if not video_file_path or not os.path.exists(video_file_path):
+            raise HTTPException(status_code=404, detail="Failed to download video.")
+        
+        downloaded_file = Path(video_file_path)
+        file_size = downloaded_file.stat().st_size
+        
+        if file_size < 10000:
+            raise HTTPException(status_code=500, detail="Downloaded video appears to be corrupted.")
+        
+        # 🔥 FIXED: Ensure consistent naming
+        if downloaded_file != final_path:
+            logger.info(f"🔥 Renaming downloaded file to standard name: {final_filename}")
+            try:
+                if final_path.exists():
+                    final_path.unlink()  # Remove any conflicting file
+                
+                downloaded_file.rename(final_path)
+                logger.info(f"✅ File renamed to: {final_path}")
+            except Exception as e:
+                logger.warning(f"Could not rename file: {e}, using original name")
+                final_path = downloaded_file
+                final_filename = downloaded_file.name
+        
+        logger.info(f"✅ Video download successful: {final_path} ({file_size} bytes)")
+        
+    except Exception as e:
+        logger.error(f"❌ Download failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Video download failed: {str(e)}")
     
     # 🔥 FIXED: Update usage after successful download
     new_usage = increment_user_usage(db, user, "video_downloads")
@@ -1043,6 +1101,461 @@ def download_video(
         "usage_type": "video_downloads"
     }
 
+# 🔥 UPDATED: Modified audio download endpoint with same file management
+@app.post("/download_audio/")
+def download_audio(
+    request: AudioRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """🔥 FIXED: Audio download with proper file management (no duplicates)"""
+    start_time = time.time()
+    
+    video_id = extract_youtube_video_id(request.youtube_id)
+    if not video_id or len(video_id) != 11:
+        raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    
+    if not check_internet_connectivity():
+        raise HTTPException(status_code=503, detail="No internet connection available.")
+    
+    if not check_ytdlp_availability():
+        raise HTTPException(status_code=500, detail="Audio download service temporarily unavailable.")
+    
+    # 🔥 FIXED: Check usage limits properly
+    can_use, current_usage, limit = check_usage_limit(user, "audio_downloads")
+    
+    if not can_use:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Monthly limit reached for audio downloads ({current_usage}/{limit})."
+        )
+    
+    # Get video info for title display
+    video_info = None
+    try:
+        video_info = get_video_info(video_id)
+        logger.info(f"🔥 Got video info: {video_info.get('title', 'Unknown') if video_info else 'Failed to get info'}")
+    except Exception as e:
+        logger.warning(f"Could not get video info: {e}")
+    
+    # Define expected filename
+    final_filename = f"{video_id}_audio_{request.quality}.mp3"
+    final_path = DOWNLOADS_DIR / final_filename
+    
+    # 🔥 FIXED: First clean up any existing files to prevent conflicts
+    logger.info(f"🔥 Cleaning up any existing audio files for {video_id}...")
+    cleanup_existing_files(video_id, "audio", request.quality)
+    
+    # 🔥 FIXED: Check if a working file still exists after cleanup
+    existing_working_file = find_working_audio_file(video_id, request.quality)
+    
+    if existing_working_file:
+        logger.info(f"🔥 Found existing working file after cleanup: {existing_working_file}")
+        file_size = existing_working_file.stat().st_size
+        
+        # Move to standard location if needed
+        if existing_working_file != final_path:
+            logger.info(f"🔥 Moving existing file to standard location")
+            try:
+                shutil.copy2(str(existing_working_file), str(final_path))
+                existing_working_file.unlink()  # Remove the old file
+                logger.info(f"✅ Moved working file to: {final_path}")
+            except Exception as e:
+                logger.error(f"Error moving file: {e}")
+                final_path = existing_working_file
+                final_filename = existing_working_file.name
+        
+        # 🔥 FIXED: Update usage for existing file too
+        new_usage = increment_user_usage(db, user, "audio_downloads")
+        
+        processing_time = time.time() - start_time
+        
+        return {
+            "download_url": f"/files/{final_filename}",
+            "direct_download_url": f"/download_file/{final_filename}",
+            "youtube_id": video_id,
+            "quality": request.quality,
+            "file_size": file_size,
+            "file_size_mb": round(file_size / (1024 * 1024), 2),
+            "filename": final_filename,
+            "local_path": str(final_path),
+            "processing_time": round(processing_time, 2),
+            "message": "Audio ready for download (existing file)",
+            "success": True,
+            "title": video_info.get('title', 'Unknown Title') if video_info else 'Unknown Title',
+            "uploader": video_info.get('uploader', 'Unknown') if video_info else 'Unknown',
+            "duration": video_info.get('duration', 0) if video_info else 0,
+            "usage_updated": new_usage,
+            "usage_type": "audio_downloads"
+        }
+    
+    # 🔥 FIXED: Download to final location directly
+    logger.info(f"🔥 No existing file found, downloading new audio for {video_id}")
+    
+    try:
+        logger.info(f"🔥 Downloading directly to: {DOWNLOADS_DIR}")
+        
+        audio_file_path = download_audio_with_ytdlp(video_id, request.quality, output_dir=str(DOWNLOADS_DIR))
+        
+        if not audio_file_path or not os.path.exists(audio_file_path):
+            raise HTTPException(status_code=404, detail="Failed to download audio.")
+        
+        downloaded_file = Path(audio_file_path)
+        file_size = downloaded_file.stat().st_size
+        
+        if file_size < 1000:
+            raise HTTPException(status_code=500, detail="Downloaded file appears to be corrupted.")
+        
+        # 🔥 FIXED: Ensure consistent naming
+        if downloaded_file != final_path:
+            logger.info(f"🔥 Renaming downloaded file to standard name: {final_filename}")
+            try:
+                if final_path.exists():
+                    final_path.unlink()  # Remove any conflicting file
+                
+                downloaded_file.rename(final_path)
+                logger.info(f"✅ File renamed to: {final_path}")
+            except Exception as e:
+                logger.warning(f"Could not rename file: {e}, using original name")
+                final_path = downloaded_file
+                final_filename = downloaded_file.name
+        
+        logger.info(f"✅ Audio download successful: {final_path} ({file_size} bytes)")
+        
+    except Exception as e:
+        logger.error(f"❌ Download failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Audio download failed: {str(e)}")
+    
+    # 🔥 FIXED: Update usage after successful download
+    new_usage = increment_user_usage(db, user, "audio_downloads")
+    
+    processing_time = time.time() - start_time
+    
+    return {
+        "download_url": f"/files/{final_filename}",
+        "direct_download_url": f"/download_file/{final_filename}",
+        "youtube_id": video_id,
+        "quality": request.quality,
+        "file_size": file_size,
+        "file_size_mb": round(file_size / (1024 * 1024), 2),
+        "filename": final_filename,
+        "local_path": str(final_path),
+        "processing_time": round(processing_time, 2),
+        "message": "Audio ready for download",
+        "success": True,
+        "title": video_info.get('title', 'Unknown Title') if video_info else 'Unknown Title',
+        "uploader": video_info.get('uploader', 'Unknown') if video_info else 'Unknown',
+        "duration": video_info.get('duration', 0) if video_info else 0,
+        "usage_updated": new_usage,
+        "usage_type": "audio_downloads"
+    }
+#===================================
+
+#=========================== Protected Audio Download ========================
+#
+# @app.post("/download_audio/")
+# def download_audio(
+#     request: AudioRequest,
+#     user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db)
+# ):
+#     """🔥 FIXED: Audio download with proper usage tracking and success handling"""
+#     start_time = time.time()
+    
+#     video_id = extract_youtube_video_id(request.youtube_id)
+#     if not video_id or len(video_id) != 11:
+#         raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    
+#     if not check_internet_connectivity():
+#         raise HTTPException(status_code=503, detail="No internet connection available.")
+    
+#     if not check_ytdlp_availability():
+#         raise HTTPException(status_code=500, detail="Audio download service temporarily unavailable.")
+    
+#     # 🔥 FIXED: Check usage limits properly
+#     can_use, current_usage, limit = check_usage_limit(user, "audio_downloads")
+    
+#     if not can_use:
+#         raise HTTPException(
+#             status_code=403,
+#             detail=f"Monthly limit reached for audio downloads ({current_usage}/{limit})."
+#         )
+    
+#     # Get video info for title display
+#     video_info = None
+#     try:
+#         video_info = get_video_info(video_id)
+#         logger.info(f"🔥 Got video info: {video_info.get('title', 'Unknown') if video_info else 'Failed to get info'}")
+#     except Exception as e:
+#         logger.warning(f"Could not get video info: {e}")
+    
+#     # Define expected filename
+#     final_filename = f"{video_id}_audio_{request.quality}.mp3"
+#     final_path = DOWNLOADS_DIR / final_filename
+    
+#     # Check if a working file already exists
+#     existing_working_file = find_working_audio_file(video_id, request.quality)
+    
+#     if existing_working_file:
+#         logger.info(f"🔥 Found existing working file: {existing_working_file}")
+#         file_size = existing_working_file.stat().st_size
+        
+#         # If the existing file is not in the expected location, copy it there
+#         if existing_working_file != final_path:
+#             logger.info(f"🔥 Moving existing working file to standard location")
+#             try:
+#                 if final_path.exists():
+#                     final_path.unlink()
+                
+#                 shutil.copy2(str(existing_working_file), str(final_path))
+                
+#                 if existing_working_file != final_path:
+#                     existing_working_file.unlink()
+                    
+#                 logger.info(f"✅ Moved working file to: {final_path}")
+#             except Exception as e:
+#                 logger.error(f"Error moving file: {e}")
+#                 final_path = existing_working_file
+#                 final_filename = existing_working_file.name
+        
+#         # 🔥 FIXED: Update usage for existing file too
+#         new_usage = increment_user_usage(db, user, "audio_downloads")
+        
+#         processing_time = time.time() - start_time
+        
+#         return {
+#             "download_url": f"/files/{final_filename}",
+#             "direct_download_url": f"/download_file/{final_filename}",
+#             "youtube_id": video_id,
+#             "quality": request.quality,
+#             "file_size": file_size,
+#             "file_size_mb": round(file_size / (1024 * 1024), 2),
+#             "filename": final_filename,
+#             "local_path": str(final_path),
+#             "processing_time": round(processing_time, 2),
+#             "message": "Audio ready for download (existing file)",
+#             "success": True,
+#             "title": video_info.get('title', 'Unknown Title') if video_info else 'Unknown Title',
+#             "uploader": video_info.get('uploader', 'Unknown') if video_info else 'Unknown',
+#             "duration": video_info.get('duration', 0) if video_info else 0,
+#             "usage_updated": new_usage,
+#             "usage_type": "audio_downloads"
+#         }
+    
+#     # No working file exists, so download a new one
+#     logger.info(f"🔥 No working file found, downloading new audio for {video_id}")
+    
+#     cleanup_existing_files(video_id, "audio", request.quality)
+    
+#     # Download to temp directory first
+#     with tempfile.TemporaryDirectory() as temp_dir:
+#         try:
+#             logger.info(f"🔥 Downloading to temp: {temp_dir}")
+            
+#             audio_file_path = download_audio_with_ytdlp(video_id, request.quality, output_dir=temp_dir)
+            
+#             if not audio_file_path or not os.path.exists(audio_file_path):
+#                 raise HTTPException(status_code=404, detail="Failed to download audio.")
+            
+#             temp_file = Path(audio_file_path)
+#             file_size = temp_file.stat().st_size
+            
+#             if file_size < 1000:
+#                 raise HTTPException(status_code=500, detail="Downloaded file appears to be corrupted.")
+            
+#             logger.info(f"🔥 Moving completed download to: {final_path}")
+#             shutil.copy2(str(temp_file), str(final_path))
+            
+#             if not final_path.exists() or final_path.stat().st_size != file_size:
+#                 raise HTTPException(status_code=500, detail="File copy verification failed.")
+            
+#             logger.info(f"✅ Audio download successful: {final_path} ({file_size} bytes)")
+            
+#         except Exception as e:
+#             logger.error(f"❌ Download failed: {e}")
+#             raise HTTPException(status_code=500, detail=f"Audio download failed: {str(e)}")
+    
+#     # 🔥 FIXED: Update usage after successful download
+#     new_usage = increment_user_usage(db, user, "audio_downloads")
+    
+#     processing_time = time.time() - start_time
+    
+#     return {
+#         "download_url": f"/files/{final_filename}",
+#         "direct_download_url": f"/download_file/{final_filename}",
+#         "youtube_id": video_id,
+#         "quality": request.quality,
+#         "file_size": file_size,
+#         "file_size_mb": round(file_size / (1024 * 1024), 2),
+#         "filename": final_filename,
+#         "local_path": str(final_path),
+#         "processing_time": round(processing_time, 2),
+#         "message": "Audio ready for download",
+#         "success": True,
+#         "title": video_info.get('title', 'Unknown Title') if video_info else 'Unknown Title',
+#         "uploader": video_info.get('uploader', 'Unknown') if video_info else 'Unknown',
+#         "duration": video_info.get('duration', 0) if video_info else 0,
+#         "usage_updated": new_usage,
+#         "usage_type": "audio_downloads"
+#     }
+#
+# 
+#=========================== Protected Audio Download =========================
+
+#=========================== Protected Video Download =========================
+#
+# @app.post("/download_video/")
+# def download_video(
+#     request: VideoRequest,
+#     user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db)
+# ):
+#     """🔥 FIXED: Video download with proper usage tracking and audio preservation"""
+#     start_time = time.time()
+    
+#     video_id = extract_youtube_video_id(request.youtube_id)
+#     if not video_id or len(video_id) != 11:
+#         raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    
+#     if not check_internet_connectivity():
+#         raise HTTPException(status_code=503, detail="No internet connection available.")
+    
+#     if not check_ytdlp_availability():
+#         raise HTTPException(status_code=500, detail="Video download service unavailable.")
+    
+#     # 🔥 FIXED: Check usage limits properly
+#     can_use, current_usage, limit = check_usage_limit(user, "video_downloads")
+    
+#     if not can_use:
+#         raise HTTPException(
+#             status_code=403,
+#             detail=f"Monthly limit reached for video downloads ({current_usage}/{limit})."
+#         )
+    
+#     # Get video info for title display
+#     video_info = None
+#     try:
+#         video_info = get_video_info(video_id)
+#         logger.info(f"🔥 Got video info: {video_info.get('title', 'Unknown') if video_info else 'Failed to get info'}")
+#     except Exception as e:
+#         logger.warning(f"Could not get video info: {e}")
+    
+#     # Define expected filename
+#     final_filename = f"{video_id}_video_{request.quality}.mp4"
+#     final_path = DOWNLOADS_DIR / final_filename
+    
+#     # Check if a working file already exists
+#     existing_working_file = find_working_video_file(video_id, request.quality)
+    
+#     if existing_working_file:
+#         logger.info(f"🔥 Found existing working file: {existing_working_file}")
+#         file_size = existing_working_file.stat().st_size
+        
+#         # If the existing file is not in the expected location, copy it there
+#         if existing_working_file != final_path:
+#             logger.info(f"🔥 Moving existing working file to standard location")
+#             try:
+#                 if final_path.exists():
+#                     final_path.unlink()
+                
+#                 shutil.copy2(str(existing_working_file), str(final_path))
+                
+#                 if existing_working_file != final_path:
+#                     existing_working_file.unlink()
+                    
+#                 logger.info(f"✅ Moved working file to: {final_path}")
+#             except Exception as e:
+#                 logger.error(f"Error moving file: {e}")
+#                 final_path = existing_working_file
+#                 final_filename = existing_working_file.name
+        
+#         # 🔥 FIXED: Update usage for existing file too
+#         new_usage = increment_user_usage(db, user, "video_downloads")
+        
+#         processing_time = time.time() - start_time
+        
+#         return {
+#             "download_url": f"/files/{final_filename}",
+#             "direct_download_url": f"/download_file/{final_filename}",
+#             "youtube_id": video_id,
+#             "quality": request.quality,
+#             "file_size": file_size,
+#             "file_size_mb": round(file_size / (1024 * 1024), 2),
+#             "filename": final_filename,
+#             "local_path": str(final_path),
+#             "processing_time": round(processing_time, 2),
+#             "message": "Video ready for download (existing file)",
+#             "success": True,
+#             "title": video_info.get('title', 'Unknown Title') if video_info else 'Unknown Title',
+#             "uploader": video_info.get('uploader', 'Unknown') if video_info else 'Unknown',
+#             "duration": video_info.get('duration', 0) if video_info else 0,
+#             "usage_updated": new_usage,
+#             "usage_type": "video_downloads"
+#         }
+    
+#     # No working file exists, so download a new one
+#     logger.info(f"🔥 No working file found, downloading new video for {video_id}")
+    
+#     cleanup_existing_files(video_id, "video", request.quality)
+    
+#     # Download to temp directory first
+#     with tempfile.TemporaryDirectory() as temp_dir:
+#         try:
+#             logger.info(f"🔥 Downloading to temp: {temp_dir}")
+            
+#             video_file_path = download_video_with_ytdlp(video_id, request.quality, output_dir=temp_dir)
+            
+#             if not video_file_path or not os.path.exists(video_file_path):
+#                 raise HTTPException(status_code=404, detail="Failed to download video.")
+            
+#             temp_file = Path(video_file_path)
+#             file_size = temp_file.stat().st_size
+            
+#             if file_size < 10000:
+#                 raise HTTPException(status_code=500, detail="Downloaded video appears to be corrupted.")
+            
+#             # Determine extension from downloaded file
+#             original_ext = temp_file.suffix
+#             if original_ext:
+#                 final_filename = f"{video_id}_video_{request.quality}{original_ext}"
+#                 final_path = DOWNLOADS_DIR / final_filename
+            
+#             logger.info(f"🔥 Moving completed download to: {final_path}")
+#             shutil.copy2(str(temp_file), str(final_path))
+            
+#             if not final_path.exists() or final_path.stat().st_size != file_size:
+#                 raise HTTPException(status_code=500, detail="File copy verification failed.")
+            
+#             logger.info(f"✅ Video download successful: {final_path} ({file_size} bytes)")
+            
+#         except Exception as e:
+#             logger.error(f"❌ Download failed: {e}")
+#             raise HTTPException(status_code=500, detail=f"Video download failed: {str(e)}")
+    
+#     # 🔥 FIXED: Update usage after successful download
+#     new_usage = increment_user_usage(db, user, "video_downloads")
+    
+#     processing_time = time.time() - start_time
+    
+#     return {
+#         "download_url": f"/files/{final_filename}",
+#         "direct_download_url": f"/download_file/{final_filename}",
+#         "youtube_id": video_id,
+#         "quality": request.quality,
+#         "file_size": file_size,
+#         "file_size_mb": round(file_size / (1024 * 1024), 2),
+#         "filename": final_filename,
+#         "local_path": str(final_path),
+#         "processing_time": round(processing_time, 2),
+#         "message": "Video ready for download",
+#         "success": True,
+#         "title": video_info.get('title', 'Unknown Title') if video_info else 'Unknown Title',
+#         "uploader": video_info.get('uploader', 'Unknown') if video_info else 'Unknown',
+#         "duration": video_info.get('duration', 0) if video_info else 0,
+#         "usage_updated": new_usage,
+#         "usage_type": "video_downloads"
+#     }
+#==================================== Protected ===========================
 @app.get("/subscription_status/")
 def get_subscription_status(current_user: User = Depends(get_current_user)):
     """🔥 FIXED: Get subscription status with proper usage data"""
