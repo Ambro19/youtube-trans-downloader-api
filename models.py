@@ -1,7 +1,3 @@
-
-#================================================================================================
-
-
 # models.py - COMPLETE DATABASE MODELS with Subscription and TranscriptDownload
 # 🔥 FIXES:
 # - ✅ Added missing Subscription model
@@ -97,8 +93,8 @@ class Subscription(Base):
     price_paid = Column(Float, nullable=True)
     currency = Column(String(10), default='usd')
     
-    # Additional metadata
-    metadata = Column(Text, nullable=True)  # JSON string for additional data
+    # Additional data (renamed from metadata to avoid SQLAlchemy reserved word)
+    extra_data = Column(Text, nullable=True)  # JSON string for additional data
     
     # 🔥 Relationships
     user = relationship("User", back_populates="subscriptions")
