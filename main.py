@@ -744,7 +744,6 @@ def root():
         "version": "3.0.0",
         "features": ["transcripts", "audio", "video", "downloads", "mobile", "history", "activity", "payments"],
         "mobile_support": "FULLY_IMPLEMENTED",
-        "payment_system": "ACTIVE",
         "downloads_path": str(DOWNLOADS_DIR),
         "payment_system": "ACTIVE"
     }
