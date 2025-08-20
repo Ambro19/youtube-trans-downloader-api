@@ -33,6 +33,13 @@ import socket
 import mimetypes
 import io
 
+# main.py (imports)
+try:
+    from .payment import router as payment_router
+except ImportError:
+    from payment import router as payment_router
+
+
 # Import our models
 from models import (
     User,
