@@ -226,7 +226,14 @@ def confirm_payment(body: ConfirmBody):
     except stripe.error.StripeError as e:
         logger.error(f"Stripe confirm error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
-
+        
+# Back-compat: if you renamed the user model, expose it as `User` so
+# `from models import User` keeps working.
+if 'User' not in globals():
+    for _name in ('AppUser', 'Account', 'Users', 'AuthUser'):
+        if _name in globals():
+            User = globals()[_name]  # alias
+            break
 
 # # models.py - COMPLETE DATABASE MODELS with Subscription and TranscriptDownload
 # # 🔥 FIXES:
