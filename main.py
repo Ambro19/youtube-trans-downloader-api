@@ -1,143 +1,169 @@
 # main.py — YouTube Content Downloader API
 from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
-import os, re, time, socket, uuid, mimetypes, io, logging, jwt
+from youtube_transcript_api import YouTubeTranscriptApi
 
 from fastapi import FastAPI, HTTPException, Depends, status, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
+from datetime import datetime, timedelta
+from typing import List, Optional, Dict, Any
+from timestamp_patch import EnsureUtcZMiddleware
+import os
+import jwt
+from jwt.exceptions import PyJWTError
 from pydantic import BaseModel
 from passlib.context import CryptContext
-from jwt.exceptions import PyJWTError
-from youtube_transcript_api import YouTubeTranscriptApi
+import logging
+import re
+import time
+import stripe
+import uuid
+import socket
+import mimetypes
+import io
 
-# --- env first ---
+# Load environment variables
 from dotenv import load_dotenv
 load_dotenv()
 
-# --- optional timestamp helpers (won't crash if module missing) ------------
-try:
-    from timestamp_patch import EnsureUtcZMiddleware, enrich_activity_timestamp_with_fs, iso_utc_z, utc_now  # noqa: F401
-except Exception:  # graceful fallback
-    EnsureUtcZMiddleware = None
-    def enrich_activity_timestamp_with_fs(*args, **kwargs): ...
-    def iso_utc_z(dt): return datetime.utcnow().isoformat() + "Z"
-    def utc_now(): return datetime.utcnow()
-
-# --- models / db / utils ----------------------------------------------------
+# Imports from our project
 from models import (
-    User, TranscriptDownload, Subscription,  # Subscription imported for completeness
-    get_db, engine, SessionLocal, initialize_database, create_download_record_safe
+    User,
+    TranscriptDownload,
+    Subscription,
+    get_db,
+    engine,
+    SessionLocal,
+    initialize_database,
 )
 from transcript_utils import (
     get_transcript_with_ytdlp,
     download_audio_with_ytdlp,
     download_video_with_ytdlp,
     check_ytdlp_availability,
-    get_video_info,
+    get_video_info
 )
 
-# --- app setup ---------------------------------------------------------------
-app = FastAPI(
-    title="YouTube Content Downloader API",
-    version="3.0.0",
-    description="SaaS for transcripts, audio & video downloads with full mobile support",
-)
-
-# Payments router (lazy Stripe init handled inside payment.py)
-from payment import router as payment_router  # noqa: E402
-app.include_router(payment_router, tags=["payments"])
-
-# Logging
+# -----------------------------------------------------------------------------
+# Configuration & Globals
+# -----------------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("youtube_trans_downloader.main")
+logger = logging.getLogger("youtube_trans_downloader")
 
-# Env + CORS
-ENVIRONMENT = os.getenv("ENVIRONMENT") or os.getenv("ENV", "development")
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
-logger.info(f"Environment: {ENVIRONMENT}")
-logger.info("Starting YouTube Content Downloader API")
-logger.info("Environment variables loaded from .env file")
-logger.info("Using SQLite database for development")
+SECRET_KEY = os.getenv("SECRET_KEY", "devsecret")
+ALGORITHM = os.getenv("ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# Downloads dir (prefer user's Downloads)
-DOWNLOADS_DIR: Path
+# Stripe
+stripe_secret_key = os.getenv("STRIPE_SECRET_KEY", "")
+if stripe_secret_key:
+    stripe.api_key = stripe_secret_key
+    logger.info("✅ Stripe configured successfully")
+else:
+    logger.warning("❌ STRIPE_SECRET_KEY missing. Billing will run in demo mode.")
+
+# Downloads directory
+DOWNLOADS_DIR = Path.home() / "Downloads"
 try:
-    downloads_dir = Path.home() / "Downloads"
-    downloads_dir.mkdir(exist_ok=True)
-    (downloads_dir / "._test_write.tmp").write_text("ok")
-    (downloads_dir / "._test_write.tmp").unlink()
-    DOWNLOADS_DIR = downloads_dir
+    DOWNLOADS_DIR.mkdir(exist_ok=True)
+    test_file = DOWNLOADS_DIR / "test_write.tmp"
+    test_file.write_text("test")
+    test_file.unlink()
     logger.info(f"🔥 Using user Downloads folder: {DOWNLOADS_DIR}")
 except Exception as e:
     logger.warning(f"Cannot use Downloads folder: {e}")
-    DOWNLOADS_DIR = Path("downloads"); DOWNLOADS_DIR.mkdir(exist_ok=True)
+    DOWNLOADS_DIR = Path("downloads")
+    DOWNLOADS_DIR.mkdir(exist_ok=True)
     logger.info(f"🔥 Using fallback directory: {DOWNLOADS_DIR}")
 
-# Static mount
-app.mount("/files", StaticFiles(directory=str(DOWNLOADS_DIR)), name="files")
+# -----------------------------------------------------------------------------
+# App setup
+# -----------------------------------------------------------------------------
+initialize_database()
+
+app = FastAPI(
+    title="YouTube Content Downloader API",
+    version="3.0.0",
+    description="A SaaS application for downloading YouTube transcripts, audio, and video with COMPLETE mobile support",
+)
 
 # CORS
-if ENVIRONMENT == "production":
-    allowed_origins = list({FRONTEND_URL, "https://youtube-trans-downloader-api.onrender.com"})
-else:
-    allowed_origins = list({
-        "http://localhost:3000", "http://127.0.0.1:3000",
-        "http://192.168.1.185:3000", FRONTEND_URL
-    })
+allowed_origins = (
+    [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://192.168.1.185:3000",
+        FRONTEND_URL,
+    ]
+    if ENVIRONMENT != "production"
+    else [
+        "https://youtube-trans-downloader-api.onrender.com",
+        FRONTEND_URL,
+    ]
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o for o in allowed_origins if o],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["Content-Disposition", "Content-Type", "Content-Length", "Content-Range"],
 )
-if EnsureUtcZMiddleware:
-    app.add_middleware(EnsureUtcZMiddleware)
+app.add_middleware(EnsureUtcZMiddleware)
 
-# Security / auth
-SECRET_KEY = os.getenv("SECRET_KEY", "devsecret")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Static files
+app.mount("/files", StaticFiles(directory=str(DOWNLOADS_DIR)), name="files")
 
-# --- helpers -----------------------------------------------------------------
+# Routers (must come AFTER app is defined)
+from payment import router as payment_router  # noqa: E402
+app.include_router(payment_router, tags=["payments"])
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
 def is_mobile_request(request: Request) -> bool:
     ua = request.headers.get("user-agent", "").lower()
     return any(p in ua for p in [
-        "android","iphone","ipad","ipod","blackberry","windows phone","mobile","webos","opera mini"
+        "android", "iphone", "ipad", "ipod", "blackberry", "windows phone", "mobile", "webos", "opera mini"
     ])
 
 def get_safe_filename(filename: str) -> str:
-    safe = re.sub(r'[<>:"/\\|?*]', "_", filename)
-    if len(safe) > 100:
-        name, ext = os.path.splitext(safe)
-        safe = name[:96] + ext
-    return safe
+    safe_name = re.sub(r'[<>:"/\\|?*]', "_", filename)
+    if len(safe_name) > 100:
+        name, ext = os.path.splitext(safe_name)
+        safe_name = name[:96] + ext
+    return safe_name
 
 def get_mobile_mime_type(file_path: str, file_type: str) -> str:
-    if file_type == "audio" or file_path.endswith((".mp3",".m4a",".aac")): return "audio/mpeg"
-    if file_type == "video" or file_path.endswith((".mp4",".m4v",".mov")): return "video/mp4"
-    mt, _ = mimetypes.guess_type(file_path); return mt or "application/octet-stream"
+    if file_type == "audio" or file_path.endswith((".mp3", ".m4a", ".aac")):
+        return "audio/mpeg"
+    if file_type == "video" or file_path.endswith((".mp4", ".m4v", ".mov")):
+        return "video/mp4"
+    mt, _ = mimetypes.guess_type(file_path)
+    return mt or "application/octet-stream"
 
 def create_access_token_for_mobile(username: str) -> str:
     expire = datetime.utcnow() + timedelta(hours=2)
-    return jwt.encode({"sub": username, "exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
+    to_encode = {"sub": username, "exp": expire}
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 def canonical_account(user: User) -> dict:
     return {"username": (user.username or "").strip(), "email": (user.email or "").strip().lower()}
 
 def increment_user_usage(db: Session, user: User, usage_type: str):
     try:
-        current = getattr(user, f"usage_{usage_type}", 0) or 0
-        new_val = current + 1
-        setattr(user, f"usage_{usage_type}", new_val)
+        current_usage = getattr(user, f"usage_{usage_type}", 0) or 0
+        new_usage = current_usage + 1
+        setattr(user, f"usage_{usage_type}", new_usage)
+
         now = datetime.utcnow()
         if not getattr(user, "usage_reset_date", None):
             user.usage_reset_date = now
@@ -147,97 +173,55 @@ def increment_user_usage(db: Session, user: User, usage_type: str):
             user.usage_audio_downloads = 0
             user.usage_video_downloads = 0
             user.usage_reset_date = now
-            setattr(user, f"usage_{usage_type}", 1); new_val = 1
-        db.commit(); db.refresh(user); return new_val
-    except Exception as e:
-        logger.error(f"Usage increment error: {e}"); db.rollback(); return getattr(user, f"usage_{usage_type}", 0) or 0
+            setattr(user, f"usage_{usage_type}", 1)
+            new_usage = 1
+
+        db.commit()
+        db.refresh(user)
+        return new_usage
+    except Exception:
+        db.rollback()
+        return getattr(user, f"usage_{usage_type}", 0) or 0
 
 def check_usage_limit(user: User, usage_type: str) -> tuple[bool, int, int]:
-    tier = getattr(user, "subscription_tier", "free")
     limits = {
         "free": {"clean_transcripts": 5, "unclean_transcripts": 3, "audio_downloads": 2, "video_downloads": 1},
         "pro": {"clean_transcripts": 100, "unclean_transcripts": 50, "audio_downloads": 50, "video_downloads": 20},
         "premium": {"clean_transcripts": float("inf"), "unclean_transcripts": float("inf"),
                     "audio_downloads": float("inf"), "video_downloads": float("inf")},
     }
-    cur = getattr(user, f"usage_{usage_type}", 0) or 0
-    lim = limits.get(tier, limits["free"]).get(usage_type, 0)
-    return cur < lim, cur, lim
+    tier = getattr(user, "subscription_tier", "free")
+    current = getattr(user, f"usage_{usage_type}", 0) or 0
+    limit = limits.get(tier, limits["free"]).get(usage_type, 0)
+    return current < limit, current, limit
 
 def check_internet_connectivity():
-    try: socket.create_connection(("8.8.8.8", 53), timeout=3); return True
-    except OSError: return False
+    try:
+        socket.create_connection(("8.8.8.8", 53), timeout=3)
+        return True
+    except OSError:
+        return False
 
 def check_youtube_connectivity():
-    try: socket.create_connection(("www.youtube.com", 443), timeout=5); return True
-    except OSError: return False
-
-# --- pydantic ----------------------------------------------------------------
-class UserCreate(BaseModel):
-    username: str; email: str; password: str
-
-class UserResponse(BaseModel):
-    id: int; username: Optional[str] = None; email: str
-    created_at: Optional[datetime] = None
-    class Config: from_attributes = True
-
-class Token(BaseModel):
-    access_token: str; token_type: str
-
-class TranscriptRequest(BaseModel):
-    youtube_id: str; clean_transcript: bool = True; format: Optional[str] = None
-
-class AudioRequest(BaseModel):
-    youtube_id: str; quality: str = "medium"
-
-class VideoRequest(BaseModel):
-    youtube_id: str; quality: str = "720p"
-
-# --- auth helpers ------------------------------------------------------------
-def get_user(db: Session, username: str) -> Optional[User]:
-    return db.query(User).filter(User.username == username).first()
-
-def get_user_by_username(db: Session, username: str) -> Optional[User]:
-    return db.query(User).filter(User.username == username).first()
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-def verify_password(plain: str, hashed: str) -> bool: return pwd_context.verify(plain, hashed)
-def get_password_hash(pw: str) -> str: return pwd_context.hash(pw)
-
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta if expires_delta else timedelta(minutes=15))
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
-    cred_exc = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials", headers={"WWW-Authenticate": "Bearer"},
-    )
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: Optional[str] = payload.get("sub")
-        if not username: raise cred_exc
-    except PyJWTError:
-        raise cred_exc
-    user = get_user(db, username)
-    if not user: raise cred_exc
-    return user
+        socket.create_connection(("www.youtube.com", 443), timeout=5)
+        return True
+    except OSError:
+        return False
 
-# --- transcript helpers ------------------------------------------------------
-def extract_youtube_video_id(yid_or_url: str) -> str:
-    pats = [
-        r'(?:youtube\.com\/watch\?v=)([^&\n?#]+)',
-        r'(?:youtu\.be\/)([^&\n?#]+)',
-        r'(?:youtube\.com\/embed\/)([^&\n?#]+)',
-        r'(?:youtube\.com\/shorts\/)([^&\n?#]+)',
-        r'[?&]v=([^&\n?#]+)',
+def extract_youtube_video_id(youtube_id_or_url: str) -> str:
+    patterns = [
+        r"(?:youtube\.com\/watch\?v=)([^&\n?#]+)",
+        r"(?:youtu\.be\/)([^&\n?#]+)",
+        r"(?:youtube\.com\/embed\/)([^&\n?#]+)",
+        r"(?:youtube\.com\/shorts\/)([^&\n?#]+)",
+        r"[?&]v=([^&\n?#]+)",
     ]
-    for p in pats:
-        m = re.search(p, yid_or_url)
-        if m: return m.group(1)[:11]
-    return yid_or_url.strip()[:11]
+    for p in patterns:
+        m = re.search(p, youtube_id_or_url)
+        if m:
+            return m.group(1)[:11]
+    return youtube_id_or_url.strip()[:11]
 
 def segments_to_vtt(transcript) -> str:
     def sec_to_vtt(ts):
@@ -255,55 +239,89 @@ def segments_to_srt(transcript) -> str:
     def sec_to_srt(ts):
         h = int(ts // 3600); m = int((ts % 3600) // 60); s = int(ts % 60); ms = int((ts - int(ts)) * 1000)
         return f"{h:02}:{m:02}:{s:02},{ms:03}"
-    out = []
-    for i, seg in enumerate(transcript, 1):
+    lines = []
+    for idx, seg in enumerate(transcript, start=1):
         start = sec_to_srt(seg["start"])
         end = sec_to_srt(seg.get("start", 0) + seg.get("duration", 0))
         text = seg["text"].replace("\n", " ").strip()
-        out += [str(i), f"{start} --> {end}", text, ""]
-    return "\n".join(out)
+        lines += [str(idx), f"{start} --> {end}", text, ""]
+    return "\n".join(lines)
 
-def get_transcript_youtube_api(video_id: str, clean: bool = True, format: Optional[str] = None) -> str:
-    if not check_internet_connectivity():
-        raise HTTPException(status_code=503, detail="No internet connection available.")
-    if not check_youtube_connectivity():
-        raise HTTPException(status_code=503, detail="Cannot reach YouTube servers.")
+# -----------------------------------------------------------------------------
+# Auth helpers
+# -----------------------------------------------------------------------------
+def get_user(db: Session, username: str) -> Optional[User]:
+    return db.query(User).filter(User.username == username).first()
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta if expires_delta else timedelta(minutes=15))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
     try:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
-        if clean:
-            text = " ".join([seg['text'].replace('\n',' ') for seg in transcript])
-            words = " ".join(text.split()).split()
-            paras, cur, chars = [], [], 0
-            for w in words:
-                cur.append(w); chars += len(w) + 1
-                if chars > 400 and w.endswith(('.','!','?')): paras.append(' '.join(cur)); cur=[]; chars=0
-            if cur: paras.append(' '.join(cur))
-            return '\n\n'.join(paras)
-        else:
-            if format == "srt": return segments_to_srt(transcript)
-            if format == "vtt": return segments_to_vtt(transcript)
-            lines=[]
-            for seg in transcript:
-                t=int(seg['start']); ts=f"[{t//60:02d}:{t%60:02d}]"
-                lines.append(f"{ts} {seg['text'].replace('\n',' ')}")
-            return "\n".join(lines)
-    except Exception as e:
-        # yt-dlp fallback
-        try:
-            fb = get_transcript_with_ytdlp(video_id, clean=clean)
-            if fb: return fb
-        except Exception:
-            ...
-        if "No transcripts were found" in str(e) or "TranscriptsDisabled" in str(e):
-            raise HTTPException(status_code=404, detail="This video does not have captions/transcripts available.")
-        raise HTTPException(status_code=404, detail="No transcript/captions found for this video.")
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if not username:
+            raise credentials_exception
+    except PyJWTError:
+        raise credentials_exception
+    user = get_user(db, username)
+    if not user:
+        raise credentials_exception
+    return user
 
-# --- startup -----------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Schemas
+# -----------------------------------------------------------------------------
+class UserCreate(BaseModel):
+    username: str
+    email: str
+    password: str
+
+class UserResponse(BaseModel):
+    id: int
+    username: Optional[str] = None
+    email: str
+    created_at: Optional[datetime] = None
+    class Config:
+        from_attributes = True
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TranscriptRequest(BaseModel):
+    youtube_id: str
+    clean_transcript: bool = True
+    format: Optional[str] = None
+
+class AudioRequest(BaseModel):
+    youtube_id: str
+    quality: str = "medium"
+
+class VideoRequest(BaseModel):
+    youtube_id: str
+    quality: str = "720p"
+
+# -----------------------------------------------------------------------------
+# Routes
+# -----------------------------------------------------------------------------
 @app.on_event("startup")
-async def startup():  # create tables on boot
+async def startup():
     initialize_database()
 
-# --- basic routes ------------------------------------------------------------
 @app.get("/")
 def root():
     return {
@@ -312,283 +330,439 @@ def root():
         "version": "3.0.0",
         "features": ["transcripts", "audio", "video", "downloads", "mobile", "history", "activity", "payments"],
         "mobile_support": "FULLY_IMPLEMENTED",
+        "payment_system": "ACTIVE",
         "downloads_path": str(DOWNLOADS_DIR),
     }
 
-# --- auth --------------------------------------------------------------------
 @app.post("/register")
 def register(user: UserCreate, db: Session = Depends(get_db)):
     if db.query(User).filter(User.username == user.username).first():
         raise HTTPException(status_code=400, detail="Username already exists.")
     if db.query(User).filter(User.email == user.email).first():
         raise HTTPException(status_code=400, detail="Email already exists.")
-    obj = User(
+    user_obj = User(
         username=user.username,
         email=(user.email or "").strip().lower(),
         hashed_password=get_password_hash(user.password),
         created_at=datetime.utcnow(),
     )
-    db.add(obj); db.commit(); db.refresh(obj)
-    logger.info(f"New user registered: {user.username} ({user.email})")
-    return {"message": "User registered successfully.", "account": canonical_account(obj)}
+    db.add(user_obj)
+    db.commit()
+    db.refresh(user_obj)
+    return {"message": "User registered successfully.", "account": canonical_account(user_obj)}
 
 @app.post("/token")
-def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == form.username).first()
-    if not user or not verify_password(form.password, user.hashed_password):
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == form_data.username).first()
+    if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Incorrect username or password")
-    tok = create_access_token({"sub": user.username}, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    return {"access_token": tok, "token_type": "bearer", "user": canonical_account(user)}
+    access_token = create_access_token(
+        data={"sub": user.username}, expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    return {"access_token": access_token, "token_type": "bearer", "user": canonical_account(user)}
 
 @app.get("/users/me", response_model=UserResponse)
 def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
 
-# --- downloads ---------------------------------------------------------------
-@app.get("/download-file/{file_type}/{filename}")
-async def download_file(
-    request: Request, file_type: str, filename: str,
-    auth: Optional[str] = Query(None), db: Session = Depends(get_db)
+# ---- Transcript
+@app.post("/download_transcript/")
+def download_transcript(
+    request: TranscriptRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    if file_type not in ["audio","video"]:
+    start_time = time.time()
+    video_id = extract_youtube_video_id(request.youtube_id)
+    if not video_id or len(video_id) != 11:
+        raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    if not check_internet_connectivity():
+        raise HTTPException(status_code=503, detail="No internet connection available.")
+
+    usage_key = "clean_transcripts" if request.clean_transcript else "unclean_transcripts"
+    can_use, current_usage, limit = check_usage_limit(user, usage_key)
+    if not can_use:
+        t = "clean" if request.clean_transcript else "unclean"
+        raise HTTPException(status_code=403, detail=f"Monthly limit reached for {t} transcripts ({current_usage}/{limit}).")
+
+    try:
+        transcript_text = get_transcript_youtube_api(video_id, clean=request.clean_transcript, format=request.format)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to download transcript: {str(e)}")
+
+    if not transcript_text:
+        raise HTTPException(status_code=404, detail="No transcript found for this video.")
+
+    new_usage = increment_user_usage(db, user, usage_key)
+    processing_time = time.time() - start_time
+
+    download_record = TranscriptDownload(
+        user_id=user.id,
+        youtube_id=video_id,
+        transcript_type=usage_key,
+        quality="default",
+        file_format=(request.format if not request.clean_transcript else "txt"),
+        file_size=len(transcript_text),
+        processing_time=processing_time,
+        created_at=datetime.utcnow(),
+    )
+    db.add(download_record); db.commit(); db.refresh(download_record)
+
+    return {
+        "transcript": transcript_text,
+        "youtube_id": video_id,
+        "clean_transcript": request.clean_transcript,
+        "format": request.format,
+        "processing_time": round(processing_time, 2),
+        "success": True,
+        "usage_updated": new_usage,
+        "usage_type": usage_key,
+        "download_record_id": download_record.id,
+        "account": canonical_account(user),
+    }
+
+# ---- Audio
+@app.post("/download_audio/")
+def download_audio(
+    request: AudioRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    start_time = time.time()
+    video_id = extract_youtube_video_id(request.youtube_id)
+    if not video_id or len(video_id) != 11:
+        raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    if not check_internet_connectivity():
+        raise HTTPException(status_code=503, detail="No internet connection available.")
+    if not check_ytdlp_availability():
+        raise HTTPException(status_code=500, detail="Audio download service temporarily unavailable.")
+
+    can_use, current_usage, limit = check_usage_limit(user, "audio_downloads")
+    if not can_use:
+        raise HTTPException(status_code=403, detail=f"Monthly limit reached for audio downloads ({current_usage}/{limit}).")
+
+    try:
+        video_info = get_video_info(video_id)
+    except Exception:
+        video_info = None
+
+    final_filename = f"{video_id}_audio_{request.quality}.mp3"
+    final_path = DOWNLOADS_DIR / final_filename
+
+    try:
+        audio_file_path = download_audio_with_ytdlp(video_id, request.quality, output_dir=str(DOWNLOADS_DIR))
+        if not audio_file_path or not os.path.exists(audio_file_path):
+            raise HTTPException(status_code=404, detail="Failed to download audio.")
+        downloaded = Path(audio_file_path)
+        file_size = downloaded.stat().st_size
+        if file_size < 1000:
+            raise HTTPException(status_code=500, detail="Downloaded file appears to be corrupted.")
+        if downloaded != final_path:
+            if final_path.exists():
+                final_path.unlink()
+            downloaded.rename(final_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Audio download failed: {str(e)}")
+
+    new_usage = increment_user_usage(db, user, "audio_downloads")
+    processing_time = time.time() - start_time
+
+    rec = TranscriptDownload(
+        user_id=user.id,
+        youtube_id=video_id,
+        transcript_type="audio_downloads",
+        quality=request.quality,
+        file_format="mp3",
+        file_size=final_path.stat().st_size,
+        processing_time=processing_time,
+        created_at=datetime.utcnow(),
+    )
+    db.add(rec); db.commit(); db.refresh(rec)
+
+    mobile_download_token = create_access_token_for_mobile(user.username)
+    mobile_download_url = f"/download-file/audio/{final_filename}?auth={mobile_download_token}"
+
+    return {
+        "download_url": f"/files/{final_filename}",
+        "direct_download_url": mobile_download_url,
+        "youtube_id": video_id,
+        "quality": request.quality,
+        "file_size": final_path.stat().st_size,
+        "file_size_mb": round(final_path.stat().st_size / (1024 * 1024), 2),
+        "filename": final_filename,
+        "local_path": str(final_path),
+        "processing_time": round(processing_time, 2),
+        "message": "Audio ready for download",
+        "success": True,
+        "title": (video_info or {}).get("title", "Unknown Title"),
+        "uploader": (video_info or {}).get("uploader", "Unknown"),
+        "duration": (video_info or {}).get("duration", 0),
+        "usage_updated": new_usage,
+        "usage_type": "audio_downloads",
+        "download_record_id": rec.id,
+        "account": canonical_account(user),
+    }
+
+# ---- Video
+@app.post("/download_video/")
+def download_video(
+    request: VideoRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    start_time = time.time()
+    video_id = extract_youtube_video_id(request.youtube_id)
+    if not video_id or len(video_id) != 11:
+        raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    if not check_internet_connectivity():
+        raise HTTPException(status_code=503, detail="No internet connection available.")
+    if not check_ytdlp_availability():
+        raise HTTPException(status_code=500, detail="Video download service unavailable.")
+
+    can_use, current_usage, limit = check_usage_limit(user, "video_downloads")
+    if not can_use:
+        raise HTTPException(status_code=403, detail=f"Monthly limit reached for video downloads ({current_usage}/{limit}).")
+
+    try:
+        video_info = get_video_info(video_id)
+    except Exception:
+        video_info = None
+
+    final_filename = f"{video_id}_video_{request.quality}.mp4"
+    final_path = DOWNLOADS_DIR / final_filename
+
+    try:
+        video_file_path = download_video_with_ytdlp(video_id, request.quality, output_dir=str(DOWNLOADS_DIR))
+        if not video_file_path or not os.path.exists(video_file_path):
+            raise HTTPException(status_code=404, detail="Failed to download video.")
+        downloaded = Path(video_file_path)
+        file_size = downloaded.stat().st_size
+        if file_size < 10_000:
+            raise HTTPException(status_code=500, detail="Downloaded video appears to be corrupted.")
+        if downloaded != final_path:
+            if final_path.exists():
+                final_path.unlink()
+            downloaded.rename(final_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Video download failed: {str(e)}")
+
+    new_usage = increment_user_usage(db, user, "video_downloads")
+    processing_time = time.time() - start_time
+
+    rec = TranscriptDownload(
+        user_id=user.id,
+        youtube_id=video_id,
+        transcript_type="video_downloads",
+        quality=request.quality,
+        file_format="mp4",
+        file_size=final_path.stat().st_size,
+        processing_time=processing_time,
+        created_at=datetime.utcnow(),
+    )
+    db.add(rec); db.commit(); db.refresh(rec)
+
+    mobile_download_token = create_access_token_for_mobile(user.username)
+    mobile_download_url = f"/download-file/video/{final_filename}?auth={mobile_download_token}"
+
+    return {
+        "download_url": f"/files/{final_filename}",
+        "direct_download_url": mobile_download_url,
+        "youtube_id": video_id,
+        "quality": request.quality,
+        "file_size": final_path.stat().st_size,
+        "file_size_mb": round(final_path.stat().st_size / (1024 * 1024), 2),
+        "filename": final_filename,
+        "local_path": str(final_path),
+        "processing_time": round(processing_time, 2),
+        "message": "Video ready for download",
+        "success": True,
+        "title": (video_info or {}).get("title", "Unknown Title"),
+        "uploader": (video_info or {}).get("uploader", "Unknown"),
+        "duration": (video_info or {}).get("duration", 0),
+        "usage_updated": new_usage,
+        "usage_type": "video_downloads",
+        "download_record_id": rec.id,
+        "account": canonical_account(user),
+    }
+
+# ---- Mobile-safe file download (fixed Content-Disposition f-string)
+@app.get("/download-file/{file_type}/{filename}")
+async def download_file_completely_fixed(
+    request: Request,
+    file_type: str,
+    filename: str,
+    auth: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    if file_type not in ["audio", "video"]:
         raise HTTPException(status_code=400, detail="Invalid file type")
-    # auth via short token or bearer
-    user=None
+
+    # Auth via query ?auth= or Authorization header
+    user = None
     if auth:
         try:
-            payload = jwt.decode(auth, SECRET_KEY, algorithms=[ALGORITHM]); un = payload.get("sub")
-            if un: user = get_user_by_username(db, un)
-        except jwt.ExpiredSignatureError:
-            raise HTTPException(status_code=401, detail="Token expired")
+            payload = jwt.decode(auth, SECRET_KEY, algorithms=[ALGORITHM])
+            username = payload.get("sub")
+            if username:
+                user = get_user(db, username)
         except jwt.PyJWTError:
-            raise HTTPException(status_code=401, detail="Invalid token")
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
     if not user:
-        auth_header = request.headers.get("authorization","")
+        auth_header = request.headers.get("authorization", "")
         if auth_header.startswith("Bearer "):
-            token = auth_header.split(" ",1)[1]
             try:
-                payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM]); un = payload.get("sub")
-                if un: user = get_user_by_username(db, un)
-            except jwt.PyJWTError: ...
+                payload = jwt.decode(auth_header.split(" ", 1)[1], SECRET_KEY, algorithms=[ALGORITHM])
+                username = payload.get("sub")
+                if username:
+                    user = get_user(db, username)
+            except jwt.PyJWTError:
+                pass
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
 
-    file_path = (DOWNLOADS_DIR / filename)
+    file_path = DOWNLOADS_DIR / filename
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
+
     if not str(file_path.resolve()).startswith(str(DOWNLOADS_DIR.resolve())):
         raise HTTPException(status_code=403, detail="Access denied")
 
-    size = file_path.stat().st_size
-    mime = get_mobile_mime_type(str(file_path), file_type)
-    safe = get_safe_filename(filename)
+    file_size = file_path.stat().st_size
+    is_mobile = is_mobile_request(request)
+    mime_type = get_mobile_mime_type(str(file_path), file_type)
+    safe_filename = get_safe_filename(filename)
 
-    if is_mobile_request(request):
+    if is_mobile:
         with open(file_path, "rb") as f:
             data = f.read()
+
         def gen():
-            b = io.BytesIO(data)
-            while True:
-                chunk = b.read(8192)
-                if not chunk: break
-                yield chunk
+            chunk_size = 8192
+            idx = 0
+            while idx < len(data):
+                yield data[idx: idx + chunk_size]
+                idx += chunk_size
+
+        # IMPORTANT: this f-string avoids any escaping/backslashes in the expression
         headers = {
-            "Content-Type": mime,
-            "Content-Disposition": f'attachment; filename="{safe}"; filename*=UTF-8\'\'{safe}',
-            "Content-Length": str(size),
+            "Content-Type": mime_type,
+            "Content-Disposition": f"attachment; filename=\"{safe_filename}\"; filename*=UTF-8''{safe_filename}",
+            "Content-Length": str(file_size),
             "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache", "Expires": "0",
-            "Accept-Ranges": "bytes", "X-Content-Type-Options": "nosniff",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "Accept-Ranges": "bytes",
+            "X-Content-Type-Options": "nosniff",
             "Content-Transfer-Encoding": "binary",
         }
-        return StreamingResponse(gen(), media_type=mime, headers=headers)
+        return StreamingResponse(gen(), media_type=mime_type, headers=headers)
 
-    headers = {"Content-Disposition": f'attachment; filename="{safe}"', "Content-Length": str(size), "Accept-Ranges": "bytes"}
-    return FileResponse(path=str(file_path), media_type=mime, headers=headers, filename=safe)
-
-# --- business endpoints ------------------------------------------------------
-@app.post("/download_transcript/")
-def download_transcript(req: TranscriptRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    t0 = time.time()
-    vid = extract_youtube_video_id(req.youtube_id)
-    if not vid or len(vid) != 11: raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
-    if not check_internet_connectivity(): raise HTTPException(status_code=503, detail="No internet connection available.")
-
-    usage_key = "clean_transcripts" if req.clean_transcript else "unclean_transcripts"
-    ok, cur, lim = check_usage_limit(user, usage_key)
-    if not ok:
-        raise HTTPException(status_code=403, detail=f"Monthly limit reached for {'clean' if req.clean_transcript else 'timestamped'} transcripts ({cur}/{lim}).")
-
-    text = get_transcript_youtube_api(vid, clean=req.clean_transcript, format=req.format)
-    if not text: raise HTTPException(status_code=404, detail="No transcript found for this video.")
-
-    new_usage = increment_user_usage(db, user, usage_key)
-    proc = time.time() - t0
-    rec = create_download_record_safe(
-        db=db, user_id=user.id, download_type=usage_key, youtube_id=vid,
-        file_format=(req.format if not req.clean_transcript else "txt"),
-        file_size=len(text), processing_time=proc,
-    )
-
-    return {
-        "transcript": text, "youtube_id": vid, "clean_transcript": req.clean_transcript, "format": req.format,
-        "processing_time": round(proc, 2), "success": True, "usage_updated": new_usage,
-        "usage_type": usage_key, "download_record_id": getattr(rec, "id", None), "account": canonical_account(user),
+    headers = {
+        "Content-Disposition": f"attachment; filename=\"{safe_filename}\"",
+        "Content-Length": str(file_size),
+        "Accept-Ranges": "bytes",
     }
+    return FileResponse(path=str(file_path), media_type=mime_type, headers=headers, filename=safe_filename)
 
-@app.post("/download_audio/")
-def download_audio(req: AudioRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    t0 = time.time()
-    vid = extract_youtube_video_id(req.youtube_id)
-    if not vid or len(vid) != 11: raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
-    if not check_internet_connectivity(): raise HTTPException(status_code=503, detail="No internet connection available.")
-    if not check_ytdlp_availability(): raise HTTPException(status_code=500, detail="Audio download service temporarily unavailable.")
-
-    ok, cur, lim = check_usage_limit(user, "audio_downloads")
-    if not ok: raise HTTPException(status_code=403, detail=f"Monthly limit reached for audio downloads ({cur}/{lim}).")
-
-    try:
-        path = download_audio_with_ytdlp(vid, req.quality, output_dir=str(DOWNLOADS_DIR))
-        if not path or not os.path.exists(path): raise HTTPException(status_code=404, detail="Failed to download audio.")
-        final = Path(path); size = final.stat().st_size
-        if size < 1000: raise HTTPException(status_code=500, detail="Downloaded file appears to be corrupted.")
-    except Exception as e:
-        logger.error(f"Audio download failed: {e}"); raise HTTPException(status_code=500, detail=f"Audio download failed: {e}")
-
-    new_usage = increment_user_usage(db, user, "audio_downloads")
-    proc = time.time() - t0
-    rec = create_download_record_safe(db=db, user_id=user.id, download_type="audio_downloads",
-                                      youtube_id=vid, quality=req.quality, file_format="mp3",
-                                      file_size=size, processing_time=proc)
-
-    token = create_access_token_for_mobile(user.username)
-    mobile_url = f"/download-file/audio/{final.name}?auth={token}"
-
-    info = None
-    try: info = get_video_info(vid)
-    except Exception: ...
-
-    return {
-        "download_url": f"/files/{final.name}", "direct_download_url": mobile_url,
-        "youtube_id": vid, "quality": req.quality, "file_size": size, "file_size_mb": round(size/1048576, 2),
-        "filename": final.name, "local_path": str(final), "processing_time": round(proc, 2),
-        "message": "Audio ready for download", "success": True,
-        "title": (info or {}).get("title", "Unknown Title"), "uploader": (info or {}).get("uploader", "Unknown"),
-        "duration": (info or {}).get("duration", 0),
-        "usage_updated": new_usage, "usage_type": "audio_downloads", "download_record_id": getattr(rec, "id", None),
-        "account": canonical_account(user),
-    }
-
-@app.post("/download_video/")
-def download_video(req: VideoRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    t0 = time.time()
-    vid = extract_youtube_video_id(req.youtube_id)
-    if not vid or len(vid) != 11: raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
-    if not check_internet_connectivity(): raise HTTPException(status_code=503, detail="No internet connection available.")
-    if not check_ytdlp_availability(): raise HTTPException(status_code=500, detail="Video download service unavailable.")
-
-    ok, cur, lim = check_usage_limit(user, "video_downloads")
-    if not ok: raise HTTPException(status_code=403, detail=f"Monthly limit reached for video downloads ({cur}/{lim}).")
-
-    try:
-        path = download_video_with_ytdlp(vid, req.quality, output_dir=str(DOWNLOADS_DIR))
-        if not path or not os.path.exists(path): raise HTTPException(status_code=404, detail="Failed to download video.")
-        final = Path(path); size = final.stat().st_size
-        if size < 10000: raise HTTPException(status_code=500, detail="Downloaded video appears to be corrupted.")
-    except Exception as e:
-        logger.error(f"Video download failed: {e}"); raise HTTPException(status_code=500, detail=f"Video download failed: {e}")
-
-    new_usage = increment_user_usage(db, user, "video_downloads")
-    proc = time.time() - t0
-    rec = create_download_record_safe(db=db, user_id=user.id, download_type="video_downloads",
-                                      youtube_id=vid, quality=req.quality, file_format="mp4",
-                                      file_size=size, processing_time=proc)
-
-    token = create_access_token_for_mobile(user.username)
-    mobile_url = f"/download-file/video/{final.name}?auth={token}"
-
-    info = None
-    try: info = get_video_info(vid)
-    except Exception: ...
-
-    return {
-        "download_url": f"/files/{final.name}", "direct_download_url": mobile_url,
-        "youtube_id": vid, "quality": req.quality, "file_size": size, "file_size_mb": round(size/1048576, 2),
-        "filename": final.name, "local_path": str(final), "processing_time": round(proc, 2),
-        "message": "Video ready for download", "success": True,
-        "title": (info or {}).get("title", "Unknown Title"), "uploader": (info or {}).get("uploader", "Unknown"),
-        "duration": (info or {}).get("duration", 0),
-        "usage_updated": new_usage, "usage_type": "video_downloads", "download_record_id": getattr(rec, "id", None),
-        "account": canonical_account(user),
-    }
-
-# --- history & activity ------------------------------------------------------
+# ---- History
 @app.get("/user/download-history")
-def get_download_history(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    rows = db.query(TranscriptDownload).filter(TranscriptDownload.user_id == current_user.id)\
-             .order_by(TranscriptDownload.created_at.desc()).limit(50).all()
+async def get_download_history(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    downloads = (
+        db.query(TranscriptDownload)
+        .filter(TranscriptDownload.user_id == current_user.id)
+        .order_by(TranscriptDownload.created_at.desc())
+        .limit(50)
+        .all()
+    )
     history = [{
-        "id": r.id, "type": r.transcript_type, "video_id": r.youtube_id,
-        "quality": r.quality or "default", "file_format": r.file_format or "unknown",
-        "file_size": r.file_size or 0, "downloaded_at": r.created_at.isoformat() if r.created_at else None,
-        "processing_time": r.processing_time or 0, "status": getattr(r, "status", "completed"),
-        "language": getattr(r, "language", "en"),
-    } for r in rows]
+        "id": d.id,
+        "type": d.transcript_type,
+        "video_id": d.youtube_id,
+        "quality": d.quality or "default",
+        "file_format": d.file_format or "unknown",
+        "file_size": d.file_size or 0,
+        "downloaded_at": d.created_at.isoformat() if d.created_at else None,
+        "processing_time": d.processing_time or 0,
+        "status": getattr(d, "status", "completed"),
+        "language": getattr(d, "language", "en"),
+    } for d in downloads]
     return {"downloads": history, "total_count": len(history), "account": canonical_account(current_user)}
 
+# ---- Recent activity (single, DB-backed version)
 @app.get("/user/recent-activity")
-def get_recent_activity(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    rows = db.query(TranscriptDownload).filter(TranscriptDownload.user_id == current_user.id)\
-             .order_by(TranscriptDownload.created_at.desc()).limit(10).all()
-    items=[]
-    for d in rows:
-        t=d.transcript_type
-        if t=="clean_transcripts": action, icon, desc = "Generated clean transcript","📄",f"Clean transcript for {d.youtube_id}"
-        elif t=="unclean_transcripts": action, icon, desc="Generated timestamped transcript","🕒",f"Timestamped transcript for {d.youtube_id}"
-        elif t=="audio_downloads": action, icon, desc="Downloaded audio file","🎵",f"{(d.quality or 'unknown').title()} MP3 from {d.youtube_id}"
-        elif t=="video_downloads": action, icon, desc="Downloaded video file","🎬",f"{d.quality or 'unknown'} MP4 from {d.youtube_id}"
-        else: action, icon, desc=f"Downloaded {t}","📁",f"Content from video {d.youtube_id}"
-        items.append({
-            "id": d.id, "action": action, "description": desc,
+async def get_recent_activity(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    recent = (
+        db.query(TranscriptDownload)
+        .filter(TranscriptDownload.user_id == current_user.id)
+        .order_by(TranscriptDownload.created_at.desc())
+        .limit(10)
+        .all()
+    )
+    activities = []
+    for d in recent:
+        t = d.transcript_type
+        if t == "clean_transcripts":
+            action, icon, desc = "Generated clean transcript", "📄", f"Clean transcript for video {d.youtube_id}"
+        elif t == "unclean_transcripts":
+            action, icon, desc = "Generated timestamped transcript", "🕒", f"Timestamped transcript for video {d.youtube_id}"
+        elif t == "audio_downloads":
+            action, icon, desc = "Downloaded audio file", "🎵", f"{(d.quality or 'unknown').title()} MP3 from {d.youtube_id}"
+        elif t == "video_downloads":
+            action, icon, desc = "Downloaded video file", "🎬", f"{d.quality or 'unknown'} MP4 from {d.youtube_id}"
+        else:
+            action, icon, desc = f"Downloaded {t}", "📁", f"Content from video {d.youtube_id}"
+        activities.append({
+            "id": d.id,
+            "action": action,
+            "description": desc,
             "timestamp": d.created_at.isoformat() if d.created_at else None,
-            "type": "download", "icon": icon, "video_id": d.youtube_id, "file_size": d.file_size
+            "type": "download",
+            "icon": icon,
+            "video_id": d.youtube_id,
+            "file_size": d.file_size,
         })
-    if not items:
-        items.append({
+
+    if not activities:
+        activities.append({
             "id": 0, "action": "Account created",
             "description": f"Welcome to YouTube Content Downloader, {current_user.username}!",
             "timestamp": current_user.created_at.isoformat() if current_user.created_at else None,
-            "type": "auth", "icon": "🎉"
+            "type": "auth", "icon": "🎉",
         })
-    return {"activities": items, "total_count": len(items), "account": canonical_account(current_user)}
+    return {"activities": activities, "total_count": len(activities), "account": canonical_account(current_user)}
 
-# --- health & debug ----------------------------------------------------------
+# ---- Health & debug
 @app.get("/health")
-def health_check():
+async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
-        "environment": os.getenv("ENVIRONMENT", os.getenv("ENV", "development")),
+        "environment": ENVIRONMENT,
         "database": "connected",
         "services": {
             "youtube_api": "available",
-            "stripe": "configured (lazy in payment.py)",
+            "stripe": "configured" if stripe_secret_key else "not_configured",
             "file_system": "accessible",
             "yt_dlp": "available" if check_ytdlp_availability() else "unavailable",
+            "payment_system": "active",
         },
         "downloads_path": str(DOWNLOADS_DIR),
         "mobile_support": "FULLY_IMPLEMENTED",
     }
 
 @app.get("/debug/users")
-def debug_users(db: Session = Depends(get_db)):
-    if (os.getenv("ENVIRONMENT") or os.getenv("ENV", "development")) != "development":
+async def debug_users(db: Session = Depends(get_db)):
+    if ENVIRONMENT != "development":
         raise HTTPException(status_code=404, detail="Not found")
     users = db.query(User).all()
     return {
         "total_users": len(users),
         "users": [{
-            "id": u.id, "username": u.username, "email": (u.email or "").strip().lower(),
+            "id": u.id,
+            "username": u.username,
+            "email": (u.email or "").strip().lower(),
             "created_at": u.created_at.isoformat() if u.created_at else None,
             "subscription_tier": getattr(u, "subscription_tier", "free"),
             "is_active": getattr(u, "is_active", True),
@@ -596,27 +770,56 @@ def debug_users(db: Session = Depends(get_db)):
     }
 
 @app.post("/debug/test-login")
-def debug_test_login(username: str, password: str, db: Session = Depends(get_db)):
-    if (os.getenv("ENVIRONMENT") or os.getenv("ENV", "development")) != "development":
+async def debug_test_login(username: str, password: str, db: Session = Depends(get_db)):
+    if ENVIRONMENT != "development":
         raise HTTPException(status_code=404, detail="Not found")
-    user = get_user_by_username(db, username)
+    user = get_user(db, username)
     if not user:
-        return {"success": False, "error": "user_not_found", "message": f"User '{username}' not found",
-                "debug_info": {"searched_username": username, "total_users_in_db": db.query(User).count()}}
+        return {"success": False, "error": "user_not_found"}
     if not verify_password(password, user.hashed_password):
-        return {"success": False, "error": "invalid_password", "message": "Password verification failed",
-                "debug_info": {"user_exists": True, "username": username, "password_length": len(password)}}  # no pw echo
-    return {"success": True, "message": "Login credentials are valid",
-            "user_info": {"id": user.id, "username": user.username, "email": (user.email or '').strip().lower(),
-                          "subscription_tier": getattr(user, "subscription_tier", "free"),
-                          "is_active": getattr(user, "is_active", True)}}
+        return {"success": False, "error": "invalid_password"}
+    return {"success": True, "user_info": canonical_account(user) | {"id": user.id}}
+
+@app.get("/subscription_status/")
+def get_subscription_status(current_user: User = Depends(get_current_user)):
+    tier = getattr(current_user, "subscription_tier", "free")
+    usage = {
+        "clean_transcripts": getattr(current_user, "usage_clean_transcripts", 0) or 0,
+        "unclean_transcripts": getattr(current_user, "usage_unclean_transcripts", 0) or 0,
+        "audio_downloads": getattr(current_user, "usage_audio_downloads", 0) or 0,
+        "video_downloads": getattr(current_user, "usage_video_downloads", 0) or 0,
+    }
+    SUBSCRIPTION_LIMITS = {
+        "free": {"clean_transcripts": 5, "unclean_transcripts": 3, "audio_downloads": 2, "video_downloads": 1},
+        "pro": {"clean_transcripts": 100, "unclean_transcripts": 50, "audio_downloads": 50, "video_downloads": 20},
+        "premium": {"clean_transcripts": float("inf"), "unclean_transcripts": float("inf"),
+                    "audio_downloads": float("inf"), "video_downloads": float("inf")},
+    }
+    limits = SUBSCRIPTION_LIMITS.get(tier, SUBSCRIPTION_LIMITS["free"])
+    json_limits = {k: ("unlimited" if v == float("inf") else v) for k, v in limits.items()}
+    return {"tier": tier, "status": ("active" if tier != "free" else "inactive"),
+            "usage": usage, "limits": json_limits, "downloads_folder": str(DOWNLOADS_DIR),
+            "account": canonical_account(current_user)}
+
+@app.get("/test_videos")
+def get_test_videos():
+    return {
+        "videos": [
+            {"id": "dQw4w9WgXcQ", "title": "Rick Astley - Never Gonna Give You Up",
+             "status": "verified_working", "supports": ["transcript", "audio", "video"]},
+            {"id": "jNQXAC9IVRw", "title": "Me at the zoo",
+             "status": "verified_working", "supports": ["transcript", "audio", "video"]},
+            {"id": "9bZkp7q19f0", "title": "PSY - GANGNAM STYLE",
+             "status": "verified_working", "supports": ["transcript", "audio", "video"]},
+            {"id": "L_jWHffIx5E", "title": "Smash Mouth - All Star",
+             "status": "verified_working", "supports": ["transcript", "audio", "video"]},
+        ]
+    }
 
 if __name__ == "__main__":
     import uvicorn
-    print("🔥 Starting server on 0.0.0.0:8000")
-    print(f"🔥 Downloads folder: {str(DOWNLOADS_DIR)}")
+    print(f"🔥 Starting server on 0.0.0.0:8000; downloads: {DOWNLOADS_DIR}")
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
 
 
 # # main.py — YouTube Content Downloader API
