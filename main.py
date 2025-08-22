@@ -31,6 +31,7 @@ load_dotenv()
 from youtube_transcript_api import YouTubeTranscriptApi
 
 # Local modules
+from payment import router as payment_router
 from models import (
     User,
     TranscriptDownload,
@@ -59,6 +60,8 @@ app = FastAPI(
     version="3.1.0",
     description="Transcripts, audio, video — with mobile-friendly downloads",
 )
+
+app.include_router(payment_router, tags=["payments"])  # once, below app
 
 # Optional timestamp middleware — make it non-fatal if missing
 try:

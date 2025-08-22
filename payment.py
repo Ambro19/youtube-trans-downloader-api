@@ -1,170 +1,293 @@
-# backend/payment.py
+# payment.py — drop-in
+from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
+from datetime import datetime, timedelta
+from typing import Optional, Dict, Any
 import os
-import logging
-from typing import Optional, Tuple, Dict
+import jwt
 import stripe
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+import logging
 
+# ====== setup ======
 logger = logging.getLogger("payment")
-router = APIRouter(tags=["payments"])
+logger.setLevel(logging.INFO)
 
-def env(k: str, d: str = "") -> str:
-    return os.getenv(k, d)
+router = APIRouter(prefix="", tags=["payments"])
 
-# Lazy init so reload workers see the key even if .env loads later
-_last_key = None
-def ensure_stripe():
-    global _last_key
-    key = env("STRIPE_SECRET_KEY", "")
-    if key and key != _last_key:
-        stripe.api_key = key
-        _last_key = key
-        logger.info("✅ Stripe configured successfully")
+# --- env
+SECRET_KEY = os.getenv("SECRET_KEY", "devsecret")
+ALGORITHM = os.getenv("ALGORITHM", "HS256")
 
-def stripe_mode() -> str:
-    k = env("STRIPE_SECRET_KEY", "")
-    if k.startswith("sk_live_"): return "live"
-    if k.startswith("sk_test_"): return "test"
-    return "demo"
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
 
-def demo_mode() -> bool:
-    return not env("STRIPE_SECRET_KEY", "")
+# Prefer explicit price IDs but support lookup keys
+PRO_PRICE_ID = os.getenv("STRIPE_PRO_PRICE_ID")
+PREMIUM_PRICE_ID = os.getenv("STRIPE_PREMIUM_PRICE_ID")
+PRO_LOOKUP_KEY = os.getenv("STRIPE_PRO_LOOKUP_KEY", "pro_monthly")
+PREMIUM_LOOKUP_KEY = os.getenv("STRIPE_PREMIUM_LOOKUP_KEY", "premium_monthly")
 
-FRONTEND_URL = env("FRONTEND_URL", "http://localhost:3000")
+if STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
+    logger.info("✅ Stripe configured successfully")
+else:
+    logger.error("❌ STRIPE_SECRET_KEY missing. Billing will run in demo mode.")
 
-# ---------- schemas
-class CreateIntentBody(BaseModel):
-    plan_type: Optional[str] = None
-    price_id: Optional[str] = None
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-class ConfirmBody(BaseModel):
-    payment_intent_id: str
+# --- models & DB
+from models import get_db, User  # your existing
+# If you have a Subscription model you can import it too:
+try:
+    from models import Subscription
+except Exception:
+    Subscription = None
 
-# ---------- helpers
-_PRICE_CACHE: Dict[str, Optional[str]] = {"pro": None, "premium": None}
-
-def _safe_price(pid: str) -> Optional[str]:
+# ====== auth ======
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
     try:
-        ensure_stripe()
-        return stripe.Price.retrieve(pid)["id"]
-    except Exception as e:
-        logger.warning(f"Price '{pid}' not usable: {e}")
-        return None
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if not username:
+            raise credentials_exception
+    except jwt.PyJWTError:
+        raise credentials_exception
 
-def _find_by_lookup(lookup_key: str) -> Optional[str]:
-    try:
-        ensure_stripe()
-        pr = stripe.Price.list(active=True, lookup_keys=[lookup_key], limit=1)
-        return pr.data[0]["id"] if pr.data else None
-    except Exception:
-        return None
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise credentials_exception
+    return user
 
-def _find_by_product_name(name: str) -> Optional[str]:
-    try:
-        ensure_stripe()
-        prods = stripe.Product.list(active=True, limit=100, expand=["data.default_price"])
-        name_lc = name.lower().strip()
-        for p in prods.auto_paging_iter():
-            if str(p["name"]).lower().strip() == name_lc:
-                dp = p.get("default_price")
-                return (dp.get("id") if isinstance(dp, dict) else dp) or None
-    except Exception:
-        return None
-    return None
 
-def resolve_price_id(plan: str, preferred: Optional[str]) -> Tuple[Optional[str], str]:
+# ====== helpers ======
+def _resolve_price_id(plan: str) -> str:
+    """Return a *Price ID* for plan ('pro'|'premium'), using explicit IDs or lookup keys."""
     plan = (plan or "").lower()
     if plan not in ("pro", "premium"):
-        raise HTTPException(status_code=400, detail="Invalid plan_type. Use 'pro' or 'premium'.")
+        raise HTTPException(400, "Unknown plan")
 
-    if _PRICE_CACHE.get(plan):
-        return _PRICE_CACHE[plan], "cache"
+    # 1) explicit price id env
+    if plan == "pro" and PRO_PRICE_ID:
+        return PRO_PRICE_ID
+    if plan == "premium" and PREMIUM_PRICE_ID:
+        return PREMIUM_PRICE_ID
 
-    # 1) client-provided
-    if preferred:
-        ok = _safe_price(preferred)
-        if ok:
-            _PRICE_CACHE[plan] = ok
-            return ok, "client"
+    # 2) lookup keys
+    lookup = PRO_LOOKUP_KEY if plan == "pro" else PREMIUM_LOOKUP_KEY
+    try:
+        plist = stripe.Price.list(active=True, lookup_keys=[lookup], limit=1)
+        if plist and plist.data:
+            return plist.data[0]["id"]
+    except Exception as e:
+        logger.error(f"Stripe price lookup failed for {plan}: {e}")
 
-    # 2) env direct IDs (optional)
-    env_pid = env("STRIPE_PRO_PRICE_ID") if plan == "pro" else env("STRIPE_PREMIUM_PRICE_ID")
-    if env_pid:
-        ok = _safe_price(env_pid)
-        if ok:
-            _PRICE_CACHE[plan] = ok
-            return ok, "env"
+    raise HTTPException(500, f"Could not resolve Stripe price for plan '{plan}'")
 
-    # 3) lookup key
-    lk = env("STRIPE_PRO_LOOKUP_KEY", "pro_monthly") if plan == "pro" else env("STRIPE_PREMIUM_LOOKUP_KEY", "premium_monthly")
-    ok = _find_by_lookup(lk)
-    if ok:
-        _PRICE_CACHE[plan] = ok
-        return ok, "lookup_key"
 
-    # 4) product name fallback
-    pn = env("STRIPE_PRO_PRODUCT_NAME", "Pro Plan") if plan == "pro" else env("STRIPE_PREMIUM_PRODUCT_NAME", "Premium Plan")
-    ok = _find_by_product_name(pn)
-    if ok:
-        _PRICE_CACHE[plan] = ok
-        return ok, "product_name"
+def _ensure_customer_for_user(user: User, db: Session) -> str:
+    """Find or create a Stripe Customer for this user; persist id on the user if possible."""
+    # if your User model already has a stripe_customer_id field, use it
+    existing_id = getattr(user, "stripe_customer_id", None)
+    if existing_id:
+        try:
+            # verify it still exists (best effort)
+            stripe.Customer.retrieve(existing_id)
+            return existing_id
+        except Exception:
+            pass
 
-    return None, "unavailable"
+    # Search by email (idempotent enough for test/dev)
+    cust_id = None
+    try:
+        # Customer.search requires it be enabled; fallback to list filter
+        candidates = stripe.Customer.list(email=(user.email or "").strip().lower(), limit=1)
+        if candidates and candidates.data:
+            cust_id = candidates.data[0]["id"]
+    except Exception:
+        pass
 
-def require_stripe_ready():
-    ensure_stripe()
-    if demo_mode():
-        raise HTTPException(status_code=400, detail="Stripe not configured (.env missing STRIPE_SECRET_KEY).")
+    if not cust_id:
+        created = stripe.Customer.create(
+            email=(user.email or "").strip().lower(),
+            name=user.username or "",
+            metadata={"app_user_id": str(getattr(user, "id", ""))}
+        )
+        cust_id = created["id"]
 
-# ---------- endpoints
+    # persist if model has the field
+    try:
+        if hasattr(user, "stripe_customer_id"):
+            setattr(user, "stripe_customer_id", cust_id)
+            db.add(user)
+            db.commit()
+    except Exception as e:
+        logger.warning(f"Could not persist stripe_customer_id: {e}")
+        db.rollback()
+
+    return cust_id
+
+
+def _mark_user_as_subscribed(user: User, plan: str, db: Session,
+                             customer_id: Optional[str], payment_intent_id: Optional[str]):
+    """Persist local subscription state."""
+    changed = False
+    if hasattr(user, "subscription_tier"):
+        if getattr(user, "subscription_tier", "free") != plan:
+            setattr(user, "subscription_tier", plan)
+            changed = True
+
+    # optional fields – save if you have them
+    if hasattr(user, "subscription_expires_at"):
+        setattr(user, "subscription_expires_at", datetime.utcnow() + timedelta(days=30))
+        changed = True
+    if hasattr(user, "stripe_customer_id") and customer_id:
+        setattr(user, "stripe_customer_id", customer_id)
+        changed = True
+
+    try:
+        if changed:
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+    except Exception as e:
+        logger.error(f"Failed to update user subscription_tier: {e}")
+        db.rollback()
+
+    # Optionally store a row in a Subscription table if you have one
+    if Subscription:
+        try:
+            sub = db.query(Subscription).filter(Subscription.user_id == user.id).first()
+            if not sub:
+                sub = Subscription(user_id=user.id)
+            if hasattr(sub, "tier"):
+                sub.tier = plan
+            if hasattr(sub, "status"):
+                sub.status = "active"
+            if hasattr(sub, "stripe_customer_id") and customer_id:
+                sub.stripe_customer_id = customer_id
+            if hasattr(sub, "stripe_payment_intent_id") and payment_intent_id:
+                sub.stripe_payment_intent_id = payment_intent_id
+            if hasattr(sub, "current_period_end"):
+                sub.current_period_end = datetime.utcnow() + timedelta(days=30)
+            db.add(sub)
+            db.commit()
+        except Exception as e:
+            logger.warning(f"Could not upsert Subscription row: {e}")
+            db.rollback()
+
+
+# ====== endpoints ======
 @router.get("/billing/config")
 def billing_config():
-    ensure_stripe()
-    if demo_mode():
-        return {"mode": stripe_mode(), "is_demo": True, "prices": {"pro": None, "premium": None}, "source": "demo"}
-
-    pro_id, pro_src = resolve_price_id("pro", None)
-    prem_id, prem_src = resolve_price_id("premium", None)
-    return {
-        "mode": stripe_mode(),
-        "is_demo": not (pro_id and prem_id),
-        "prices": {"pro": pro_id, "premium": prem_id},
-        "source": {"pro": pro_src, "premium": prem_src},
+    """Frontend loads keys & resolved price IDs from here."""
+    payload: Dict[str, Any] = {
+        "publishable_key": STRIPE_PUBLISHABLE_KEY or "",
+        "mode": "test" if "test" in (STRIPE_SECRET_KEY or "") else "live",
     }
+    try:
+        payload["pro_price_id"] = _resolve_price_id("pro")
+    except Exception:
+        payload["pro_price_id"] = None
+    try:
+        payload["premium_price_id"] = _resolve_price_id("premium")
+    except Exception:
+        payload["premium_price_id"] = None
+    return payload
+
 
 @router.post("/create_payment_intent/")
-def create_payment_intent(body: CreateIntentBody, user=Depends(lambda: None)):
-    require_stripe_ready()
-    plan = (body.plan_type or "").lower() or ("pro" if "pro" in (body.price_id or "").lower() else "premium")
-    price_id, src = resolve_price_id(plan, body.price_id)
-    if not price_id:
-        raise HTTPException(status_code=400, detail="Unable to resolve a valid Stripe price for this plan.")
+def create_payment_intent(data: Dict[str, Any],
+                          user: User = Depends(get_current_user),
+                          db: Session = Depends(get_db)):
+    """
+    body: { "plan": "pro" | "premium" }
+    """
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(500, "Stripe is not configured")
 
+    plan = (data or {}).get("plan", "pro").lower()
+    price_id = _resolve_price_id(plan)
+
+    # Fetch the Price to get amount/currency (safe + future proof)
     price = stripe.Price.retrieve(price_id)
+    if not (price and price["unit_amount"] and price["currency"]):
+        raise HTTPException(400, "Invalid Stripe Price")
+
+    # Ensure Customer in Stripe
+    customer_id = _ensure_customer_for_user(user, db)
+
+    # Create PI **tied to the customer**
     intent = stripe.PaymentIntent.create(
         amount=price["unit_amount"],
         currency=price["currency"],
-        automatic_payment_methods={"enabled": True, "allow_redirects": "never"},
-        metadata={"plan": plan},
-        description=f"YouTube Content Downloader – {plan.capitalize()} Plan",
+        customer=customer_id,
+        automatic_payment_methods={"enabled": True},
+        description=f"YouTube Content Downloader — {plan.capitalize()} Plan",
+        metadata={
+            "app_user_id": str(user.id),
+            "plan": plan,
+            "price_id": price_id
+        },
     )
-    return {"payment_intent_id": intent["id"]}
+    return {
+        "payment_intent_id": intent["id"],
+        "client_secret": intent["client_secret"],
+        "amount": intent["amount"],
+        "currency": intent["currency"],
+        "plan": plan
+    }
+
 
 @router.post("/confirm_payment/")
-def confirm_payment(body: ConfirmBody):
-    require_stripe_ready()
+def confirm_payment(data: Dict[str, Any],
+                    user: User = Depends(get_current_user),
+                    db: Session = Depends(get_db)):
+    """
+    body: { "payment_intent_id": "...", "plan": "pro" | "premium" }
+    NOTE: For local sandbox we confirm server-side. In production, use Stripe.js.
+    """
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(500, "Stripe is not configured")
+
+    payment_intent_id = (data or {}).get("payment_intent_id")
+    plan = (data or {}).get("plan", "pro").lower()
+    if not payment_intent_id:
+        raise HTTPException(400, "payment_intent_id is required")
+
     try:
-        pi = stripe.PaymentIntent.confirm(
-            body.payment_intent_id,
-            payment_method="pm_card_visa",
-            return_url=f"{FRONTEND_URL}/subscription?paid=1",
+        # For sandbox we can pass a test PM; in production, confirm client-side.
+        confirmed = stripe.PaymentIntent.confirm(
+            payment_intent_id,
+            payment_method="pm_card_visa"  # TEST ONLY
         )
-        status = pi.get("status", "requires_action")
-        return {"status": status, "client_secret": pi.get("client_secret")}
-    except stripe.error.StripeError as e:
-        logger.error(f"Stripe confirm error: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Stripe confirm failed: {e}")
+        raise HTTPException(400, "Payment confirmation failed")
+
+    status_pi = confirmed["status"]
+    if status_pi != "succeeded":
+        # You can expand supported statuses if you need 3DS, etc.
+        raise HTTPException(400, f"Payment not completed (status={status_pi})")
+
+    # Link Customer & mark user as subscribed locally
+    customer_id = confirmed.get("customer")
+    _mark_user_as_subscribed(user, plan, db, customer_id, payment_intent_id)
+
+    return {
+        "status": "active",
+        "plan": plan,
+        "stripe": {
+            "payment_intent": confirmed["id"],
+            "customer": customer_id
+        }
+    }
+
 
 #========================================
 
