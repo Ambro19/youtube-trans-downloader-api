@@ -227,7 +227,9 @@ def create_payment_intent(data: Dict[str, Any],
         amount=price["unit_amount"],
         currency=price["currency"],
         customer=customer_id,
-        automatic_payment_methods={"enabled": True},
+        automatic_payment_methods={
+            "enabled": True,"allow_redirects": "never", 
+        },
         description=f"YouTube Content Downloader — {plan.capitalize()} Plan",
         metadata={
             "app_user_id": str(user.id),
