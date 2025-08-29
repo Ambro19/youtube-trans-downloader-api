@@ -1,6 +1,6 @@
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 import os, re, time, socket, mimetypes, logging, jwt
 
 from fastapi import FastAPI, HTTPException, Depends, status, Request, Query
@@ -118,7 +118,6 @@ def create_access_token_for_mobile(username: str) -> str:
 def verify_password(plain: str, hashed: str) -> bool: return pwd_context.verify(plain, hashed)
 def get_password_hash(pw: str) -> str: return pwd_context.hash(pw)
 
-from sqlalchemy.orm import Session
 def get_user(db: Session, username: str) -> Optional[User]:
     return db.query(User).filter(User.username == username).first()
 
@@ -159,11 +158,144 @@ def extract_youtube_video_id(text: str) -> str:
         if m: return m.group(1)[:11]
     return text.strip()[:11]
 
-# -------------------- Transcript helpers (same as yours) ---------------------
-# (omitted here for brevity – identical to your version)
+# -------------------- Transcript helpers ------------------------------------
+def segments_to_vtt(transcript) -> str:
+    def sec_to_vtt(ts: float) -> str:
+        h = int(ts // 3600)
+        m = int((ts % 3600) // 60)
+        s = int(ts % 60)
+        ms = int((ts - int(ts)) * 1000)
+        return f"{h:02}:{m:02}:{s:02}.{ms:03}"
+    lines = ["WEBVTT", "Kind: captions", "Language: en", ""]
+    for seg in transcript:
+        start = sec_to_vtt(seg.get("start", 0))
+        end = sec_to_vtt(seg.get("start", 0) + seg.get("duration", 0))
+        text = (seg.get("text") or "").replace("\n", " ").strip()
+        lines.append(f"{start} --> {end}")
+        lines.append(text)
+        lines.append("")
+    return "\n".join(lines)
 
-# -------------------- Usage limits / records (same as yours) -----------------
-# (identical to your version)
+def segments_to_srt(transcript) -> str:
+    def sec_to_srt(ts: float) -> str:
+        h = int(ts // 3600)
+        m = int((ts % 3600) // 60)
+        s = int(ts % 60)
+        ms = int((ts - int(ts)) * 1000)
+        return f"{h:02}:{m:02}:{s:02},{ms:03}"
+    out = []
+    for i, seg in enumerate(transcript, start=1):
+        start = sec_to_srt(seg.get("start", 0))
+        end = sec_to_srt(seg.get("start", 0) + seg.get("duration", 0))
+        text = (seg.get("text") or "").replace("\n", " ").strip()
+        out.append(str(i))
+        out.append(f"{start} --> {end}")
+        out.append(text)
+        out.append("")
+    return "\n".join(out)
+
+def get_transcript_youtube_api(video_id: str, clean: bool = True, fmt: Optional[str] = None) -> str:
+    logger.info("Transcript for %s (clean=%s, fmt=%s)", video_id, clean, fmt)
+
+    if not check_internet():
+        raise HTTPException(status_code=503, detail="No internet connection available.")
+    if not check_youtube():
+        raise HTTPException(status_code=503, detail="Cannot reach YouTube right now.")
+
+    try:
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
+    except Exception as e:
+        logger.error("YouTubeTranscriptApi failed: %s", e)
+        # Try yt-dlp fallback
+        try:
+            fb = get_transcript_with_ytdlp(video_id, clean=clean)
+            if fb:
+                return fb
+        except Exception as ee:
+            logger.error("yt-dlp fallback also failed: %s", ee)
+        # Bubble user-friendly error
+        if "No transcripts were found" in str(e) or "TranscriptsDisabled" in str(e):
+            raise HTTPException(status_code=404, detail="This video has no captions/transcripts.")
+        raise HTTPException(status_code=404, detail="No transcript/captions found for this video.")
+
+    if clean:
+        text = " ".join((seg.get("text") or "").replace("\n", " ") for seg in transcript)
+        text = " ".join(text.split())
+        # paragraphize ~400+ chars on sentence boundaries
+        out, cur, chars = [], [], 0
+        for word in text.split():
+            cur.append(word); chars += len(word) + 1
+            if chars > 400 and word.endswith((".", "!", "?")):
+                out.append(" ".join(cur)); cur, chars = [], 0
+        if cur: out.append(" ".join(cur))
+        return "\n\n".join(out)
+
+    # Unclean
+    if fmt == "srt":
+        return segments_to_srt(transcript)
+    if fmt == "vtt":
+        return segments_to_vtt(transcript)
+    # default "timestamped lines"
+    lines = []
+    for seg in transcript:
+        t = int(seg.get("start", 0))
+        timestamp = f"[{t//60:02d}:{t%60:02d}]"
+        txt = (seg.get("text") or "").replace("\n", " ")
+        lines.append(f"{timestamp} {txt}")
+    return "\n".join(lines)
+
+# -------------------- Usage limits / records --------------------------------
+def increment_user_usage(db: Session, user: User, usage_type: str) -> int:
+    current = getattr(user, f"usage_{usage_type}", 0) or 0
+    new_val = current + 1
+    setattr(user, f"usage_{usage_type}", new_val)
+
+    now = datetime.utcnow()
+    if not getattr(user, "usage_reset_date", None):
+        user.usage_reset_date = now
+    elif user.usage_reset_date.month != now.month:
+        user.usage_clean_transcripts = 0
+        user.usage_unclean_transcripts = 0
+        user.usage_audio_downloads = 0
+        user.usage_video_downloads = 0
+        user.usage_reset_date = now
+        setattr(user, f"usage_{usage_type}", 1)
+        new_val = 1
+
+    db.commit()
+    db.refresh(user)
+    return new_val
+
+def check_usage_limit(user: User, usage_type: str) -> Tuple[bool, int, int]:
+    tier = getattr(user, "subscription_tier", "free")
+    limits = {
+        "free":   {"clean_transcripts": 5,  "unclean_transcripts": 3,  "audio_downloads": 2,  "video_downloads": 1},
+        "pro":    {"clean_transcripts": 100,"unclean_transcripts": 50, "audio_downloads": 50, "video_downloads": 20},
+        "premium":{"clean_transcripts": float("inf"), "unclean_transcripts": float("inf"),
+                   "audio_downloads": float("inf"), "video_downloads": float("inf")},
+    }
+    cur = getattr(user, f"usage_{usage_type}", 0) or 0
+    limit = limits.get(tier, limits["free"]).get(usage_type, 0)
+    return cur < limit, cur, limit
+
+def create_download_record(db: Session, user: User, kind: str, youtube_id: str, **kw):
+    try:
+        rec = TranscriptDownload(
+            user_id=user.id,
+            youtube_id=youtube_id,
+            transcript_type=kind,
+            quality=kw.get("quality", "default"),
+            file_format=kw.get("file_format", "txt"),
+            file_size=kw.get("file_size", 0),
+            processing_time=kw.get("processing_time", 0),
+            created_at=datetime.utcnow(),
+        )
+        db.add(rec); db.commit(); db.refresh(rec)
+        return rec
+    except Exception as e:
+        logger.error("Create download record failed: %s", e)
+        db.rollback()
+        return None
 
 # -------------------- Schemas -----------------------------------------------
 class UserCreate(BaseModel): username: str; email: str; password: str
@@ -180,6 +312,16 @@ class VideoRequest(BaseModel): youtube_id: str; quality: str="720p"
 async def on_startup():
     initialize_database()
     logger.info("Environment: %s", ENVIRONMENT)
+    logger.info("Backend started")
+    # --- DEBUG: print route table on startup ---
+    try:
+        for r in app.routes:
+            methods = getattr(r, "methods", None)
+            path = getattr(r, "path", None)
+            if path:
+                logger.info("ROUTE %-18s %s", (",".join(sorted(methods)) if methods else ""), path)
+    except Exception as e:
+        logger.debug("route table print failed: %s", e)
 
 # -------------------- Routes -------------------------------------------------
 @app.get("/")
@@ -212,7 +354,45 @@ def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
 
 # -------------------- Transcript --------------------------------------------
-# (unchanged from your version)
+@app.post("/download_transcript")
+@app.post("/download_transcript/")
+def download_transcript(req: TranscriptRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    start = time.time()
+    vid = extract_youtube_video_id(req.youtube_id)
+    if not vid or len(vid) != 11:
+        raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    if not check_internet():
+        raise HTTPException(status_code=503, detail="No internet connection available.")
+
+    usage_key = "clean_transcripts" if req.clean_transcript else "unclean_transcripts"
+    ok, used, limit = check_usage_limit(user, usage_key)
+    if not ok:
+        tname = "clean" if req.clean_transcript else "unclean"
+        raise HTTPException(status_code=403, detail=f"Monthly limit reached for {tname} transcripts ({used}/{limit}).")
+
+    text = get_transcript_youtube_api(vid, clean=req.clean_transcript, fmt=req.format)
+    if not text:
+        raise HTTPException(status_code=404, detail="No transcript found for this video.")
+
+    new_usage = increment_user_usage(db, user, usage_key)
+    proc = time.time() - start
+    rec = create_download_record(
+        db=db, user=user, kind=usage_key, youtube_id=vid,
+        file_format=(req.format if not req.clean_transcript else "txt"),
+        file_size=len(text), processing_time=proc
+    )
+    return {
+        "transcript": text,
+        "youtube_id": vid,
+        "clean_transcript": req.clean_transcript,
+        "format": req.format,
+        "processing_time": round(proc, 2),
+        "success": True,
+        "usage_updated": new_usage,
+        "usage_type": usage_key,
+        "download_record_id": rec.id if rec else None,
+        "account": canonical_account(user),
+    }
 
 # -------------------- Audio --------------------------------------------------
 def _touch_now(p: Path):
@@ -396,16 +576,115 @@ async def download_file(request: Request, file_type: str, filename: str, auth: O
     headers = {"Content-Disposition": f'attachment; filename="{safe_name}"', "Content-Length": str(size), "Accept-Ranges": "bytes"}
     return FileResponse(path=str(file_path), media_type=mime, headers=headers, filename=safe_name)
 
-# -------------------- History / activity / subscription (same as yours) -----
-# (identical to your versions)
+# -------------------- History / activity / subscription ---------------------
+@app.get("/user/download-history")
+def get_download_history(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    rows = db.query(TranscriptDownload).filter(TranscriptDownload.user_id == current_user.id).order_by(TranscriptDownload.created_at.desc()).limit(50).all()
+    hist = [{
+        "id": d.id,
+        "type": d.transcript_type,
+        "video_id": d.youtube_id,
+        "quality": d.quality or "default",
+        "file_format": d.file_format or "unknown",
+        "file_size": d.file_size or 0,
+        "downloaded_at": d.created_at.isoformat() if d.created_at else None,
+        "processing_time": d.processing_time or 0,
+        "status": getattr(d, "status", "completed"),
+        "language": getattr(d, "language", "en"),
+    } for d in rows]
+    return {"downloads": hist, "total_count": len(hist), "account": canonical_account(current_user)}
 
-# -------------------- SPA serving (unchanged) --------------------------------
+@app.get("/user/recent-activity")
+@app.get("/user/recent-activity/")
+def get_recent_activity(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    rows = db.query(TranscriptDownload).filter(TranscriptDownload.user_id == current_user.id).order_by(TranscriptDownload.created_at.desc()).limit(10).all()
+    activities = []
+    for d in rows:
+        t = d.transcript_type
+        if t == "clean_transcripts":
+            action, icon, desc = "Generated clean transcript", "📄", f"Clean transcript for {d.youtube_id}"
+        elif t == "unclean_transcripts":
+            action, icon, desc = "Generated timestamped transcript", "🕒", f"Timestamped transcript for {d.youtube_id}"
+        elif t == "audio_downloads":
+            action, icon, desc = "Downloaded audio file", "🎵", f"{(d.quality or 'unknown').title()} MP3 from {d.youtube_id}"
+        elif t == "video_downloads":
+            action, icon, desc = "Downloaded video file", "🎬", f"{d.quality or 'unknown'} MP4 from {d.youtube_id}"
+        else:
+            action, icon, desc = f"Downloaded {t}", "📁", f"Content from {d.youtube_id}"
+        activities.append({
+            "id": d.id, "action": action, "description": desc,
+            "timestamp": d.created_at.isoformat() if d.created_at else None,
+            "type": "download", "icon": icon, "video_id": d.youtube_id, "file_size": d.file_size
+        })
+    if not activities:
+        activities.append({
+            "id": 0, "action": "Account created",
+            "description": f"Welcome to the app, {current_user.username}!",
+            "timestamp": current_user.created_at.isoformat() if current_user.created_at else None,
+            "type": "auth", "icon": "🎉"
+        })
+    return {"activities": activities, "total_count": len(activities), "account": canonical_account(current_user)}
+
+@app.get("/subscription_status")
+@app.get("/subscription_status/")
+def subscription_status(current_user: User = Depends(get_current_user)):
+    tier = getattr(current_user, "subscription_tier", "free")
+    usage = {
+        "clean_transcripts": getattr(current_user, "usage_clean_transcripts", 0) or 0,
+        "unclean_transcripts": getattr(current_user, "usage_unclean_transcripts", 0) or 0,
+        "audio_downloads": getattr(current_user, "usage_audio_downloads", 0) or 0,
+        "video_downloads": getattr(current_user, "usage_video_downloads", 0) or 0,
+    }
+    LIM = {
+        "free": {"clean_transcripts": 5, "unclean_transcripts": 3, "audio_downloads": 2, "video_downloads": 1},
+        "pro": {"clean_transcripts": 100, "unclean_transcripts": 50, "audio_downloads": 50, "video_downloads": 20},
+        "premium": {"clean_transcripts": float("inf"), "unclean_transcripts": float("inf"), "audio_downloads": float("inf"), "video_downloads": float("inf")},
+    }.get(tier, {})
+    limits = {k: ("unlimited" if v == float("inf") else v) for k, v in LIM.items()}
+    return {"tier": tier, "status": ("active" if tier != "free" else "inactive"), "usage": usage, "limits": limits, "downloads_folder": str(DOWNLOADS_DIR), "account": canonical_account(current_user)}
+
+@app.get("/health")
+def health():
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "environment": ENVIRONMENT,
+        "services": {
+            "youtube_api": "available",
+            "stripe": "configured" if os.getenv("STRIPE_SECRET_KEY") else "not_configured",
+            "file_system": "accessible",
+            "yt_dlp": "available" if check_ytdlp_availability() else "unavailable",
+        },
+        "downloads_path": str(DOWNLOADS_DIR),
+    }
+
+@app.get("/debug/users")
+def debug_users(db: Session = Depends(get_db)):
+    if os.getenv("ENVIRONMENT") != "development":
+        raise HTTPException(status_code=404, detail="Not found")
+    users = db.query(User).all()
+    return {
+        "total_users": len(users),
+        "users": [{
+            "id": u.id,
+            "username": u.username,
+            "email": (u.email or "").strip().lower(),
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+            "subscription_tier": getattr(u, "subscription_tier", "free"),
+            "is_active": getattr(u, "is_active", True),
+        } for u in users]
+    }
+
+# -------------------- SPA serving (updated with API path guarding) ----------
 FRONTEND_BUILD = (Path(__file__).resolve().parents[1] / "frontend" / "build")
 if FRONTEND_BUILD.exists():
     app.mount("/_spa", StaticFiles(directory=str(FRONTEND_BUILD), html=True), name="spa")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa_catch_all(full_path: str):
+        # Do NOT handle paths that start with API-ish prefixes
+        if full_path.startswith(("download_", "user/", "subscription_status", "health", "token", "register", "files/", "debug/")):
+            raise HTTPException(status_code=404, detail="Not found")
         index_file = FRONTEND_BUILD / "index.html"
         if index_file.exists():
             return HTMLResponse(index_file.read_text(encoding="utf-8"))
@@ -415,7 +694,6 @@ if __name__ == "__main__":
     import uvicorn
     print(f"Starting server on 0.0.0.0:8000 — files: {DOWNLOADS_DIR}")
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
 
 ################################################################
 ################################################################
