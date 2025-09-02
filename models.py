@@ -1,4 +1,3 @@
-# backend/models.py
 from datetime import datetime
 import os
 from typing import Optional
@@ -10,6 +9,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
 
 # --- SQLAlchemy base/engine/session -----------------------------------------
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./youtube_trans_downloader.db")
+
 engine = create_engine(
     DATABASE_URL,
     connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
@@ -32,9 +32,11 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     is_verified = Column(Boolean, default=False)
 
-    # subscription + usage fields expected by main.py
+    # subscription + usage fields expected by app
     subscription_tier = Column(String(50), default="free")   # free | pro | premium
     stripe_customer_id = Column(String(255), nullable=True)
+    # add missing field so /cancel_subscription works reliably
+    stripe_subscription_id = Column(String(255), nullable=True)
 
     usage_clean_transcripts = Column(Integer, default=0)
     usage_unclean_transcripts = Column(Integer, default=0)
@@ -47,6 +49,7 @@ class User(Base):
 
     def __repr__(self):
         return f"<User id={self.id} username={self.username!r} tier={self.subscription_tier!r}>"
+
 
 class Subscription(Base):
     __tablename__ = "subscriptions"
@@ -70,13 +73,15 @@ class Subscription(Base):
 
     user = relationship("User", back_populates="subscriptions")
 
+
 class TranscriptDownload(Base):
     __tablename__ = "transcript_downloads"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
     youtube_id = Column(String(20), index=True, nullable=False)
 
-    transcript_type = Column(String(50), nullable=False)  # clean_transcripts | unclean_transcripts | audio_downloads | video_downloads
+    # clean_transcripts | unclean_transcripts | audio_downloads | video_downloads
+    transcript_type = Column(String(50), nullable=False)
     quality = Column(String(20), nullable=True)
     file_format = Column(String(10), nullable=True)
     file_size = Column(Integer, nullable=True)
@@ -95,6 +100,7 @@ class TranscriptDownload(Base):
 
     user = relationship("User", back_populates="downloads")
 
+
 # --- Helpers used by main.py -------------------------------------------------
 def get_db() -> Session:
     db = SessionLocal()
@@ -103,12 +109,44 @@ def get_db() -> Session:
     finally:
         db.close()
 
+
+def _ensure_runtime_columns():
+    """
+    Lightweight 'migration': add missing columns on SQLite for dev machines.
+    In production you should use Alembic; this keeps local dev from breaking.
+    """
+    if not DATABASE_URL.startswith("sqlite"):
+        return
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    cols = {c["name"] for c in insp.get_columns("users")}
+    needed = set()
+
+    if "stripe_subscription_id" not in cols:
+        needed.add(("stripe_subscription_id", "TEXT"))
+    # add more columns here if you evolve the schema
+
+    if not needed:
+        return
+
+    with engine.connect() as conn:
+        for name, sqltype in needed:
+            try:
+                conn.execute(text(f'ALTER TABLE users ADD COLUMN "{name}" {sqltype}'))
+            except Exception:
+                pass
+        conn.commit()
+
+
 def initialize_database() -> bool:
     try:
         Base.metadata.create_all(bind=engine)
+        _ensure_runtime_columns()
         return True
     except Exception:
         return False
+
 
 def create_download_record_safe(
     db: Session, user_id: int, download_type: str, youtube_id: str, **kw
@@ -128,17 +166,23 @@ def create_download_record_safe(
             status="completed",
             created_at=datetime.utcnow(),
         )
-        db.add(rec); db.commit(); db.refresh(rec)
+        db.add(rec)
+        db.commit()
+        db.refresh(rec)
         return rec
     except Exception:
         db.rollback()
         return None
 
+
 __all__ = [
-    "User", "Subscription", "TranscriptDownload",
-    "engine", "SessionLocal", "Base",
-    "get_db", "initialize_database", "create_download_record_safe",
+    "User",
+    "Subscription",
+    "TranscriptDownload",
+    "engine",
+    "SessionLocal",
+    "Base",
+    "get_db",
+    "initialize_database",
+    "create_download_record_safe",
 ]
-
-
-

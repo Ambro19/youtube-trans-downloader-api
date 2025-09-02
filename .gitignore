@@ -49,6 +49,12 @@ youtube_transcript_downloader.db*
 .env.test.local
 .env.production.local
 
+# never commit local dbs or env
+
+*.db.*
+*.pyc
+
+
 # FastAPI specific
 .pytest_cache/
 htmlcov/
@@ -311,15 +317,5 @@ jwt_secret*
 oauth_*
 client_secret*
 
-#===========The Old .gitignore file ====================
-# .env
-# .env.local
-# .env.development
-# .env.production
-# __pycache__/
-# *.pyc
-# youtube_trans_downloader.db
-# .WEBVTT
-# .app.log
-# youtube_transcript_downloader.db
+
 
