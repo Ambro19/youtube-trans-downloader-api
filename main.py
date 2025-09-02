@@ -53,6 +53,14 @@ try:
 except Exception as e:
     logger.info("Timestamp middleware not loaded: %s", e)
 
+# in backend/main.py (near the payments include)
+from batch import router as batch_router
+
+try:
+    app.include_router(batch_router, tags=["batch"])
+except Exception as e:
+    logger.error("Could not include batch routes: %s", e)
+
 # Payments
 try:
     app.include_router(payment_router, tags=["payments"])
