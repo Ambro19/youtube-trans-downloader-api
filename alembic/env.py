@@ -2,36 +2,47 @@
 from __future__ import annotations
 
 import os
-from logging.config import fileConfig
+from pathlib import Path
 
 from alembic import context
-from sqlalchemy import engine_from_config, create_engine, pool
+from sqlalchemy import engine_from_config, pool
+from sqlalchemy.engine import Engine
+from logging.config import fileConfig
 
-# Import your models so Alembic can autogenerate from Base.metadata
-# IMPORTANT: path must match your project structure
-import models  # <- has Base = declarative_base()
+# --- Load backend/.env so DATABASE_URL works even from CLI ---
+try:
+    from dotenv import load_dotenv
+    load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
+except Exception:
+    pass
 
-# This is the Alembic Config object, which provides access to the values within the .ini file.
+# --- Alembic config object ---
 config = context.config
 
 # Interpret the config file for Python logging.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Set the target metadata for 'autogenerate' support
+# --- Import your models to get target_metadata ---
+# Make sure "backend" root is on sys.path
+import sys
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+
+import models  # <-- your backend/models.py
 target_metadata = models.Base.metadata
+
 
 # ---- Resolve DB URL from env (fallback to a sane default) --------------------
 def get_url() -> str:
-    # Single source of truth – prefer env var
     url = os.getenv("DATABASE_URL")
     if url:
         return url
     # Fallback (SQLite file in backend/)
     return "sqlite:///./youtube_trans_downloader.db"
 
-# ---- Offline mode ------------------------------------------------------------
+
 def run_migrations_offline() -> None:
+    """Run migrations in 'offline' mode."""
     url = get_url()
     context.configure(
         url=url,
@@ -39,47 +50,43 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
-        render_as_batch=url.startswith("sqlite"),  # needed for SQLite DDL changes
+        compare_server_default=True,
     )
+
     with context.begin_transaction():
         context.run_migrations()
 
-# ---- Online mode -------------------------------------------------------------
+
 def run_migrations_online() -> None:
-    url = get_url()
+    """Run migrations in 'online' mode."""
+    # Inject the URL so alembic.ini doesn't need a hardcoded value
+    configuration = config.get_section(config.config_ini_section) or {}
+    configuration["sqlalchemy.url"] = get_url()
 
-    # Option A: set the URL on the Alembic config then use engine_from_config
-    config.set_main_option("sqlalchemy.url", url)
+    # SQLite needs special connect args; others are fine with defaults.
+    url = configuration["sqlalchemy.url"]
+    is_sqlite = url.startswith("sqlite")
+    connect_args = {"check_same_thread": False} if is_sqlite else {}
 
-    if url.startswith("sqlite"):
-        # SQLite needs special handling (no connection pooling, batch mode)
-        connectable = create_engine(url, poolclass=pool.NullPool)
-        with connectable.connect() as connection:
-            context.configure(
-                connection=connection,
-                target_metadata=target_metadata,
-                compare_type=True,
-                render_as_batch=True,
-            )
-            with context.begin_transaction():
-                context.run_migrations()
-    else:
-        # Non-SQLite (Postgres/MySQL/etc.)
-        connectable = engine_from_config(
-            config.get_section(config.config_ini_section),
-            prefix="sqlalchemy.",
-            poolclass=pool.NullPool,
+    engine: Engine = engine_from_config(
+        configuration,
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+        connect_args=connect_args,
+    )
+
+    with engine.connect() as connection:
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True,
+            compare_server_default=True,
         )
-        with connectable.connect() as connection:
-            context.configure(
-                connection=connection,
-                target_metadata=target_metadata,
-                compare_type=True,
-            )
-            with context.begin_transaction():
-                context.run_migrations()
 
-# Entrypoint
+        with context.begin_transaction():
+            context.run_migrations()
+
+
 if context.is_offline_mode():
     run_migrations_offline()
 else:
