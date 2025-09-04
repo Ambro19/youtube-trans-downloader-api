@@ -12,8 +12,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 load_dotenv()
+# Load local overrides first, then base .env (local wins)
+load_dotenv(dotenv_path=find_dotenv(".env.local"), override=True)
+load_dotenv(dotenv_path=find_dotenv(".env"), override=False)
 
 from youtube_transcript_api import YouTubeTranscriptApi
 
