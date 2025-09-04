@@ -51,8 +51,6 @@ youtube_transcript_downloader.db*
 .env.*.local
 frontend/.env
 backend/.env
-# never commit local dbs or env
-
 *.db.*
 *.pyc
 
