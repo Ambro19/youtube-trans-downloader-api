@@ -1,4 +1,4 @@
-# YouTube Transcript Downloader - .gitignore
+# YouTube Content Downloader - .gitignore
 
 # =============================================================================
 # BACKEND (Python/FastAPI)
@@ -317,5 +317,12 @@ jwt_secret*
 oauth_*
 client_secret*
 
+# Batch processing state files
+.batch_jobs_snapshot.json
+batch_jobs_*.json
 
+# Other runtime data you might want to exclude
+*.log
+server_files/
+downloads/
 
