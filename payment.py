@@ -1,161 +1,165 @@
 # backend/payment.py
-import os
-import logging
-from typing import Optional, Dict, Any
+import os, logging
+from typing import Optional
+from fastapi import APIRouter, HTTPException, Depends, Request
+from pydantic import BaseModel
 
-import stripe
-from fastapi import APIRouter, Depends, HTTPException, Request
+from auth_deps import get_current_user   # ✅ no circular import
+from models import User
 
-# IMPORTANT: import after FastAPI imports so the name is available.
-# main.py defines get_current_user before it imports this router,
-# so this does NOT create a problematic circular reference.
-from main import get_current_user  # <-- fixes NameError
-
+router = APIRouter(prefix="/billing")
 logger = logging.getLogger("payment")
-router = APIRouter(prefix="/billing", tags=["billing"])
 
-# --- Env ---
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
-STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+# Optional Stripe
+stripe = None
+try:
+    import stripe as _stripe  # type: ignore
+    if os.getenv("STRIPE_SECRET_KEY"):
+        _stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+        stripe = _stripe
+except Exception:
+    stripe = None
 
-# Prefer lookup keys so you can rotate prices safely
-PRO_LOOKUP_KEY = os.getenv("STRIPE_PRO_LOOKUP_KEY", "pro_monthly")
-PREMIUM_LOOKUP_KEY = os.getenv("STRIPE_PREMIUM_LOOKUP_KEY", "premium_monthly")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+PRO_LOOKUP    = os.getenv("STRIPE_PRO_LOOKUP_KEY", "pro_monthly")
+PREM_LOOKUP   = os.getenv("STRIPE_PREMIUM_LOOKUP_KEY", "premium_monthly")
 
-if not STRIPE_SECRET_KEY:
-    logger.warning("STRIPE_SECRET_KEY missing; billing endpoints will fail.")
+class CheckoutPayload(BaseModel):
+    # new safer payload — we map plan/tier to lookup keys
+    plan: Optional[str] = None
+    tier: Optional[str] = None
+    price_lookup_key: Optional[str] = None  # backward-compat
 
-stripe.api_key = STRIPE_SECRET_KEY
+@router.get("/config")
+def config():
+    """
+    Returns minimal config for the UI and resolves price IDs via lookup keys.
+    """
+    mode = "live" if (os.getenv("STRIPE_SECRET_KEY", "").startswith("sk_live_")) else "test"
+    if not stripe:
+        return {
+            "mode": mode,
+            "is_demo": True,
+            "pro_price_id": None,
+            "premium_price_id": None
+        }
 
+    def _get_price_id(lookup_key: str) -> Optional[str]:
+        try:
+            # Resilient: use lookup_keys[] filter
+            lst = stripe.Price.list(active=True, lookup_keys=[lookup_key], limit=1)
+            if lst.data:
+                return lst.data[0].id
+        except Exception as e:
+            logger.warning("Stripe price lookup failed for %s: %s", lookup_key, e)
+        return None
 
-def _get_price_by_lookup_key(lookup_key: str) -> stripe.Price:
-    """Fetch a single active price by lookup key."""
+    return {
+        "mode": mode,
+        "is_demo": False,
+        "pro_price_id": _get_price_id(PRO_LOOKUP),
+        "premium_price_id": _get_price_id(PREM_LOOKUP),
+    }
+
+def _resolve_lookup_key(payload: CheckoutPayload) -> str:
+    if payload.price_lookup_key:
+        return payload.price_lookup_key
+    plan = (payload.plan or payload.tier or "").lower().strip()
+    if plan == "pro":
+        return PRO_LOOKUP
+    if plan == "premium":
+        return PREM_LOOKUP
+    raise HTTPException(status_code=400, detail="Missing plan (expected 'pro' or 'premium').")
+
+def _price_id_from_lookup(lookup_key: str) -> str:
+    if not stripe:
+        # In dev without Stripe, simulate a session error with message
+        raise HTTPException(status_code=503, detail="Stripe is not configured on the server.")
     try:
         prices = stripe.Price.list(active=True, lookup_keys=[lookup_key], limit=1)
         if not prices.data:
-            raise HTTPException(status_code=400, detail=f"Unknown lookup key: {lookup_key}")
-        return prices.data[0]
-    except stripe.error.StripeError as e:
-        logger.exception("Stripe error while fetching price for lookup key %s", lookup_key)
-        raise HTTPException(status_code=502, detail=str(e)) from e
-
-
-def _lookup_key_from_plan(plan: Optional[str]) -> Optional[str]:
-    if not plan:
-        return None
-    p = plan.strip().lower()
-    if p == "pro":
-        return PRO_LOOKUP_KEY
-    if p == "premium":
-        return PREMIUM_LOOKUP_KEY
-    return None
-
-
-@router.get("/config")
-def get_billing_config() -> Dict[str, Any]:
-    """Expose publishable key and the current price IDs resolved from lookup keys."""
-    pro_price_id = None
-    premium_price_id = None
-    try:
-        pro_price_id = _get_price_by_lookup_key(PRO_LOOKUP_KEY).id
-    except Exception:
-        pass
-    try:
-        premium_price_id = _get_price_by_lookup_key(PREMIUM_LOOKUP_KEY).id
-    except Exception:
-        pass
-
-    return {
-        "publishableKey": STRIPE_PUBLISHABLE_KEY,
-        "prices": {
-            "pro": {"lookup_key": PRO_LOOKUP_KEY, "price_id": pro_price_id},
-            "premium": {"lookup_key": PREMIUM_LOOKUP_KEY, "price_id": premium_price_id},
-        },
-    }
-
+            raise HTTPException(status_code=404, detail=f"No Stripe price for lookup key '{lookup_key}'.")
+        return prices.data[0].id
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Stripe price list failed")
+        raise HTTPException(status_code=502, detail=f"Stripe error: {e}")
 
 @router.post("/create_checkout_session")
-async def create_checkout_session(
-    payload: Dict[str, Any],
-    request: Request,
-    user=Depends(get_current_user),  # <-- secured; now properly imported
-):
+async def create_checkout_session(payload: CheckoutPayload, user: User = Depends(get_current_user)):
     """
-    Body can be either:
-      { "price_lookup_key": "pro_monthly" }
-      OR
-      { "plan": "pro" | "premium" }
+    Create a Stripe Checkout Session for subscriptions.
+    Accepts { plan: 'pro'|'premium' } (or legacy { price_lookup_key }).
     """
-    # Accept both shapes
-    lookup_key = payload.get("price_lookup_key") or _lookup_key_from_plan(payload.get("plan"))
-    if not lookup_key:
-        logger.error("create_checkout_session: Missing price lookup key/plan")
-        raise HTTPException(status_code=400, detail="Missing price_lookup_key")
-
-    price = _get_price_by_lookup_key(lookup_key)
-
-    # Build URLs so "Back" returns to the subscription page (not Login)
-    success_url = f"{FRONTEND_URL}/subscription?session_id={{CHECKOUT_SESSION_ID}}"
-    cancel_url = f"{FRONTEND_URL}/subscription?canceled=true"
-
     try:
-        session = stripe.checkout.Session.create(
-            mode="subscription",
-            line_items=[{"price": price.id, "quantity": 1}],
-            success_url=success_url,
-            cancel_url=cancel_url,
-            # Attach email if we have it (helps customer linking)
-            customer_email=getattr(user, "email", None) or getattr(user, "username", None),
-            metadata={
-                "app_user": getattr(user, "username", None) or getattr(user, "email", None) or "unknown",
-                "lookup_key": lookup_key,
-            },
-            allow_promotion_codes=True,
-            automatic_tax={"enabled": True},
-        )
-        return {"id": session.id, "url": session.url}
-    except stripe.error.StripeError as e:
-        logger.exception("Failed to create Checkout session")
-        raise HTTPException(status_code=502, detail=str(e)) from e
+      lookup_key = _resolve_lookup_key(payload)
+      price_id   = _price_id_from_lookup(lookup_key)
 
+      success_url = f"{FRONTEND_URL}/subscription?status=success"
+      cancel_url  = f"{FRONTEND_URL}/subscription?status=cancel"
+
+      # Find or create a customer by email (simple approach for test mode)
+      customer_id = None
+      if stripe and getattr(user, "email", None):
+          try:
+              # search API may not be enabled in all accounts; using list as fallback
+              existing = stripe.Customer.list(email=user.email, limit=1)
+              if existing.data:
+                  customer_id = existing.data[0].id
+              else:
+                  cust = stripe.Customer.create(email=user.email, name=(user.username or ""))
+                  customer_id = cust.id
+          except Exception as e:
+              logger.warning("Could not ensure Stripe customer for %s: %s", user.email, e)
+
+      session = stripe.checkout.Session.create(
+          mode="subscription",
+          line_items=[{"price": price_id, "quantity": 1}],
+          success_url=success_url,
+          cancel_url=cancel_url,
+          customer=customer_id,
+          allow_promotion_codes=True,
+          automatic_tax={"enabled": True},
+      )
+
+      return {"id": session.id, "url": session.url}
+    except HTTPException:
+      raise
+    except Exception as e:
+      logger.error("Failed to create Checkout session: %s", e, exc_info=True)
+      raise HTTPException(status_code=500, detail="Failed to create checkout session")
 
 @router.post("/create_portal_session")
-async def create_portal_session(
-    payload: Dict[str, Any],
-    user=Depends(get_current_user),
-):
-    """
-    Expects { "customer_id": "cus_..." } from your stored customer mapping,
-    or you can look it up by email if you maintain that mapping.
-    """
-    customer_id = payload.get("customer_id")
-    if not customer_id:
-        raise HTTPException(status_code=400, detail="Missing customer_id")
-
+async def create_portal_session(user: User = Depends(get_current_user)):
+    if not stripe:
+        raise HTTPException(status_code=503, detail="Stripe is not configured on the server.")
     try:
-        session = stripe.billing_portal.Session.create(
-            customer=customer_id,
-            return_url=f"{FRONTEND_URL}/subscription",
-        )
-        return {"url": session.url}
-    except stripe.error.StripeError as e:
-        logger.exception("Failed to create billing portal session")
-        raise HTTPException(status_code=502, detail=str(e)) from e
+        # Same customer lookup as above
+        customer_id = None
+        if getattr(user, "email", None):
+            existing = stripe.Customer.list(email=user.email, limit=1)
+            if existing.data:
+                customer_id = existing.data[0].id
+            else:
+                cust = stripe.Customer.create(email=user.email, name=(user.username or ""))
+                customer_id = cust.id
 
+        portal = stripe.billing_portal.Session.create(
+            customer=customer_id,
+            return_url=f"{FRONTEND_URL}/subscription"
+        )
+        return {"url": portal.url}
+    except Exception as e:
+        logger.error("Failed to create portal session: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to open billing portal")
 
 @router.post("/cancel_subscription")
-async def cancel_subscription(
-    payload: Dict[str, Any],
-    user=Depends(get_current_user),
-):
-    subscription_id = payload.get("subscription_id")
-    if not subscription_id:
-        raise HTTPException(status_code=400, detail="Missing subscription_id")
-
-    try:
-        sub = stripe.Subscription.update(subscription_id, cancel_at_period_end=True)
-        return {"status": sub.status, "cancel_at_period_end": sub.cancel_at_period_end}
-    except stripe.error.StripeError as e:
-        logger.exception("Failed to cancel subscription")
-        raise HTTPException(status_code=502, detail=str(e)) from e
+async def cancel_subscription(user: User = Depends(get_current_user)):
+    # delegate to your existing main.py handler if you prefer;
+    # leaving a thin stub lets the front-end always POST /billing/cancel_subscription.
+    from main import cancel_subscription as _cancel  # local import to avoid circular at import-time
+    return _cancel.__wrapped__(  # type: ignore[attr-defined]
+        req=type("R", (), {"at_period_end": True})(),  # mimic Pydantic model default
+        current_user=user
+    )

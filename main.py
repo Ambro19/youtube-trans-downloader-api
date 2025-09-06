@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Tuple
 import os, re, time, socket, mimetypes, logging, jwt
 
+from auth_deps import get_current_user # add near the other imports
 from fastapi import FastAPI, HTTPException, Depends, status, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
