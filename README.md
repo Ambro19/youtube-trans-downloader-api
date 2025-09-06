@@ -1,5 +1,5 @@
-﻿# YouTube Transcript Downloader API
 # YouTube Content Downloader Setup Guide
+# Setup Guide
 
 ## Project Structure
 ```
@@ -146,4 +146,5 @@ For production:
 2. Update `REACT_APP_API_URL` to your production backend URL
 3. Use a secure random string for `SECRET_KEY`
 4. Consider using environment-specific configuration
+
 
