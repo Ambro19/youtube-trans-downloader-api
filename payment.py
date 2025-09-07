@@ -1,9 +1,7 @@
 # backend/payment.py
-import os
-import logging
-from typing import Optional
-
-from fastapi import APIRouter, Depends, HTTPException, Request
+import os, logging
+from typing import Optional, Dict, Any
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 
 # ✅ shared auth dependency (no circular import)
@@ -13,35 +11,30 @@ from models import User
 router = APIRouter(prefix="/billing", tags=["billing"])
 logger = logging.getLogger("payment")
 
-# --- Stripe (enabled only if a secret key is present) ---
-STRIPE_SECRET = os.getenv("STRIPE_SECRET_KEY", "").strip()
+# ---------- Optional Stripe ----------
 stripe = None
 try:
     import stripe as _stripe  # type: ignore
-    if STRIPE_SECRET:
-        _stripe.api_key = STRIPE_SECRET
+    if os.getenv("STRIPE_SECRET_KEY"):
+        _stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
         stripe = _stripe
-except Exception as e:
-    logger.warning("Stripe import/init failed: %s", e)
+except Exception:
     stripe = None
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
-PRO_LOOKUP   = os.getenv("STRIPE_PRO_LOOKUP_KEY", "pro_monthly")
-PREM_LOOKUP  = os.getenv("STRIPE_PREMIUM_LOOKUP_KEY", "premium_monthly")
-ENABLE_TAX   = os.getenv("STRIPE_ENABLE_TAX", "false").strip().lower() == "true"
+PRO_LOOKUP  = os.getenv("STRIPE_PRO_LOOKUP_KEY", "pro_monthly")
+PREM_LOOKUP = os.getenv("STRIPE_PREMIUM_LOOKUP_KEY", "premium_monthly")
 
-
-class CheckoutPayload(BaseModel):
-    # accept either plan or tier for compatibility
+class CheckoutIn(BaseModel):
+    # accept either key name
     plan: Optional[str] = None
     tier: Optional[str] = None
 
-
 def _get_price_id(lookup_key: str) -> Optional[str]:
     if not stripe:
-        logger.info("Stripe not configured; cannot resolve price for %s", lookup_key)
         return None
     try:
+        # resilient: filter by lookup_keys
         lst = stripe.Price.list(active=True, lookup_keys=[lookup_key], limit=1)
         if lst.data:
             return lst.data[0].id
@@ -49,110 +42,96 @@ def _get_price_id(lookup_key: str) -> Optional[str]:
         logger.warning("Stripe price lookup failed for %s: %s", lookup_key, e)
     return None
 
+def _ensure_customer(email: str) -> Optional[str]:
+    if not stripe or not email:
+        return None
+    try:
+        existing = stripe.Customer.list(email=email, limit=1)
+        if existing.data:
+            return existing.data[0].id
+        created = stripe.Customer.create(email=email)
+        return created.id
+    except Exception as e:
+        logger.warning("Stripe ensure customer failed for %s: %s", email, e)
+        return None
 
 @router.get("/config")
-def billing_config():
-    """
-    Frontend uses this to know if Stripe is test/live and to get price ids (if resolvable).
-    """
-    if not stripe:
-        return {
-            "mode": "disabled",
-            "is_demo": True,
-            "pro_price_id": None,
-            "premium_price_id": None,
-        }
-    try:
-        mode = "live" if STRIPE_SECRET.startswith("sk_live_") else "test"
-        pro = _get_price_id(PRO_LOOKUP)
-        premium = _get_price_id(PREM_LOOKUP)
-        return {
-            "mode": mode,
-            "is_demo": False,
-            "pro_price_id": pro,
-            "premium_price_id": premium,
-        }
-    except Exception as e:
-        logger.warning("billing_config error: %s", e)
-        return {"mode": "unknown", "is_demo": True, "pro_price_id": None, "premium_price_id": None}
-
+def billing_config() -> Dict[str, Any]:
+    """Expose which mode we're in + price ids (if available)."""
+    mode = "live" if (os.getenv("STRIPE_SECRET_KEY","").startswith("sk_live")) else "test"
+    pro_price = _get_price_id(PRO_LOOKUP) if stripe else None
+    prem_price = _get_price_id(PREM_LOOKUP) if stripe else None
+    return {
+        "mode": mode,
+        "is_demo": not bool(stripe),
+        "pro_price_id": pro_price,
+        "premium_price_id": prem_price,
+        "pro_lookup_key": PRO_LOOKUP,
+        "premium_lookup_key": PREM_LOOKUP,
+    }
 
 @router.post("/create_checkout_session")
-def create_checkout_session(payload: CheckoutPayload, user: User = Depends(get_current_user)):
+def create_checkout_session(payload: CheckoutIn, user: User = Depends(get_current_user)):
     """
-    Create Stripe Checkout for Pro/Premium subscriptions.
-    Disables automatic tax by default; can be enabled with STRIPE_ENABLE_TAX=true.
+    Creates a Stripe Checkout Session for a subscription.
+    - Disables Link so the page shows **payment options** like card/Klarna/Cash App (pic #4 style).
+    - Sets cancel/success to /subscription.
     """
     if not stripe:
-        raise HTTPException(status_code=503, detail="Billing is not configured")
+        raise HTTPException(status_code=503, detail="Stripe is not configured on this server")
 
-    tier = (payload.tier or payload.plan or "").strip().lower()
+    tier = (payload.plan or payload.tier or "").strip().lower()
     if tier not in {"pro", "premium"}:
-        raise HTTPException(status_code=400, detail="Invalid plan. Choose 'pro' or 'premium'.")
+        raise HTTPException(status_code=400, detail="Invalid plan; expected 'pro' or 'premium'.")
 
     lookup = PRO_LOOKUP if tier == "pro" else PREM_LOOKUP
     price_id = _get_price_id(lookup)
     if not price_id:
-        raise HTTPException(status_code=400, detail="Price not found for requested plan")
+        raise HTTPException(status_code=400, detail="Missing or invalid Stripe price for plan")
 
-    base_params = {
-        "mode": "subscription",
-        "line_items": [{"price": price_id, "quantity": 1}],
-        "success_url": f"{FRONTEND_URL}/subscription?status=success",
-        "cancel_url": f"{FRONTEND_URL}/subscription?status=cancelled",
-        "allow_promotion_codes": True,
-        "client_reference_id": f"user-{user.id}",
-        # prefer letting Stripe dedupe by email; you can also pass 'customer' if you store IDs
-        "customer_email": (user.email or None),
-    }
+    customer_id = _ensure_customer((user.email or "").strip().lower())
 
-    def try_create(with_tax: bool):
-        params = dict(base_params)
-        if with_tax:
-            params["automatic_tax"] = {"enabled": True}
-        return stripe.checkout.Session.create(**params)
+    # ⚙️ Show the multi-method UI (card + optional methods). Stripe will only display ones you’ve enabled.
+    payment_method_types = ["card", "cashapp", "klarna"]  # add "amazon_pay" if you’ve enabled it in Dashboard
 
     try:
-        if ENABLE_TAX:
-            try:
-                session = try_create(with_tax=True)
-            except Exception as e:
-                # Common in test mode if origin address not configured
-                logger.warning("Checkout with automatic tax failed; retrying without tax: %s", e)
-                session = try_create(with_tax=False)
-        else:
-            session = try_create(with_tax=False)
+        session = stripe.checkout.Session.create(
+            mode="subscription",
+            line_items=[{"price": price_id, "quantity": 1}],
+            customer=customer_id,                     # associates with the user
+            customer_email=(user.email or None),      # helps autofill email
+            
+            # ⬇️ You’ll land back on our app (no login redirect surprises)
+            success_url=f"{FRONTEND_URL}/subscription?status=success&session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{FRONTEND_URL}/subscription?status=cancel",
 
+            # Better UX
+            allow_promotion_codes=True,
+            billing_address_collection="auto",
+
+            # ✅ Key bit: disable Link so you get the full “Payment methods” layout
+            payment_method_types=payment_method_types,
+
+            # Prevent the “origin address for automatic tax” error in test mode
+            automatic_tax={"enabled": False},
+        )
         return {"url": session.url}
     except Exception as e:
         logger.error("Failed to create Checkout session: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to create checkout session")
 
-
 @router.post("/create_portal_session")
 def create_portal_session(user: User = Depends(get_current_user)):
-    """
-    Open the Stripe Customer Portal if available. (Optional)
-    """
+    """Stripe Customer Portal for manage/cancel."""
     if not stripe:
-        raise HTTPException(status_code=503, detail="Billing is not configured")
+        raise HTTPException(status_code=503, detail="Stripe is not configured on this server")
+    cid = _ensure_customer((user.email or "").strip().lower())
     try:
-        # Find or create customer by email
-        cust = None
-        if user.email:
-            res = stripe.Customer.list(email=user.email, limit=1)
-            cust = res.data[0] if res.data else None
-        if not cust and user.email:
-            cust = stripe.Customer.create(email=user.email, name=user.username or user.email)
-
-        if not cust:
-            raise HTTPException(status_code=400, detail="No customer email on file")
-
-        session = stripe.billing_portal.Session.create(
-            customer=cust.id,
+        portal = stripe.billing_portal.Session.create(
+            customer=cid,
             return_url=f"{FRONTEND_URL}/subscription",
         )
-        return {"url": session.url}
+        return {"url": portal.url}
     except Exception as e:
-        logger.error("Failed to create billing portal session: %s", e, exc_info=True)
+        logger.error("Failed to create Billing Portal session: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to open billing portal")
