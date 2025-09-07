@@ -1,23 +1,28 @@
 # backend/payment.py
-import os, logging
+import os
+import logging
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Depends, Request
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from auth_deps import get_current_user   # ✅ no circular import
+# ✅ shared auth dependency (avoids circular import with main.py)
+from auth_deps import get_current_user
 from models import User
 
-router = APIRouter(prefix="/billing")
+router = APIRouter(prefix="/billing", tags=["billing"])
 logger = logging.getLogger("payment")
 
-# Optional Stripe
+# --- Stripe (enabled only if a secret key is present) ---
+STRIPE_SECRET = os.getenv("STRIPE_SECRET_KEY", "").strip()
 stripe = None
 try:
     import stripe as _stripe  # type: ignore
-    if os.getenv("STRIPE_SECRET_KEY"):
-        _stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+    if STRIPE_SECRET:
+        _stripe.api_key = STRIPE_SECRET
         stripe = _stripe
-except Exception:
+except Exception as e:
+    logger.warning("Stripe import/init failed: %s", e)
     stripe = None
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
@@ -85,6 +90,18 @@ def _price_id_from_lookup(lookup_key: str) -> str:
     except Exception as e:
         logger.exception("Stripe price list failed")
         raise HTTPException(status_code=502, detail=f"Stripe error: {e}")
+
+def _get_price_id(lookup_key: str) -> Optional[str]:
+    if not stripe:
+        logger.info("Stripe is not configured; cannot resolve price for %s", lookup_key)
+        return None
+    try:
+        lst = stripe.Price.list(active=True, lookup_keys=[lookup_key], limit=1)
+        if lst.data:
+            return lst.data[0].id
+    except Exception as e:
+        logger.warning("Stripe price lookup failed for %s: %s", lookup_key, e)
+    return None
 
 @router.post("/create_checkout_session")
 async def create_checkout_session(payload: CheckoutPayload, user: User = Depends(get_current_user)):

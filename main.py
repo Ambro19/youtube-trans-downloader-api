@@ -3,7 +3,9 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Tuple
 import os, re, time, socket, mimetypes, logging, jwt
 
-from auth_deps import get_current_user # add near the other imports
+# ✅ use the shared dependency (no circular import)
+from auth_deps import get_current_user
+
 from fastapi import FastAPI, HTTPException, Depends, status, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -13,15 +15,16 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
+
+# .env loading (fine to keep here too)
 from dotenv import load_dotenv, find_dotenv
 load_dotenv()
-# Load local overrides first, then base .env (local wins)
 load_dotenv(dotenv_path=find_dotenv(".env.local"), override=True)
-load_dotenv(dotenv_path=find_dotenv(".env"), override=False)
+load_dotenv(dotenv_path=find_dotenv(".env"),       override=False)
 
 from youtube_transcript_api import YouTubeTranscriptApi
 
-# ---------------- Optional Stripe (for cancellation/portal/checkout orchestration)
+# Stripe optional
 stripe = None
 try:
     import stripe as _stripe  # type: ignore
@@ -31,7 +34,7 @@ try:
 except Exception:
     stripe = None
 
-# Local modules
+# Local modules (✅ payment AFTER auth_deps import)
 from payment import router as payment_router
 from models import User, TranscriptDownload, Subscription, get_db, initialize_database
 from transcript_utils import (
@@ -143,18 +146,18 @@ def get_password_hash(pw: str) -> str: return pwd_context.hash(pw)
 def get_user(db: Session, username: str) -> Optional[User]:
     return db.query(User).filter(User.username == username).first()
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
-    cred_exc = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials",
-                             headers={"WWW-Authenticate": "Bearer"})
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username = payload.get("sub")
-        if not username: raise cred_exc
-    except Exception:
-        raise cred_exc
-    user = get_user(db, username)
-    if not user: raise cred_exc
-    return user
+# def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+#     cred_exc = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials",
+#                              headers={"WWW-Authenticate": "Bearer"})
+#     try:
+#         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+#         username = payload.get("sub")
+#         if not username: raise cred_exc
+#     except Exception:
+#         raise cred_exc
+#     user = get_user(db, username)
+#     if not user: raise cred_exc
+#     return user
 
 def canonical_account(user: User) -> Dict[str, Any]:
     return {"username": (user.username or "").strip(), "email": (user.email or "").strip().lower()}
