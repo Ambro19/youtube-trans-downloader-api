@@ -385,16 +385,8 @@ def create_checkout_session(
             "allow_promotion_codes": True,
             "billing_address_collection": "auto",
             "automatic_tax": {"enabled": False},  # Avoid test-mode tax config errors
-            # Force consistent card-only design by completely disabling Link and other payment methods
-            "payment_method_types": ["card"],  # Only allow cards
-            "automatic_payment_methods": {"enabled": False},  # Disable automatic payment method detection
-            "payment_method_options": {
-                "card": {
-                    "setup_future_usage": "off_session"  # Disable Link for cards
-                }
-            },
-            # Additional Link-specific disabling
-            "payment_method_configuration": None,  # Don't use any saved payment method configurations
+            # Disable Link payment method for consistent design across all checkouts
+            "payment_method_types": ["card"],  # Only allow cards for consistent UI
         }
 
         session = stripe.checkout.Session.create(**session_params)
