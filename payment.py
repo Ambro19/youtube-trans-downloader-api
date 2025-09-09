@@ -374,7 +374,7 @@ def create_checkout_session(
         logger.error(f"Unexpected error getting customer: {e}")
         raise HTTPException(status_code=500, detail="Error setting up customer account")
 
-    # Build session params
+    # Build session params with consistent payment methods
     try:
         session_params = {
             "mode": "subscription",
@@ -385,6 +385,8 @@ def create_checkout_session(
             "allow_promotion_codes": True,
             "billing_address_collection": "auto",
             "automatic_tax": {"enabled": False},  # Avoid test-mode tax config errors
+            # Disable Link payment method for consistent design across all checkouts
+            "payment_method_types": ["card"],  # Only allow cards for consistent UI
         }
 
         session = stripe.checkout.Session.create(**session_params)
