@@ -5,6 +5,9 @@ import os, re, time, socket, mimetypes, logging, jwt
 
 # ✅ use the shared dependency (no circular import)
 from auth_deps import get_current_user
+# Add this import near the top with your other imports
+from webhook_handler import handle_stripe_webhook, fix_existing_premium_users
+
 
 from fastapi import FastAPI, HTTPException, Depends, status, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -145,19 +148,6 @@ def get_password_hash(pw: str) -> str: return pwd_context.hash(pw)
 
 def get_user(db: Session, username: str) -> Optional[User]:
     return db.query(User).filter(User.username == username).first()
-
-# def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
-#     cred_exc = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials",
-#                              headers={"WWW-Authenticate": "Bearer"})
-#     try:
-#         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-#         username = payload.get("sub")
-#         if not username: raise cred_exc
-#     except Exception:
-#         raise cred_exc
-#     user = get_user(db, username)
-#     if not user: raise cred_exc
-#     return user
 
 def canonical_account(user: User) -> Dict[str, Any]:
     return {"username": (user.username or "").strip(), "email": (user.email or "").strip().lower()}
@@ -331,8 +321,7 @@ class Token(BaseModel): access_token: str; token_type: str
 class TranscriptRequest(BaseModel): youtube_id: str; clean_transcript: bool=True; format: Optional[str]=None
 class AudioRequest(BaseModel): youtube_id: str; quality: str="medium"
 class VideoRequest(BaseModel): youtube_id: str; quality: str="720p"
-class CancelRequest(BaseModel):
-    at_period_end: Optional[bool] = True  # default: schedule cancel at period end
+class CancelRequest(BaseModel): at_period_end: Optional[bool] = True  # default: schedule cancel at period end
 
 # -------------------- Startup ------------------------------------------------
 @app.on_event("startup")
@@ -379,6 +368,33 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 @app.get("/users/me", response_model=UserResponse)
 def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
+
+# Add these routes anywhere in your route definitions section
+
+@app.post("/webhook/stripe")
+async def stripe_webhook_endpoint(request: Request):
+    """
+    Stripe webhook endpoint that automatically updates user subscription tiers.
+    Configure this URL in your Stripe dashboard: http://192.168.1.185:8000/webhook/stripe
+    """
+    return await handle_stripe_webhook(request)
+
+@app.post("/admin/fix-users")
+async def fix_users_endpoint():
+    """
+    One-time admin endpoint to fix users who paid but weren't upgraded.
+    Call this once to fix existing issues like the LovePets user.
+    """
+    try:
+        result = fix_existing_premium_users()
+        return {
+            "status": "success", 
+            "message": "Fixed existing premium users",
+            "details": result
+        }
+    except Exception as e:
+        logger.error(f"Fix users error: {e}")
+        raise HTTPException(status_code=500, detail=f"Error fixing users: {str(e)}")
 
 # -------------------- Subscription management -------------------------------
 def _latest_subscription(db: Session, user_id: int) -> Optional[Subscription]:
