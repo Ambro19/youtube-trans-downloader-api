@@ -20,9 +20,9 @@ import random
 
 logger = logging.getLogger("transcript_utils")
 
-# =============================================================================
+# ==============
 # CONFIGURATION
-# =============================================================================
+# ==============
 
 # Default download destination (main.py passes an explicit output_dir, but keep a sane default)
 DEFAULT_DOWNLOADS_DIR = Path.home() / "Downloads"
@@ -41,9 +41,9 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 ]
 
-# =============================================================================
+# ========
 # Helpers
-# =============================================================================
+# ========
 
 def _ua() -> str:
     return random.choice(USER_AGENTS)
@@ -86,9 +86,9 @@ def _parse_height(quality: str, default: int = 720) -> int:
     except Exception:
         return default
 
-# =============================================================================
+# ============
 # TRANSCRIPTS
-# =============================================================================
+# ============
 
 def get_transcript_with_ytdlp(video_id: str, clean: bool = True, retries: int = 3, wait_sec: int = 1) -> Optional[str]:
     """
@@ -228,9 +228,9 @@ def format_transcript_vtt(raw_vtt: str) -> str:
         logger.error(f"VTT format error: {e}")
         return raw_vtt
 
-# =============================================================================
+# =================
 # FORMAT DISCOVERY
-# =============================================================================
+# =================
 
 def has_actual_video_formats(formats_output: str) -> bool:
     try:
@@ -251,9 +251,9 @@ def has_actual_video_formats(formats_output: str) -> bool:
         logger.error(f"Format parse error: {e}")
         return False
 
-# =============================================================================
+# ======
 # AUDIO
-# =============================================================================
+# ======
 
 def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir: str | None = None) -> str:
     """
@@ -320,9 +320,9 @@ def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir
     except Exception as e:
         raise Exception(f"Audio download error: {e}")
 
-# =============================================================================
+# ======
 # VIDEO
-# =============================================================================
+# ======
 
 def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: str | None = None) -> Optional[str]:
     """
@@ -416,9 +416,9 @@ def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: 
 
     return str(found.absolute())
 
-# =============================================================================
+# =========================
 # INFO / CHECKS / ESTIMATES
-# =============================================================================
+# =========================
 
 def get_video_info(video_id: str) -> Optional[Dict[str, Any]]:
     """Return compact metadata for a video."""
