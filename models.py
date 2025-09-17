@@ -1,11 +1,12 @@
-# backend/models.py
+# backend/models.py - FIXED: Standardized database name
 import os
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, DateTime, Boolean, Float, Text, ForeignKey, create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./youtube_downloader.db")
+# FIXED: Use consistent database name throughout the application
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./youtube_trans_downloader.db")
 
 engine = create_engine(
     DATABASE_URL,
@@ -89,8 +90,16 @@ def get_db():
 def initialize_database():
     """Create database tables"""
     try:
+        # Check if database file exists and create directory if needed
+        db_path = DATABASE_URL.replace("sqlite:///", "").replace("./", "")
+        db_dir = os.path.dirname(db_path)
+        if db_dir and not os.path.exists(db_dir):
+            os.makedirs(db_dir)
+            print(f"📁 Created database directory: {db_dir}")
+        
         Base.metadata.create_all(bind=engine)
-        print("✅ Database tables created successfully")
+        print(f"✅ Database tables created successfully at: {db_path}")
+        return True
     except Exception as e:
         print(f"❌ Error creating database tables: {e}")
         raise
