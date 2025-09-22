@@ -361,6 +361,59 @@ def classify_activity_by_format(transcript_type: str, file_format: str) -> Tuple
     # Default fallback
     return ("Downloaded Content", "📁", "Content", "general")
 
+# -------------------- Account Deletion Helper --------------------------------
+def delete_user_subscription(db: Session, user: User) -> bool:
+    """Cancel and delete user's subscription if active."""
+    try:
+        if stripe and getattr(user, "subscription_tier", "free") != "free":
+            # Find latest subscription
+            subscription = (
+                db.query(Subscription)
+                .filter(Subscription.user_id == user.id)
+                .order_by(Subscription.created_at.desc())
+                .first()
+            )
+            
+            if subscription and subscription.stripe_subscription_id:
+                try:
+                    # Cancel subscription in Stripe
+                    stripe.Subscription.delete(subscription.stripe_subscription_id)
+                    logger.info(f"Cancelled Stripe subscription {subscription.stripe_subscription_id} for user {user.username}")
+                except Exception as e:
+                    logger.warning(f"Failed to cancel Stripe subscription: {e}")
+                
+                # Update local subscription record
+                subscription.status = "cancelled"
+                subscription.cancelled_at = datetime.utcnow()
+        
+        # Delete all user subscriptions from database
+        db.query(Subscription).filter(Subscription.user_id == user.id).delete()
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error deleting user subscription: {e}")
+        return False
+
+def delete_user_data(db: Session, user: User) -> bool:
+    """Delete all user-related data."""
+    try:
+        # Delete download records
+        db.query(TranscriptDownload).filter(TranscriptDownload.user_id == user.id).delete()
+        
+        # Delete any user files (if stored locally)
+        try:
+            user_files = list(DOWNLOADS_DIR.glob(f"*{user.id}*"))
+            for file_path in user_files:
+                file_path.unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning(f"Error deleting user files: {e}")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error deleting user data: {e}")
+        return False
+
 # -------------------- Schemas -----------------------------------------------
 class UserCreate(BaseModel): username: str; email: str; password: str
 class UserResponse(BaseModel):
@@ -371,6 +424,7 @@ class TranscriptRequest(BaseModel): youtube_id: str; clean_transcript: bool=True
 class AudioRequest(BaseModel): youtube_id: str; quality: str="medium"
 class VideoRequest(BaseModel): youtube_id: str; quality: str="720p"
 class CancelRequest(BaseModel): at_period_end: Optional[bool] = True  # default: schedule cancel at period end
+class DeleteAccountResponse(BaseModel): message: str; deleted_at: str; user_email: str
 
 # -------------------- Startup ------------------------------------------------
 @app.on_event("startup")
@@ -417,6 +471,51 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 @app.get("/users/me", response_model=UserResponse)
 def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
+
+# -------------------- ENHANCED: Account Deletion Endpoint -------------------
+@app.delete("/user/delete-account", response_model=DeleteAccountResponse)
+def delete_account(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """
+    Permanently delete user account and all associated data.
+    This action cannot be undone.
+    """
+    try:
+        user_email = current_user.email
+        user_id = current_user.id
+        username = current_user.username
+        
+        logger.info(f"Starting account deletion for user: {username} ({user_email})")
+        
+        # 1. Cancel and delete subscription
+        subscription_deleted = delete_user_subscription(db, current_user)
+        if not subscription_deleted:
+            logger.warning(f"Failed to properly delete subscription for user {username}")
+        
+        # 2. Delete user data (downloads, files, etc.)
+        data_deleted = delete_user_data(db, current_user)
+        if not data_deleted:
+            logger.warning(f"Failed to properly delete user data for user {username}")
+        
+        # 3. Delete the user account itself
+        db.delete(current_user)
+        db.commit()
+        
+        deletion_time = datetime.utcnow()
+        logger.info(f"Successfully deleted account for user: {username} ({user_email}) at {deletion_time}")
+        
+        return DeleteAccountResponse(
+            message="Account deleted successfully. All data has been permanently removed.",
+            deleted_at=deletion_time.isoformat(),
+            user_email=user_email
+        )
+        
+    except Exception as e:
+        logger.error(f"Account deletion failed for user {current_user.username}: {e}")
+        db.rollback()
+        raise HTTPException(
+            status_code=500, 
+            detail="Account deletion failed. Please try again or contact support."
+        )
 
 # Add these routes anywhere in your route definitions section
 
@@ -905,9 +1004,9 @@ if __name__ == "__main__":
     print(f"Starting server on 0.0.0.0:8000 — files: {DOWNLOADS_DIR}")
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
 
-###########################################################################
-###########################################################################
 
+
+######################### BACKUP FILE #####################
 # from pathlib import Path
 # from datetime import datetime, timedelta
 # from typing import Optional, Dict, Any, Tuple
@@ -917,7 +1016,6 @@ if __name__ == "__main__":
 # from auth_deps import get_current_user
 # # Add this import near the top with your other imports
 # from webhook_handler import handle_stripe_webhook, fix_existing_premium_users
-
 
 # from fastapi import FastAPI, HTTPException, Depends, status, Request, Query
 # from fastapi.middleware.cors import CORSMiddleware
@@ -980,6 +1078,14 @@ if __name__ == "__main__":
 #     app.include_router(batch_router, tags=["batch"])
 # except Exception as e:
 #     logger.error("Could not include batch routes: %s", e)
+
+# # ENHANCED: Include activity router
+# try:
+#     from activity import router as activity_router
+#     app.include_router(activity_router, tags=["activity"])
+#     logger.info("✅ Activity tracking router loaded")
+# except Exception as e:
+#     logger.warning("Could not include activity routes: %s", e)
 
 # # Payments
 # try:
@@ -1222,6 +1328,48 @@ if __name__ == "__main__":
 #         db.rollback()
 #         return None
 
+# # ENHANCED: Activity classification helper with format-first logic
+# def classify_activity_by_format(transcript_type: str, file_format: str) -> Tuple[str, str, str, str]:
+#     """
+#     Classify activity based on format-first logic for proper transcript naming.
+#     Returns: (action, icon, description_prefix, category)
+#     """
+#     t_type = (transcript_type or "").lower()
+#     f_format = (file_format or "").lower()
+    
+#     # Format-first classification for transcripts
+#     if f_format == 'srt':
+#         return ("Generated SRT Transcript", "🕒", "SRT transcript", "transcript")
+#     elif f_format == 'vtt':
+#         return ("Generated VTT Transcript", "🕒", "VTT transcript", "transcript") 
+#     elif f_format == 'txt':
+#         # For TXT, check type to determine if timestamped or clean
+#         if 'unclean' in t_type or 'timestamped' in t_type:
+#             return ("Generated Timestamped Transcript", "🕒", "Timestamped transcript", "transcript")
+#         else:
+#             return ("Generated Clean Transcript", "📄", "Clean text transcript", "transcript")
+    
+#     # Audio files
+#     elif f_format in ['mp3', 'm4a', 'aac', 'wav']:
+#         return ("Downloaded Audio File", "🎵", f"{f_format.upper()} file", "audio")
+    
+#     # Video files  
+#     elif f_format in ['mp4', 'mkv', 'avi', 'mov']:
+#         return ("Downloaded Video File", "🎬", f"{f_format.upper()} file", "video")
+    
+#     # Fallback for legacy type-based classification
+#     elif 'audio' in t_type:
+#         return ("Downloaded Audio File", "🎵", "Audio file", "audio")
+#     elif 'video' in t_type:
+#         return ("Downloaded Video File", "🎬", "Video file", "video")
+#     elif 'clean' in t_type:
+#         return ("Generated Clean Transcript", "📄", "Clean transcript", "transcript")
+#     elif 'unclean' in t_type:
+#         return ("Generated Timestamped Transcript", "🕒", "Timestamped transcript", "transcript")
+    
+#     # Default fallback
+#     return ("Downloaded Content", "📁", "Content", "general")
+
 # # -------------------- Schemas -----------------------------------------------
 # class UserCreate(BaseModel): username: str; email: str; password: str
 # class UserResponse(BaseModel):
@@ -1370,7 +1518,7 @@ if __name__ == "__main__":
 #     result.update({"stripe_updated": stripe_updated})
 #     return result
 
-# # -------------------- Transcript --------------------------------------------
+# # -------------------- ENHANCED: Transcript with proper activity tracking ----
 # @app.post("/download_transcript")
 # @app.post("/download_transcript/")
 # def download_transcript(req: TranscriptRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1381,11 +1529,24 @@ if __name__ == "__main__":
 #     if not check_internet():
 #         raise HTTPException(status_code=503, detail="No internet connection available.")
 
-#     usage_key = "clean_transcripts" if req.clean_transcript else "unclean_transcripts"
+#     # ENHANCED: Determine proper usage type based on format-first logic
+#     if req.format in ['srt', 'vtt']:
+#         usage_key = "unclean_transcripts"  # SRT/VTT are always timestamped
+#         file_format = req.format
+#     elif req.clean_transcript:
+#         usage_key = "clean_transcripts"
+#         file_format = "txt"
+#     else:
+#         usage_key = "unclean_transcripts"  # Timestamped
+#         file_format = "txt"
+    
 #     ok, used, limit = check_usage_limit(user, usage_key)
 #     if not ok:
-#         tname = "clean" if req.clean_transcript else "unclean"
-#         raise HTTPException(status_code=403, detail=f"Monthly limit reached for {tname} transcripts ({used}/{limit}).")
+#         # ENHANCED: Better error messaging based on format
+#         type_name = "SRT transcript" if req.format == 'srt' else \
+#                    "VTT transcript" if req.format == 'vtt' else \
+#                    "clean transcript" if req.clean_transcript else "timestamped transcript"
+#         raise HTTPException(status_code=403, detail=f"Monthly limit reached for {type_name} ({used}/{limit}).")
 
 #     text = get_transcript_youtube_api(vid, clean=req.clean_transcript, fmt=req.format)
 #     if not text:
@@ -1393,11 +1554,14 @@ if __name__ == "__main__":
 
 #     new_usage = increment_user_usage(db, user, usage_key)
 #     proc = time.time() - start
+    
+#     # ENHANCED: Create download record with proper file format
 #     rec = create_download_record(
 #         db=db, user=user, kind=usage_key, youtube_id=vid,
-#         file_format=(req.format if not req.clean_transcript else "txt"),
+#         file_format=file_format,
 #         file_size=len(text), processing_time=proc
 #     )
+    
 #     return {
 #         "transcript": text,
 #         "youtube_id": vid,
@@ -1411,7 +1575,7 @@ if __name__ == "__main__":
 #         "account": canonical_account(user),
 #     }
 
-# # -------------------- Audio --------------------------------------------------
+# # -------------------- ENHANCED: Audio with proper activity tracking ---------
 # def _touch_now(p: Path):
 #     try:
 #         now = time.time()
@@ -1457,6 +1621,8 @@ if __name__ == "__main__":
 
 #     new_usage = increment_user_usage(db, user, "audio_downloads")
 #     proc = time.time() - start
+    
+#     # ENHANCED: Create download record with proper format
 #     rec = create_download_record(db=db, user=user, kind="audio_downloads", youtube_id=vid,
 #                                  quality=req.quality, file_format="mp3", file_size=fsize, processing_time=proc)
 
@@ -1476,7 +1642,7 @@ if __name__ == "__main__":
 #         "download_record_id": rec.id if rec else None, "account": canonical_account(user),
 #     }
 
-# # -------------------- Video --------------------------------------------------
+# # -------------------- ENHANCED: Video with proper activity tracking ---------
 # @app.post("/download_video/")
 # def download_video(req: VideoRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
 #     start = time.time()
@@ -1515,6 +1681,8 @@ if __name__ == "__main__":
 
 #     new_usage = increment_user_usage(db, user, "video_downloads")
 #     proc = time.time() - start
+    
+#     # ENHANCED: Create download record with proper format
 #     rec = create_download_record(db=db, user=user, kind="video_downloads", youtube_id=vid,
 #                                  quality=req.quality, file_format="mp4", file_size=fsize, processing_time=proc)
 
@@ -1593,7 +1761,7 @@ if __name__ == "__main__":
 #     headers = {"Content-Disposition": f'attachment; filename="{safe_name}"', "Content-Length": str(size), "Accept-Ranges": "bytes"}
 #     return FileResponse(path=str(file_path), media_type=mime, headers=headers, filename=safe_name)
 
-# # -------------------- History / activity / subscription ---------------------
+# # -------------------- ENHANCED: History / activity with proper classification
 # @app.get("/user/download-history")
 # def get_download_history(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
 #     rows = db.query(TranscriptDownload).filter(TranscriptDownload.user_id == current_user.id).order_by(TranscriptDownload.created_at.desc()).limit(50).all()
@@ -1614,33 +1782,67 @@ if __name__ == "__main__":
 # @app.get("/user/recent-activity")
 # @app.get("/user/recent-activity/")
 # def get_recent_activity(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-#     rows = db.query(TranscriptDownload).filter(TranscriptDownload.user_id == current_user.id).order_by(TranscriptDownload.created_at.desc()).limit(10).all()
+#     """ENHANCED: Recent activity with proper format-first transcript classification"""
+#     rows = db.query(TranscriptDownload).filter(TranscriptDownload.user_id == current_user.id).order_by(TranscriptDownload.created_at.desc()).limit(15).all()
 #     activities = []
+    
 #     for d in rows:
-#         t = d.transcript_type
-#         if t == "clean_transcripts":
-#             action, icon, desc = "Generated clean transcript", "📄", f"Clean transcript for {d.youtube_id}"
-#         elif t == "unclean_transcripts":
-#             action, icon, desc = "Generated timestamped transcript", "🕒", f"Timestamped transcript for {d.youtube_id}"
-#         elif t == "audio_downloads":
-#             action, icon, desc = "Downloaded audio file", "🎵", f"{(d.quality or 'unknown').title()} MP3 from {d.youtube_id}"
-#         elif t == "video_downloads":
-#             action, icon, desc = "Downloaded video file", "🎬", f"{d.quality or 'unknown'} MP4 from {d.youtube_id}"
-#         else:
-#             action, icon, desc = f"Downloaded {t}", "📁", f"Content from {d.youtube_id}"
+#         # ENHANCED: Use format-first classification
+#         action, icon, desc_prefix, category = classify_activity_by_format(
+#             d.transcript_type or "", 
+#             d.file_format or "txt"
+#         )
+        
+#         # Build enhanced description
+#         description = f"{desc_prefix} for video {d.youtube_id}"
+        
+#         # Add quality if not default
+#         if d.quality and d.quality != 'default':
+#             description += f" ({d.quality})"
+            
+#         # Add file size info
+#         if d.file_size:
+#             size_mb = d.file_size / (1024 * 1024)
+#             if size_mb >= 1:
+#                 description += f" - {size_mb:.1f}MB"
+#             else:
+#                 size_kb = d.file_size / 1024
+#                 description += f" - {size_kb:.0f}KB"
+        
 #         activities.append({
-#             "id": d.id, "action": action, "description": desc,
+#             "id": d.id,
+#             "action": action,
+#             "description": description,
 #             "timestamp": d.created_at.isoformat() if d.created_at else None,
-#             "type": "download", "icon": icon, "video_id": d.youtube_id, "file_size": d.file_size
+#             "icon": icon,
+#             "type": d.transcript_type,
+#             "video_id": d.youtube_id,
+#             "file_format": d.file_format or "txt",
+#             "file_size": d.file_size,
+#             "quality": d.quality,
+#             "status": getattr(d, "status", "completed"),
+#             "category": category,
+#             "processing_time": d.processing_time
 #         })
+    
+#     # Add welcome message if no activities
 #     if not activities:
 #         activities.append({
-#             "id": 0, "action": "Account created",
+#             "id": 0, 
+#             "action": "Account created",
 #             "description": f"Welcome to the app, {current_user.username}!",
 #             "timestamp": current_user.created_at.isoformat() if current_user.created_at else None,
-#             "type": "auth", "icon": "🎉"
+#             "type": "auth", 
+#             "icon": "🎉",
+#             "category": "system"
 #         })
-#     return {"activities": activities, "total_count": len(activities), "account": canonical_account(current_user)}
+    
+#     return {
+#         "activities": activities, 
+#         "total_count": len(activities), 
+#         "account": canonical_account(current_user),
+#         "fetched_at": datetime.utcnow().isoformat()
+#     }
 
 # @app.get("/subscription_status")
 # @app.get("/subscription_status/")
@@ -1712,4 +1914,4 @@ if __name__ == "__main__":
 #     print(f"Starting server on 0.0.0.0:8000 — files: {DOWNLOADS_DIR}")
 #     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
 
-
+# ###########################################################################
