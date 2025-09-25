@@ -303,6 +303,74 @@ def segments_to_srt(transcript) -> str:
         out.append(str(i)); out.append(f"{start} --> {end}"); out.append(text); out.append("")
     return "\n".join(out)
 
+# -------------------- Transcript helpers ------------------------------------
+def get_transcript_youtube_api(video_id: str, clean: bool = True, fmt: Optional[str] = None) -> str:
+    """
+    Try YouTubeTranscriptApi first, then fall back to yt-dlp helpers.
+    Returns:
+      - clean=True  -> plain text (paragraphized)
+      - clean=False + fmt='srt' -> SRT text
+      - clean=False + fmt='vtt' -> VTT text
+      - clean=False (default)   -> timestamped [MM:SS] lines
+    """
+    logger.info("Transcript for %s (clean=%s, fmt=%s)", video_id, clean, fmt)
+
+    # quick connectivity checks (keep the same helpers you already have)
+    if not check_internet():
+        raise HTTPException(status_code=503, detail="No internet connection available.")
+    if not check_youtube():
+        raise HTTPException(status_code=503, detail="Cannot reach YouTube right now.")
+
+    # 1) Primary path: YouTubeTranscriptApi
+    try:
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
+
+        if clean:
+            # collapse to clean paragraphs (~400+ chars per para on sentence boundary)
+            text = " ".join((seg.get("text") or "").replace("\n", " ") for seg in transcript)
+            text = " ".join(text.split())
+            out, cur, chars = [], [], 0
+            for word in text.split():
+                cur.append(word); chars += len(word) + 1
+                if chars > 400 and word.endswith((".", "!", "?")):
+                    out.append(" ".join(cur)); cur, chars = [], 0
+            if cur:
+                out.append(" ".join(cur))
+            return "\n\n".join(out)
+
+        # not clean: choose format or default timestamped lines
+        if (fmt or "").lower() == "srt":
+            return segments_to_srt(transcript)
+        if (fmt or "").lower() == "vtt":
+            return segments_to_vtt(transcript)
+
+        # default: timestamped [MM:SS] lines
+        lines = []
+        for seg in transcript:
+            t = int(seg.get("start", 0))
+            timestamp = f"[{t//60:02d}:{t%60:02d}]"
+            txt = (seg.get("text") or "").replace("\n", " ")
+            lines.append(f"{timestamp} {txt}")
+        return "\n".join(lines)
+
+    except Exception as e:
+        logger.warning("YouTubeTranscriptApi failed: %s — falling back to yt-dlp", e)
+
+        # 2) Fallback: yt-dlp-based extraction (json3/vtt/srt)
+        # clean=True -> plain text; clean=False + VTT available -> VTT text;
+        # clean=False + only SRT -> timestamped lines.
+        fb = get_transcript_with_ytdlp(video_id, clean=clean)
+        if fb:
+            # If the caller explicitly asked for VTT and our fallback produced VTT,
+            # great; otherwise we just return what the fallback produced.
+            return fb
+
+        # If we get here, nothing worked
+        msg = str(e)
+        if "No transcripts were found" in msg or "TranscriptsDisabled" in msg:
+            raise HTTPException(status_code=404, detail="This video has no captions/transcripts.")
+        raise HTTPException(status_code=404, detail="No transcript/captions found for this video.")
+
 # -------------------- Usage limits / records --------------------------------
 def increment_user_usage(db: Session, user: User, usage_type: str) -> int:
     current = getattr(user, f"usage_{usage_type}", 0) or 0
