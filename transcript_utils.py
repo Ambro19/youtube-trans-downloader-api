@@ -94,20 +94,20 @@ def get_transcript_with_ytdlp(video_id: str, clean: bool = True, retries: int = 
     """
     Fallback transcript extractor using yt-dlp. Works in a temp dir and cleans up.
     Returns clean text or timestamped lines depending on `clean`.
+    Prefers JSON3, then VTT, then SRT (all English variants like en or en-US).
     """
     url = f"https://www.youtube.com/watch?v={video_id}"
     try:
         with tempfile.TemporaryDirectory(prefix=f"yt_trans_{video_id}_") as tmp:
             tmpdir = Path(tmp)
-            output_vtt = tmpdir / f"{video_id}.en.vtt"
-            output_json3 = tmpdir / f"{video_id}.en.json3"
 
             cmd = [
                 "yt-dlp",
+                "--restrict-filenames",
                 "--skip-download",
-                "--write-auto-sub",
-                "--sub-langs", "en",
-                "--sub-format", "json3/vtt/srt",
+                "--write-auto-sub",                  # prefer auto if human not available
+                "--sub-langs", "en",                 # download English (may save as en or en-XX)
+                "--sub-format", "json3/vtt/srt",     # first available of these
                 "--output", "%(id)s",
                 "--user-agent", _ua(),
                 "--no-warnings",
@@ -121,20 +121,72 @@ def get_transcript_with_ytdlp(video_id: str, clean: bool = True, retries: int = 
             if result.returncode != 0 and result.stderr:
                 logger.debug(f"yt-dlp (subs) stderr: {result.stderr.strip()}")
 
-            # Prefer JSON3 for robust parsing
+            def _find_first(pattern: str) -> Optional[Path]:
+                matches = sorted(tmpdir.glob(pattern))
+                return matches[0] if matches else None
+
+            # Try a few times for slow disk/network
             for _ in range(max(1, retries)):
-                if output_json3.exists():
+                # 1) JSON3 (best for robust text extraction)
+                json3 = _find_first(f"{video_id}.en*.json3")
+                if json3 and json3.exists():
                     try:
-                        data = json.loads(output_json3.read_text(encoding="utf-8"))
+                        data = json.loads(json3.read_text(encoding="utf-8"))
                         return _process_json3_transcript(data, clean)
                     except Exception as e:
                         logger.debug(f"JSON3 parse error: {e}")
-                time.sleep(max(0, wait_sec))
 
-            # Fallback: VTT
-            if output_vtt.exists():
-                vtt = output_vtt.read_text(encoding="utf-8")
-                return extract_vtt_text(vtt) if clean else format_transcript_vtt(vtt)
+                # 2) VTT
+                vtt = _find_first(f"{video_id}.en*.vtt")
+                if vtt and vtt.exists():
+                    vtt_text = vtt.read_text(encoding="utf-8", errors="ignore")
+                    return extract_vtt_text(vtt_text) if clean else format_transcript_vtt(vtt_text)
+
+                # 3) SRT (fallback)
+                srt = _find_first(f"{video_id}.en*.srt")
+                if srt and srt.exists():
+                    srt_text = srt.read_text(encoding="utf-8", errors="ignore")
+                    if clean:
+                        # strip indices + timecodes -> plain text
+                        lines = []
+                        for line in srt_text.splitlines():
+                            s = line.strip()
+                            if not s or s.isdigit() or "-->" in s:
+                                continue
+                            s = re.sub(r"<[^>]+>", "", s)      # drop tags
+                            s = re.sub(r"\{[^}]+\}", "", s)    # drop styling
+                            if s:
+                                lines.append(s)
+                        return " ".join(lines)
+                    else:
+                        # convert SRT blocks -> "[MM:SS] text"
+                        out_lines = []
+                        cur_time = None
+                        cur_text = []
+                        for line in srt_text.splitlines():
+                            s = line.strip()
+                            if re.search(r"-->", s):
+                                # new block starting: flush previous
+                                if cur_time is not None and cur_text:
+                                    out_lines.append(f"[{cur_time}] " + " ".join(cur_text).strip())
+                                cur_text = []
+                                # parse start time
+                                m = re.search(r"(\d{2}):(\d{2}):(\d{2})[,.]\d{3}\s+-->", s)
+                                if m:
+                                    h, mnt, sec = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                                    total = h * 3600 + mnt * 60 + sec
+                                    cur_time = f"{total//60:02d}:{total%60:02d}"
+                                else:
+                                    cur_time = "00:00"
+                            elif s and not s.isdigit():
+                                s = re.sub(r"<[^>]+>", "", s)
+                                s = re.sub(r"\{[^}]+\}", "", s)
+                                cur_text.append(s)
+                        if cur_time is not None and cur_text:
+                            out_lines.append(f"[{cur_time}] " + " ".join(cur_text).strip())
+                        return "\n".join(out_lines)
+
+                time.sleep(max(0, wait_sec))
 
             logger.error(f"No transcript files found for video: {video_id}")
             return None
@@ -262,15 +314,16 @@ def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir
     out_dir = _ensure_dir(output_dir or DEFAULT_DOWNLOADS_DIR)
     url = f"https://www.youtube.com/watch?v={video_id}"
     qmap = {
-        "high": ("0", "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio"),
-        "medium": ("2", "bestaudio[abr<=192]/bestaudio[ext=m4a]/bestaudio"),
-        "low": ("5", "bestaudio[abr<=96]/bestaudio[ext=m4a]/bestaudio"),
+        "high":   ("0",   "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio"),
+        "medium": ("2",   "bestaudio[abr<=192]/bestaudio[ext=m4a]/bestaudio"),
+        "low":    ("5",   "bestaudio[abr<=96]/bestaudio[ext=m4a]/bestaudio"),
     }
     aq, fmt = qmap.get(quality, qmap["medium"])
     output_template = f"{video_id}_audio_{quality}.%(ext)s"
 
     cmd = [
         "yt-dlp",
+        "--restrict-filenames",
         "--extract-audio",
         "--audio-format", "mp3",
         "--audio-quality", aq,
@@ -295,22 +348,30 @@ def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir
         if result.stderr:
             logger.debug(f"yt-dlp(audio) stderr: {result.stderr.strip()}")
 
-        # Resolve resulting file
+        # Resolve resulting file (prefer the exact template, but recover if needed)
         candidate = out_dir / f"{video_id}_audio_{quality}.mp3"
         if not candidate.exists():
-            matches = list(out_dir.glob(f"{video_id}_audio_{quality}.*")) or list(out_dir.glob(f"{video_id}*.mp3")) or list(out_dir.glob("*.mp3"))
+            matches = (
+                list(out_dir.glob(f"{video_id}_audio_{quality}.mp3"))
+                or list(out_dir.glob(f"{video_id}_audio_{quality}.*"))
+                or list(out_dir.glob(f"{video_id}*.mp3"))
+                or list(out_dir.glob("*.mp3"))
+            )
             if matches:
+                # pick latest & largest to be safe
                 candidate = max(matches, key=lambda f: (f.stat().st_mtime, f.stat().st_size))
         if not candidate.exists():
             all_files = [f.name for f in out_dir.iterdir() if f.is_file()]
             raise Exception(f"No audio file found. Files in dir: {all_files}")
 
         if candidate.stat().st_size < 1_000:
-            try: candidate.unlink()
-            except Exception: pass
+            try:
+                candidate.unlink()
+            except Exception:
+                pass
             raise Exception("Downloaded audio appears corrupted/empty")
 
-        # Force mtime->now so it shows under 'Today' in Windows
+        # Force mtime->now so it shows under 'Today' on Windows
         _touch_now(candidate)
 
         return str(candidate.absolute())
@@ -319,6 +380,7 @@ def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir
         raise Exception("Audio download timed out")
     except Exception as e:
         raise Exception(f"Audio download error: {e}")
+
 
 # ======
 # VIDEO
@@ -333,9 +395,9 @@ def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: 
     height = _parse_height(quality, 720)
     output_template = f"{video_id}_video_{quality}.%(ext)s"
 
-    # Step 1: list formats to detect restrictions
+    # Step 1: list formats to detect restrictions  ✅ add --restrict-filenames here
     try:
-        list_cmd = ["yt-dlp", "--list-formats", "--no-warnings", "--user-agent", _ua(), url]
+        list_cmd = ["yt-dlp", "--restrict-filenames", "--list-formats", "--no-warnings", "--user-agent", _ua(), url]
         list_cmd = _maybe_add_cookies(list_cmd)
         list_cmd = _maybe_no_mtime(list_cmd)
         fmts = subprocess.run(list_cmd, capture_output=True, text=True, timeout=60, check=False)
@@ -358,6 +420,7 @@ def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: 
     for i, fmt in enumerate(strategies, 1):
         cmd = [
             "yt-dlp",
+            "--restrict-filenames",           # ✅ keep here too
             "--no-playlist",
             "--output", output_template,
             "--format", fmt,
@@ -394,14 +457,12 @@ def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: 
         out_dir / f"{video_id}_video.*",
         out_dir / f"{video_id}*.*",
     ]
-
     found: Optional[Path] = None
     for pat in patterns:
         matches = list(out_dir.glob(pat.name if pat.is_file() else pat.name))
         if matches:
             found = max(matches, key=lambda f: f.stat().st_size)
             break
-
     if not found or not found.exists():
         all_files = [f.name for f in out_dir.iterdir() if f.is_file()]
         raise Exception(f"Video file not found after download. Files: {all_files}")
@@ -411,9 +472,7 @@ def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: 
         except Exception: pass
         raise Exception("Downloaded video appears corrupted/too small")
 
-    # Force mtime->now so it shows under 'Today' in Windows
     _touch_now(found)
-
     return str(found.absolute())
 
 # =========================

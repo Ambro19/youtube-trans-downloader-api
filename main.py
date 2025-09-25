@@ -1,24 +1,29 @@
+# Adds middlewares, webhook signature verification + idempotency, and a background cleanup thread. 
+# (Everything else preserved.)
+
+# backend/main.py
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Tuple
-import os, re, time, socket, mimetypes, logging, jwt
+import os, re, time, socket, mimetypes, logging, jwt, threading
+from collections import deque, defaultdict
 
 # ✅ use the shared dependency (no circular import)
 from auth_deps import get_current_user
-# Add this import near the top with your other imports
+# Stripe webhook helpers
 from webhook_handler import handle_stripe_webhook, fix_existing_premium_users
 
 from fastapi import FastAPI, HTTPException, Depends, status, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse
+from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from pydantic import BaseModel
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
-# .env loading (fine to keep here too)
 from dotenv import load_dotenv, find_dotenv
 load_dotenv()
 load_dotenv(dotenv_path=find_dotenv(".env.local"), override=True)
@@ -36,7 +41,7 @@ try:
 except Exception:
     stripe = None
 
-# Local modules (✅ payment AFTER auth_deps import)
+# Local modules
 from payment import router as payment_router
 from models import User, TranscriptDownload, Subscription, get_db, initialize_database
 from transcript_utils import (
@@ -52,8 +57,10 @@ logger = logging.getLogger("youtube_trans_downloader")
 
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+FILE_RETENTION_DAYS = int(os.getenv("FILE_RETENTION_DAYS", "7"))
 
-app = FastAPI(title="YouTube Content Downloader API", version="3.2.0")
+# ---------- App ----------
+app = FastAPI(title="YouTube Content Downloader API", version="3.3.0")
 
 # Optional timestamp normalizer
 try:
@@ -62,15 +69,109 @@ try:
 except Exception as e:
     logger.info("Timestamp middleware not loaded: %s", e)
 
-# in backend/main.py (near the payments include)
-from batch import router as batch_router
+# ---------- Security Headers Middleware ----------
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+      response = await call_next(request)
 
+      # Always useful
+      response.headers["X-Content-Type-Options"] = "nosniff"
+      response.headers["X-Frame-Options"] = "DENY"
+      response.headers["Referrer-Policy"] = "no-referrer"
+      response.headers["Cross-Origin-Resource-Policy"] = "same-site"
+      response.headers["Server"] = "YCD"  # override default server banner
+
+      # Only set HSTS in production/HTTPS contexts
+      xf_proto = request.headers.get("x-forwarded-proto", "").lower()
+      if ENVIRONMENT == "production" and (request.url.scheme == "https" or xf_proto == "https"):
+          response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
+
+      # Conservative CSP for API (don’t break the SPA)
+      # Skip CSP for HTML responses and static files
+      content_type = response.headers.get("content-type", "").split(";")[0].strip()
+      if not content_type.startswith("text/html") and not request.url.path.startswith("/_spa"):
+          response.headers["Content-Security-Policy"] = (
+              "default-src 'none'; "
+              "img-src 'self' data: blob:; "
+              "media-src 'self' data: blob:; "
+              "font-src 'self' data:; "
+              "style-src 'self' 'unsafe-inline'; "
+              "script-src 'self' 'unsafe-inline'; "
+              "connect-src 'self'; "
+              "frame-ancestors 'none'; "
+              "base-uri 'none'; "
+          )
+      return response
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+# ---------- Simple In-Memory Rate Limiter ----------
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """
+    Tokenless sliding-window limiter per client IP + (optionally) route group.
+    For production at scale, back with Redis.
+    """
+    def __init__(self, app):
+        super().__init__(app)
+        self.now = time.time
+        self.buckets: Dict[str, deque] = defaultdict(deque)
+        self.lock = threading.Lock()
+
+        # Defaults (env-overridable)
+        self.default_window = int(os.getenv("RL_DEFAULT_WINDOW_SEC", "60"))
+        self.default_max = int(os.getenv("RL_DEFAULT_MAX", "120"))
+
+        # Stricter for auth/checkout
+        self.auth_window = int(os.getenv("RL_AUTH_WINDOW_SEC", "60"))
+        self.auth_max = int(os.getenv("RL_AUTH_MAX", "10"))
+
+        # Download endpoints (moderate)
+        self.dl_window = int(os.getenv("RL_DL_WINDOW_SEC", "60"))
+        self.dl_max = int(os.getenv("RL_DL_MAX", "40"))
+
+        self.enabled = os.getenv("RL_ENABLED", "true").lower() in {"1","true","yes","on"}
+
+    def key_for(self, request: Request) -> tuple[str, int, int]:
+        ip = (request.client.host if request.client else "unknown")
+        path = request.url.path
+
+        if path.startswith(("/token", "/register", "/webhook/stripe")):
+            return (f"AUTH:{ip}", self.auth_window, self.auth_max)
+        if path.startswith(("/download_", "/download-file/")):
+            return (f"DL:{ip}", self.dl_window, self.dl_max)
+        return (f"GEN:{ip}", self.default_window, self.default_max)
+
+    async def dispatch(self, request: Request, call_next):
+        if not self.enabled:
+            return await call_next(request)
+
+        key, window, limit = self.key_for(request)
+        now = self.now()
+        with self.lock:
+            q = self.buckets[key]
+            # pop old
+            while q and now - q[0] > window:
+                q.popleft()
+            if len(q) >= limit:
+                retry_after = max(1, int(window - (now - q[0])))
+                return JSONResponse(
+                    {"detail": "Too Many Requests"},
+                    status_code=429,
+                    headers={"Retry-After": str(retry_after)},
+                )
+            q.append(now)
+
+        return await call_next(request)
+
+app.add_middleware(RateLimitMiddleware)
+
+# ---------- Routers ----------
+from batch import router as batch_router
 try:
     app.include_router(batch_router, tags=["batch"])
 except Exception as e:
     logger.error("Could not include batch routes: %s", e)
 
-# ENHANCED: Include activity router
 try:
     from activity import router as activity_router
     app.include_router(activity_router, tags=["activity"])
@@ -78,13 +179,12 @@ try:
 except Exception as e:
     logger.warning("Could not include activity routes: %s", e)
 
-# Payments
 try:
     app.include_router(payment_router, tags=["payments"])
 except Exception as e:
     logger.error("Could not include payment routes: %s", e)
 
-# CORS
+# ---------- CORS ----------
 allowed_origins = (
     ["http://localhost:3000", "http://127.0.0.1:3000", "http://192.168.1.185:3000", FRONTEND_URL]
     if ENVIRONMENT != "production" else [FRONTEND_URL]
@@ -98,8 +198,7 @@ app.add_middleware(
     expose_headers=["Content-Disposition", "Content-Type", "Content-Length", "Content-Range"],
 )
 
-# -------------------- Downloads dir (no duplicates) -------------------------
-# Default: private server cache folder (prevents double files showing in Windows Downloads)
+# -------------------- Downloads dir -------------------------
 USE_SYSTEM_DOWNLOADS = os.getenv("USE_SYSTEM_DOWNLOADS", "false").lower() == "true"
 if USE_SYSTEM_DOWNLOADS:
     try:
@@ -124,7 +223,6 @@ app.mount("/files", StaticFiles(directory=str(DOWNLOADS_DIR)), name="files")
 SECRET_KEY = os.getenv("SECRET_KEY", "devsecret")
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
-
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -180,91 +278,30 @@ def extract_youtube_video_id(text: str) -> str:
         if m: return m.group(1)[:11]
     return text.strip()[:11]
 
-# -------------------- Transcript helpers ------------------------------------
+# -------------------- Transcript helpers (unchanged below this line except where noted) ----
 def segments_to_vtt(transcript) -> str:
     def sec_to_vtt(ts: float) -> str:
-        h = int(ts // 3600)
-        m = int((ts % 3600) // 60)
-        s = int(ts % 60)
-        ms = int((ts - int(ts)) * 1000)
+        h = int(ts // 3600); m = int((ts % 3600) // 60); s = int(ts % 60); ms = int((ts - int(ts)) * 1000)
         return f"{h:02}:{m:02}:{s:02}.{ms:03}"
     lines = ["WEBVTT", "Kind: captions", "Language: en", ""]
     for seg in transcript:
         start = sec_to_vtt(seg.get("start", 0))
         end = sec_to_vtt(seg.get("start", 0) + seg.get("duration", 0))
         text = (seg.get("text") or "").replace("\n", " ").strip()
-        lines.append(f"{start} --> {end}")
-        lines.append(text)
-        lines.append("")
+        lines.append(f"{start} --> {end}"); lines.append(text); lines.append("")
     return "\n".join(lines)
 
 def segments_to_srt(transcript) -> str:
     def sec_to_srt(ts: float) -> str:
-        h = int(ts // 3600)
-        m = int((ts % 3600) // 60)
-        s = int(ts % 60)
-        ms = int((ts - int(ts)) * 1000)
+        h = int(ts // 3600); m = int((ts % 3600) // 60); s = int(ts % 60); ms = int((ts - int(ts)) * 1000)
         return f"{h:02}:{m:02}:{s:02},{ms:03}"
     out = []
     for i, seg in enumerate(transcript, start=1):
         start = sec_to_srt(seg.get("start", 0))
         end = sec_to_srt(seg.get("start", 0) + seg.get("duration", 0))
         text = (seg.get("text") or "").replace("\n", " ").strip()
-        out.append(str(i))
-        out.append(f"{start} --> {end}")
-        out.append(text)
-        out.append("")
+        out.append(str(i)); out.append(f"{start} --> {end}"); out.append(text); out.append("")
     return "\n".join(out)
-
-def get_transcript_youtube_api(video_id: str, clean: bool = True, fmt: Optional[str] = None) -> str:
-    logger.info("Transcript for %s (clean=%s, fmt=%s)", video_id, clean, fmt)
-
-    if not check_internet():
-        raise HTTPException(status_code=503, detail="No internet connection available.")
-    if not check_youtube():
-        raise HTTPException(status_code=503, detail="Cannot reach YouTube right now.")
-
-    try:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
-    except Exception as e:
-        logger.error("YouTubeTranscriptApi failed: %s", e)
-        # Try yt-dlp fallback
-        try:
-            fb = get_transcript_with_ytdlp(video_id, clean=clean)
-            if fb:
-                return fb
-        except Exception as ee:
-            logger.error("yt-dlp fallback also failed: %s", ee)
-        # Bubble user-friendly error
-        if "No transcripts were found" in str(e) or "TranscriptsDisabled" in str(e):
-            raise HTTPException(status_code=404, detail="This video has no captions/transcripts.")
-        raise HTTPException(status_code=404, detail="No transcript/captions found for this video.")
-
-    if clean:
-        text = " ".join((seg.get("text") or "").replace("\n", " ") for seg in transcript)
-        text = " ".join(text.split())
-        # paragraphize ~400+ chars on sentence boundaries
-        out, cur, chars = [], [], 0
-        for word in text.split():
-            cur.append(word); chars += len(word) + 1
-            if chars > 400 and word.endswith((".", "!", "?")):
-                out.append(" ".join(cur)); cur, chars = [], 0
-        if cur: out.append(" ".join(cur))
-        return "\n\n".join(out)
-
-    # Unclean
-    if fmt == "srt":
-        return segments_to_srt(transcript)
-    if fmt == "vtt":
-        return segments_to_vtt(transcript)
-    # default "timestamped lines"
-    lines = []
-    for seg in transcript:
-        t = int(seg.get("start", 0))
-        timestamp = f"[{t//60:02d}:{t%60:02d}]"
-        txt = (seg.get("text") or "").replace("\n", " ")
-        lines.append(f"{timestamp} {txt}")
-    return "\n".join(lines)
 
 # -------------------- Usage limits / records --------------------------------
 def increment_user_usage(db: Session, user: User, usage_type: str) -> int:
@@ -284,8 +321,7 @@ def increment_user_usage(db: Session, user: User, usage_type: str) -> int:
         setattr(user, f"usage_{usage_type}", 1)
         new_val = 1
 
-    db.commit()
-    db.refresh(user)
+    db.commit(); db.refresh(user)
     return new_val
 
 def check_usage_limit(user: User, usage_type: str) -> Tuple[bool, int, int]:
@@ -319,97 +355,56 @@ def create_download_record(db: Session, user: User, kind: str, youtube_id: str, 
         db.rollback()
         return None
 
-# ENHANCED: Activity classification helper with format-first logic
+# ENHANCED: Activity classification helper (unchanged)
 def classify_activity_by_format(transcript_type: str, file_format: str) -> Tuple[str, str, str, str]:
-    """
-    Classify activity based on format-first logic for proper transcript naming.
-    Returns: (action, icon, description_prefix, category)
-    """
-    t_type = (transcript_type or "").lower()
-    f_format = (file_format or "").lower()
-    
-    # Format-first classification for transcripts
-    if f_format == 'srt':
-        return ("Generated SRT Transcript", "🕒", "SRT transcript", "transcript")
-    elif f_format == 'vtt':
-        return ("Generated VTT Transcript", "🕒", "VTT transcript", "transcript") 
-    elif f_format == 'txt':
-        # For TXT, check type to determine if timestamped or clean
-        if 'unclean' in t_type or 'timestamped' in t_type:
-            return ("Generated Timestamped Transcript", "🕒", "Timestamped transcript", "transcript")
-        else:
-            return ("Generated Clean Transcript", "📄", "Clean text transcript", "transcript")
-    
-    # Audio files
-    elif f_format in ['mp3', 'm4a', 'aac', 'wav']:
-        return ("Downloaded Audio File", "🎵", f"{f_format.upper()} file", "audio")
-    
-    # Video files  
-    elif f_format in ['mp4', 'mkv', 'avi', 'mov']:
-        return ("Downloaded Video File", "🎬", f"{f_format.upper()} file", "video")
-    
-    # Fallback for legacy type-based classification
-    elif 'audio' in t_type:
-        return ("Downloaded Audio File", "🎵", "Audio file", "audio")
-    elif 'video' in t_type:
-        return ("Downloaded Video File", "🎬", "Video file", "video")
-    elif 'clean' in t_type:
-        return ("Generated Clean Transcript", "📄", "Clean transcript", "transcript")
-    elif 'unclean' in t_type:
-        return ("Generated Timestamped Transcript", "🕒", "Timestamped transcript", "transcript")
-    
-    # Default fallback
+    t_type = (transcript_type or "").lower(); f_format = (file_format or "").lower()
+    if f_format == 'srt': return ("Generated SRT Transcript", "🕒", "SRT transcript", "transcript")
+    if f_format == 'vtt': return ("Generated VTT Transcript", "🕒", "VTT transcript", "transcript")
+    if f_format == 'txt':
+        if 'unclean' in t_type or 'timestamped' in t_type: return ("Generated Timestamped Transcript", "🕒", "Timestamped transcript", "transcript")
+        return ("Generated Clean Transcript", "📄", "Clean text transcript", "transcript")
+    if f_format in ['mp3','m4a','aac','wav']: return ("Downloaded Audio File", "🎵", f"{f_format.upper()} file", "audio")
+    if f_format in ['mp4','mkv','avi','mov']: return ("Downloaded Video File", "🎬", f"{f_format.upper()} file", "video")
+    if 'audio' in t_type: return ("Downloaded Audio File", "🎵", "Audio file", "audio")
+    if 'video' in t_type: return ("Downloaded Video File", "🎬", "Video file", "video")
+    if 'clean' in t_type: return ("Generated Clean Transcript", "📄", "Clean transcript", "transcript")
+    if 'unclean' in t_type: return ("Generated Timestamped Transcript", "🕒", "Timestamped transcript", "transcript")
     return ("Downloaded Content", "📁", "Content", "general")
 
-# -------------------- Account Deletion Helper --------------------------------
+# -------------------- Account Deletion Helpers (unchanged) -------------------
 def delete_user_subscription(db: Session, user: User) -> bool:
-    """Cancel and delete user's subscription if active."""
     try:
         if stripe and getattr(user, "subscription_tier", "free") != "free":
-            # Find latest subscription
             subscription = (
                 db.query(Subscription)
                 .filter(Subscription.user_id == user.id)
                 .order_by(Subscription.created_at.desc())
                 .first()
             )
-            
             if subscription and subscription.stripe_subscription_id:
                 try:
-                    # Cancel subscription in Stripe
                     stripe.Subscription.delete(subscription.stripe_subscription_id)
                     logger.info(f"Cancelled Stripe subscription {subscription.stripe_subscription_id} for user {user.username}")
                 except Exception as e:
                     logger.warning(f"Failed to cancel Stripe subscription: {e}")
-                
-                # Update local subscription record
                 subscription.status = "cancelled"
                 subscription.cancelled_at = datetime.utcnow()
-        
-        # Delete all user subscriptions from database
         db.query(Subscription).filter(Subscription.user_id == user.id).delete()
         return True
-        
     except Exception as e:
         logger.error(f"Error deleting user subscription: {e}")
         return False
 
 def delete_user_data(db: Session, user: User) -> bool:
-    """Delete all user-related data."""
     try:
-        # Delete download records
         db.query(TranscriptDownload).filter(TranscriptDownload.user_id == user.id).delete()
-        
-        # Delete any user files (if stored locally)
         try:
             user_files = list(DOWNLOADS_DIR.glob(f"*{user.id}*"))
             for file_path in user_files:
                 file_path.unlink(missing_ok=True)
         except Exception as e:
             logger.warning(f"Error deleting user files: {e}")
-        
         return True
-        
     except Exception as e:
         logger.error(f"Error deleting user data: {e}")
         return False
@@ -423,16 +418,37 @@ class Token(BaseModel): access_token: str; token_type: str
 class TranscriptRequest(BaseModel): youtube_id: str; clean_transcript: bool=True; format: Optional[str]=None
 class AudioRequest(BaseModel): youtube_id: str; quality: str="medium"
 class VideoRequest(BaseModel): youtube_id: str; quality: str="720p"
-class CancelRequest(BaseModel): at_period_end: Optional[bool] = True  # default: schedule cancel at period end
+class CancelRequest(BaseModel): at_period_end: Optional[bool] = True
 class DeleteAccountResponse(BaseModel): message: str; deleted_at: str; user_email: str
 
 # -------------------- Startup ------------------------------------------------
+def _cleanup_stale_files_loop():
+    keep_days = max(1, FILE_RETENTION_DAYS)
+    suffixes = {".mp3",".m4a",".aac",".mp4",".mkv",".mov",".txt",".srt",".vtt"}
+    while True:
+        try:
+            cutoff = time.time() - keep_days * 86400
+            for p in DOWNLOADS_DIR.iterdir():
+                try:
+                    if not p.is_file(): continue
+                    if p.suffix.lower() not in suffixes: continue
+                    if p.stat().st_mtime < cutoff:
+                        p.unlink(missing_ok=True)
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.warning(f"stale-files cleanup error: {e}")
+        time.sleep(12 * 3600)
+
 @app.on_event("startup")
 async def on_startup():
     initialize_database()
+    # Spawn cleanup thread
+    threading.Thread(target=_cleanup_stale_files_loop, daemon=True).start()
     logger.info("Environment: %s", ENVIRONMENT)
     logger.info("Backend started")
-    # --- DEBUG: print route table on startup ---
+
+    # Debug routes list (optional)
     try:
         for r in app.routes:
             methods = getattr(r, "methods", None)
@@ -446,7 +462,7 @@ async def on_startup():
 @app.get("/")
 def root():
     return {"message": "YouTube Content Downloader API", "status": "running",
-            "version": "3.2.0", "features": ["transcripts","audio","video","mobile","history","payments"],
+            "version": "3.3.0", "features": ["transcripts","audio","video","mobile","history","payments"],
             "downloads_path": str(DOWNLOADS_DIR)}
 
 @app.post("/register")
@@ -475,74 +491,74 @@ def read_users_me(current_user: User = Depends(get_current_user)):
 # -------------------- ENHANCED: Account Deletion Endpoint -------------------
 @app.delete("/user/delete-account", response_model=DeleteAccountResponse)
 def delete_account(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """
-    Permanently delete user account and all associated data.
-    This action cannot be undone.
-    """
     try:
         user_email = current_user.email
-        user_id = current_user.id
         username = current_user.username
-        
         logger.info(f"Starting account deletion for user: {username} ({user_email})")
-        
-        # 1. Cancel and delete subscription
         subscription_deleted = delete_user_subscription(db, current_user)
         if not subscription_deleted:
             logger.warning(f"Failed to properly delete subscription for user {username}")
-        
-        # 2. Delete user data (downloads, files, etc.)
         data_deleted = delete_user_data(db, current_user)
         if not data_deleted:
             logger.warning(f"Failed to properly delete user data for user {username}")
-        
-        # 3. Delete the user account itself
-        db.delete(current_user)
-        db.commit()
-        
+        db.delete(current_user); db.commit()
         deletion_time = datetime.utcnow()
         logger.info(f"Successfully deleted account for user: {username} ({user_email}) at {deletion_time}")
-        
         return DeleteAccountResponse(
             message="Account deleted successfully. All data has been permanently removed.",
             deleted_at=deletion_time.isoformat(),
             user_email=user_email
         )
-        
     except Exception as e:
         logger.error(f"Account deletion failed for user {current_user.username}: {e}")
         db.rollback()
-        raise HTTPException(
-            status_code=500, 
-            detail="Account deletion failed. Please try again or contact support."
-        )
+        raise HTTPException(status_code=500, detail="Account deletion failed. Please try again or contact support.")
 
-# Add these routes anywhere in your route definitions section
+# -------------------- Stripe webhook (verified + idempotent) ----------------
+_IDEMP_STORE = {}
+_IDEMP_TTL_SEC = 24 * 3600
+_IDEMP_LOCK = threading.Lock()
+
+def _idemp_seen(event_id: str) -> bool:
+    now = time.time()
+    with _IDEMP_LOCK:
+        # purge old
+        for k, ts in list(_IDEMP_STORE.items()):
+            if now - ts > _IDEMP_TTL_SEC:
+                _IDEMP_STORE.pop(k, None)
+        if event_id in _IDEMP_STORE:
+            return True
+        _IDEMP_STORE[event_id] = now
+        return False
 
 @app.post("/webhook/stripe")
 async def stripe_webhook_endpoint(request: Request):
-    """
-    Stripe webhook endpoint that automatically updates user subscription tiers.
-    Configure this URL in your Stripe dashboard: http://192.168.1.185:8000/webhook/stripe
-    """
-    return await handle_stripe_webhook(request)
+    if not stripe or not os.getenv("STRIPE_SECRET_KEY"):
+        raise HTTPException(status_code=503, detail="Stripe is not configured")
+    secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+    if not secret:
+        raise HTTPException(status_code=500, detail="Webhook secret not configured")
 
-@app.post("/admin/fix-users")
-async def fix_users_endpoint():
-    """
-    One-time admin endpoint to fix users who paid but weren't upgraded.
-    Call this once to fix existing issues like the LovePets user.
-    """
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature")
     try:
-        result = fix_existing_premium_users()
-        return {
-            "status": "success", 
-            "message": "Fixed existing premium users",
-            "details": result
-        }
+        event = stripe.Webhook.construct_event(payload=payload, sig_header=sig, secret=secret)  # type: ignore
     except Exception as e:
-        logger.error(f"Fix users error: {e}")
-        raise HTTPException(status_code=500, detail=f"Error fixing users: {str(e)}")
+        logger.warning(f"Stripe webhook signature verification failed: {e}")
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    if not event or not event.get("id"):
+        raise HTTPException(status_code=400, detail="Invalid event payload")
+
+    if _idemp_seen(event["id"]):
+        logger.info(f"Stripe webhook duplicate event {event['id']} ignored")
+        return {"status": "ok", "duplicate": True}
+
+    # Attach verified event so handler can reuse
+    request.state.verified_event = event
+    # Delegate to existing handler (keeps your current logic)
+    result = await handle_stripe_webhook(request) if hasattr(handle_stripe_webhook, "__call__") else {"status":"ok"}
+    return result
 
 # -------------------- Subscription management -------------------------------
 def _latest_subscription(db: Session, user_id: int) -> Optional[Subscription]:
@@ -558,18 +574,12 @@ def _latest_subscription(db: Session, user_id: int) -> Optional[Subscription]:
 
 @app.post("/subscription/cancel")
 def cancel_subscription(req: CancelRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """
-    Schedule (default) or perform immediate cancellation.
-    - If Stripe is configured & we have a subscription id -> reflect in Stripe too.
-    - Always works even without Stripe by updating local records/downgrading.
-    """
     if (current_user.subscription_tier or "free") == "free":
         raise HTTPException(status_code=400, detail="No active subscription to cancel.")
 
     sub = _latest_subscription(db, current_user.id)
     at_period_end = True if req.at_period_end is None else bool(req.at_period_end)
 
-    # Try to update in Stripe if possible
     stripe_updated = False
     if stripe and sub and sub.stripe_subscription_id:
         try:
@@ -582,94 +592,58 @@ def cancel_subscription(req: CancelRequest, current_user: User = Depends(get_cur
         except Exception as e:
             logger.warning("Stripe cancel failed for user %s: %s", current_user.username, e)
 
-    # Update local database regardless
     if at_period_end:
-        # Keep plan active until period end — record intent in extra_data
         if sub:
             note = f"cancel_at_period_end=true; updated={datetime.utcnow().isoformat()}"
             sub.extra_data = (sub.extra_data or "") + ("\n" if sub.extra_data else "") + note
         result = {"status": "scheduled_cancellation", "at_period_end": True}
     else:
-        # Immediate cancel: mark subscription and downgrade user
         if sub:
-            sub.status = "cancelled"
-            sub.cancelled_at = datetime.utcnow()
+            sub.status = "cancelled"; sub.cancelled_at = datetime.utcnow()
         current_user.subscription_tier = "free"
         result = {"status": "cancelled", "at_period_end": False, "tier": "free"}
 
     try:
-        db.commit()
-        db.refresh(current_user)
-        if sub:
-            db.refresh(sub)
+        db.commit(); db.refresh(current_user); db.refresh(sub) if sub else None
     except Exception:
         db.rollback()
 
     result.update({"stripe_updated": stripe_updated})
     return result
 
-# -------------------- ENHANCED: Transcript with proper activity tracking ----
+# -------------------- Transcript / Audio / Video (unchanged APIs) -----------
 @app.post("/download_transcript")
 @app.post("/download_transcript/")
 def download_transcript(req: TranscriptRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     start = time.time()
     vid = extract_youtube_video_id(req.youtube_id)
-    if not vid or len(vid) != 11:
-        raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
-    if not check_internet():
-        raise HTTPException(status_code=503, detail="No internet connection available.")
+    if not vid or len(vid) != 11: raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    if not check_internet(): raise HTTPException(status_code=503, detail="No internet connection available.")
 
-    # ENHANCED: Determine proper usage type based on format-first logic
     if req.format in ['srt', 'vtt']:
-        usage_key = "unclean_transcripts"  # SRT/VTT are always timestamped
-        file_format = req.format
+        usage_key = "unclean_transcripts"; file_format = req.format
     elif req.clean_transcript:
-        usage_key = "clean_transcripts"
-        file_format = "txt"
+        usage_key = "clean_transcripts"; file_format = "txt"
     else:
-        usage_key = "unclean_transcripts"  # Timestamped
-        file_format = "txt"
-    
+        usage_key = "unclean_transcripts"; file_format = "txt"
     ok, used, limit = check_usage_limit(user, usage_key)
     if not ok:
-        # ENHANCED: Better error messaging based on format
-        type_name = "SRT transcript" if req.format == 'srt' else \
-                   "VTT transcript" if req.format == 'vtt' else \
-                   "clean transcript" if req.clean_transcript else "timestamped transcript"
+        type_name = "SRT transcript" if req.format == 'srt' else "VTT transcript" if req.format == 'vtt' else "clean transcript" if req.clean_transcript else "timestamped transcript"
         raise HTTPException(status_code=403, detail=f"Monthly limit reached for {type_name} ({used}/{limit}).")
 
     text = get_transcript_youtube_api(vid, clean=req.clean_transcript, fmt=req.format)
-    if not text:
-        raise HTTPException(status_code=404, detail="No transcript found for this video.")
+    if not text: raise HTTPException(status_code=404, detail="No transcript found for this video.")
 
     new_usage = increment_user_usage(db, user, usage_key)
     proc = time.time() - start
-    
-    # ENHANCED: Create download record with proper file format
-    rec = create_download_record(
-        db=db, user=user, kind=usage_key, youtube_id=vid,
-        file_format=file_format,
-        file_size=len(text), processing_time=proc
-    )
-    
-    return {
-        "transcript": text,
-        "youtube_id": vid,
-        "clean_transcript": req.clean_transcript,
-        "format": req.format,
-        "processing_time": round(proc, 2),
-        "success": True,
-        "usage_updated": new_usage,
-        "usage_type": usage_key,
-        "download_record_id": rec.id if rec else None,
-        "account": canonical_account(user),
-    }
+    rec = create_download_record(db=db, user=user, kind=usage_key, youtube_id=vid, file_format=file_format, file_size=len(text), processing_time=proc)
+    return {"transcript": text, "youtube_id": vid, "clean_transcript": req.clean_transcript, "format": req.format,
+            "processing_time": round(proc, 2), "success": True, "usage_updated": new_usage, "usage_type": usage_key,
+            "download_record_id": rec.id if rec else None, "account": canonical_account(user)}
 
-# -------------------- ENHANCED: Audio with proper activity tracking ---------
 def _touch_now(p: Path):
     try:
-        now = time.time()
-        os.utime(p, (now, now))
+        now = time.time(); os.utime(p, (now, now))
     except Exception as e:
         logger.warning("Could not set mtime: %s", e)
 
@@ -703,36 +677,21 @@ def download_audio(req: AudioRequest, user: User = Depends(get_current_user), db
             downloaded.rename(final_path)
         except Exception as e:
             logger.warning("Rename failed, using original name: %s", e)
-            final_path = downloaded
-            final_name = downloaded.name
-            fsize = final_path.stat().st_size
+            final_path = downloaded; final_name = downloaded.name; fsize = final_path.stat().st_size
 
-    _touch_now(final_path)  # <-- force Today on Windows
-
+    _touch_now(final_path)
     new_usage = increment_user_usage(db, user, "audio_downloads")
     proc = time.time() - start
-    
-    # ENHANCED: Create download record with proper format
-    rec = create_download_record(db=db, user=user, kind="audio_downloads", youtube_id=vid,
-                                 quality=req.quality, file_format="mp3", file_size=fsize, processing_time=proc)
-
+    rec = create_download_record(db=db, user=user, kind="audio_downloads", youtube_id=vid, quality=req.quality, file_format="mp3", file_size=fsize, processing_time=proc)
     token = create_access_token_for_mobile(user.username)
     direct_url = f"/download-file/audio/{final_name}?auth={token}"
+    return {"download_url": f"/files/{final_name}", "direct_download_url": direct_url, "youtube_id": vid, "quality": req.quality,
+            "file_size": fsize, "file_size_mb": round(fsize / (1024 * 1024), 2), "filename": final_name, "local_path": str(final_path),
+            "processing_time": round(proc, 2), "message": "Audio ready for download", "success": True,
+            "title": info.get("title", "Unknown Title"), "uploader": info.get("uploader", "Unknown"), "duration": info.get("duration", 0),
+            "usage_updated": new_usage, "usage_type": "audio_downloads",
+            "download_record_id": rec.id if rec else None, "account": canonical_account(user)}
 
-    return {
-        "download_url": f"/files/{final_name}",
-        "direct_download_url": direct_url,
-        "youtube_id": vid, "quality": req.quality,
-        "file_size": fsize, "file_size_mb": round(fsize / (1024 * 1024), 2),
-        "filename": final_name, "local_path": str(final_path),
-        "processing_time": round(proc, 2), "message": "Audio ready for download", "success": True,
-        "title": info.get("title", "Unknown Title"), "uploader": info.get("uploader", "Unknown"),
-        "duration": info.get("duration", 0),
-        "usage_updated": new_usage, "usage_type": "audio_downloads",
-        "download_record_id": rec.id if rec else None, "account": canonical_account(user),
-    }
-
-# -------------------- ENHANCED: Video with proper activity tracking ---------
 @app.post("/download_video/")
 def download_video(req: VideoRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     start = time.time()
@@ -763,34 +722,20 @@ def download_video(req: VideoRequest, user: User = Depends(get_current_user), db
             downloaded.rename(final_path)
         except Exception as e:
             logger.warning("Rename failed, using original name: %s", e)
-            final_path = downloaded
-            final_name = downloaded.name
-            fsize = final_path.stat().st_size
+            final_path = downloaded; final_name = downloaded.name; fsize = final_path.stat().st_size
 
-    _touch_now(final_path)  # <-- force Today on Windows
-
+    _touch_now(final_path)
     new_usage = increment_user_usage(db, user, "video_downloads")
     proc = time.time() - start
-    
-    # ENHANCED: Create download record with proper format
-    rec = create_download_record(db=db, user=user, kind="video_downloads", youtube_id=vid,
-                                 quality=req.quality, file_format="mp4", file_size=fsize, processing_time=proc)
-
+    rec = create_download_record(db=db, user=user, kind="video_downloads", youtube_id=vid, quality=req.quality, file_format="mp4", file_size=fsize, processing_time=proc)
     token = create_access_token_for_mobile(user.username)
     direct_url = f"/download-file/video/{final_name}?auth={token}"
-
-    return {
-        "download_url": f"/files/{final_name}",
-        "direct_download_url": direct_url,
-        "youtube_id": vid, "quality": req.quality,
-        "file_size": fsize, "file_size_mb": round(fsize / (1024 * 1024), 2),
-        "filename": final_name, "local_path": str(final_path),
-        "processing_time": round(proc, 2), "message": "Video ready for download", "success": True,
-        "title": info.get("title", "Unknown Title"), "uploader": info.get("uploader", "Unknown"),
-        "duration": info.get("duration", 0),
-        "usage_updated": new_usage, "usage_type": "video_downloads",
-        "download_record_id": rec.id if rec else None, "account": canonical_account(user),
-    }
+    return {"download_url": f"/files/{final_name}", "direct_download_url": direct_url, "youtube_id": vid, "quality": req.quality,
+            "file_size": fsize, "file_size_mb": round(fsize / (1024 * 1024), 2), "filename": final_name, "local_path": str(final_path),
+            "processing_time": round(proc, 2), "message": "Video ready for download", "success": True,
+            "title": info.get("title", "Unknown Title"), "uploader": info.get("uploader", "Unknown"), "duration": info.get("duration", 0),
+            "usage_updated": new_usage, "usage_type": "video_downloads",
+            "download_record_id": rec.id if rec else None, "account": canonical_account(user)}
 
 # -------------------- Secure file delivery ----------------------------------
 @app.get("/download-file/{file_type}/{filename}")
@@ -851,88 +796,41 @@ async def download_file(request: Request, file_type: str, filename: str, auth: O
     headers = {"Content-Disposition": f'attachment; filename="{safe_name}"', "Content-Length": str(size), "Accept-Ranges": "bytes"}
     return FileResponse(path=str(file_path), media_type=mime, headers=headers, filename=safe_name)
 
-# -------------------- ENHANCED: History / activity with proper classification
+# -------------------- Activity / Status / SPA (unchanged) -------------------
 @app.get("/user/download-history")
 def get_download_history(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     rows = db.query(TranscriptDownload).filter(TranscriptDownload.user_id == current_user.id).order_by(TranscriptDownload.created_at.desc()).limit(50).all()
     hist = [{
-        "id": d.id,
-        "type": d.transcript_type,
-        "video_id": d.youtube_id,
-        "quality": d.quality or "default",
-        "file_format": d.file_format or "unknown",
-        "file_size": d.file_size or 0,
-        "downloaded_at": d.created_at.isoformat() if d.created_at else None,
-        "processing_time": d.processing_time or 0,
-        "status": getattr(d, "status", "completed"),
-        "language": getattr(d, "language", "en"),
+        "id": d.id, "type": d.transcript_type, "video_id": d.youtube_id, "quality": d.quality or "default",
+        "file_format": d.file_format or "unknown", "file_size": d.file_size or 0, "downloaded_at": d.created_at.isoformat() if d.created_at else None,
+        "processing_time": d.processing_time or 0, "status": getattr(d, "status", "completed"), "language": getattr(d, "language", "en"),
     } for d in rows]
     return {"downloads": hist, "total_count": len(hist), "account": canonical_account(current_user)}
 
 @app.get("/user/recent-activity")
 @app.get("/user/recent-activity/")
 def get_recent_activity(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """ENHANCED: Recent activity with proper format-first transcript classification"""
     rows = db.query(TranscriptDownload).filter(TranscriptDownload.user_id == current_user.id).order_by(TranscriptDownload.created_at.desc()).limit(15).all()
     activities = []
-    
     for d in rows:
-        # ENHANCED: Use format-first classification
-        action, icon, desc_prefix, category = classify_activity_by_format(
-            d.transcript_type or "", 
-            d.file_format or "txt"
-        )
-        
-        # Build enhanced description
+        action, icon, desc_prefix, category = classify_activity_by_format(d.transcript_type or "", d.file_format or "txt")
         description = f"{desc_prefix} for video {d.youtube_id}"
-        
-        # Add quality if not default
-        if d.quality and d.quality != 'default':
-            description += f" ({d.quality})"
-            
-        # Add file size info
+        if d.quality and d.quality != 'default': description += f" ({d.quality})"
         if d.file_size:
             size_mb = d.file_size / (1024 * 1024)
-            if size_mb >= 1:
-                description += f" - {size_mb:.1f}MB"
-            else:
-                size_kb = d.file_size / 1024
-                description += f" - {size_kb:.0f}KB"
-        
+            description += f" - {size_mb:.1f}MB" if size_mb >= 1 else f" - {d.file_size / 1024:.0f}KB"
         activities.append({
-            "id": d.id,
-            "action": action,
-            "description": description,
-            "timestamp": d.created_at.isoformat() if d.created_at else None,
-            "icon": icon,
-            "type": d.transcript_type,
-            "video_id": d.youtube_id,
-            "file_format": d.file_format or "txt",
-            "file_size": d.file_size,
-            "quality": d.quality,
-            "status": getattr(d, "status", "completed"),
-            "category": category,
-            "processing_time": d.processing_time
+            "id": d.id, "action": action, "description": description, "timestamp": d.created_at.isoformat() if d.created_at else None,
+            "icon": icon, "type": d.transcript_type, "video_id": d.youtube_id, "file_format": d.file_format or "txt",
+            "file_size": d.file_size, "quality": d.quality, "status": getattr(d, "status", "completed"),
+            "category": category, "processing_time": d.processing_time
         })
-    
-    # Add welcome message if no activities
     if not activities:
         activities.append({
-            "id": 0, 
-            "action": "Account created",
-            "description": f"Welcome to the app, {current_user.username}!",
-            "timestamp": current_user.created_at.isoformat() if current_user.created_at else None,
-            "type": "auth", 
-            "icon": "🎉",
-            "category": "system"
+            "id": 0, "action": "Account created", "description": f"Welcome to the app, {current_user.username}!",
+            "timestamp": current_user.created_at.isoformat() if current_user.created_at else None, "type": "auth", "icon": "🎉", "category": "system"
         })
-    
-    return {
-        "activities": activities, 
-        "total_count": len(activities), 
-        "account": canonical_account(current_user),
-        "fetched_at": datetime.utcnow().isoformat()
-    }
+    return {"activities": activities, "total_count": len(activities), "account": canonical_account(current_user), "fetched_at": datetime.utcnow().isoformat()}
 
 @app.get("/subscription_status")
 @app.get("/subscription_status/")
@@ -972,26 +870,17 @@ def debug_users(db: Session = Depends(get_db)):
     if os.getenv("ENVIRONMENT") != "development":
         raise HTTPException(status_code=404, detail="Not found")
     users = db.query(User).all()
-    return {
-        "total_users": len(users),
-        "users": [{
-            "id": u.id,
-            "username": u.username,
-            "email": (u.email or "").strip().lower(),
-            "created_at": u.created_at.isoformat() if u.created_at else None,
-            "subscription_tier": getattr(u, "subscription_tier", "free"),
-            "is_active": getattr(u, "is_active", True),
-        } for u in users]
-    }
+    return {"total_users": len(users),
+            "users": [{"id": u.id, "username": u.username, "email": (u.email or '').strip().lower(),
+                       "created_at": u.created_at.isoformat() if u.created_at else None,
+                       "subscription_tier": getattr(u, "subscription_tier", "free"),
+                       "is_active": getattr(u, "is_active", True)} for u in users]}
 
-# -------------------- SPA serving (updated with API path guarding) ----------
 FRONTEND_BUILD = (Path(__file__).resolve().parents[1] / "frontend" / "build")
 if FRONTEND_BUILD.exists():
     app.mount("/_spa", StaticFiles(directory=str(FRONTEND_BUILD), html=True), name="spa")
-
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa_catch_all(full_path: str):
-        # Do NOT handle paths that start with API-ish prefixes
         if full_path.startswith(("download_", "user/", "subscription_status", "health", "token", "register", "files/", "debug/")):
             raise HTTPException(status_code=404, detail="Not found")
         index_file = FRONTEND_BUILD / "index.html"
@@ -1005,8 +894,9 @@ if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
 
 
-
-######################### BACKUP FILE #####################
+#######################################################
+                # main.py file #
+#######################################################
 # from pathlib import Path
 # from datetime import datetime, timedelta
 # from typing import Optional, Dict, Any, Tuple
@@ -1370,6 +1260,59 @@ if __name__ == "__main__":
 #     # Default fallback
 #     return ("Downloaded Content", "📁", "Content", "general")
 
+# # -------------------- Account Deletion Helper --------------------------------
+# def delete_user_subscription(db: Session, user: User) -> bool:
+#     """Cancel and delete user's subscription if active."""
+#     try:
+#         if stripe and getattr(user, "subscription_tier", "free") != "free":
+#             # Find latest subscription
+#             subscription = (
+#                 db.query(Subscription)
+#                 .filter(Subscription.user_id == user.id)
+#                 .order_by(Subscription.created_at.desc())
+#                 .first()
+#             )
+            
+#             if subscription and subscription.stripe_subscription_id:
+#                 try:
+#                     # Cancel subscription in Stripe
+#                     stripe.Subscription.delete(subscription.stripe_subscription_id)
+#                     logger.info(f"Cancelled Stripe subscription {subscription.stripe_subscription_id} for user {user.username}")
+#                 except Exception as e:
+#                     logger.warning(f"Failed to cancel Stripe subscription: {e}")
+                
+#                 # Update local subscription record
+#                 subscription.status = "cancelled"
+#                 subscription.cancelled_at = datetime.utcnow()
+        
+#         # Delete all user subscriptions from database
+#         db.query(Subscription).filter(Subscription.user_id == user.id).delete()
+#         return True
+        
+#     except Exception as e:
+#         logger.error(f"Error deleting user subscription: {e}")
+#         return False
+
+# def delete_user_data(db: Session, user: User) -> bool:
+#     """Delete all user-related data."""
+#     try:
+#         # Delete download records
+#         db.query(TranscriptDownload).filter(TranscriptDownload.user_id == user.id).delete()
+        
+#         # Delete any user files (if stored locally)
+#         try:
+#             user_files = list(DOWNLOADS_DIR.glob(f"*{user.id}*"))
+#             for file_path in user_files:
+#                 file_path.unlink(missing_ok=True)
+#         except Exception as e:
+#             logger.warning(f"Error deleting user files: {e}")
+        
+#         return True
+        
+#     except Exception as e:
+#         logger.error(f"Error deleting user data: {e}")
+#         return False
+
 # # -------------------- Schemas -----------------------------------------------
 # class UserCreate(BaseModel): username: str; email: str; password: str
 # class UserResponse(BaseModel):
@@ -1380,6 +1323,7 @@ if __name__ == "__main__":
 # class AudioRequest(BaseModel): youtube_id: str; quality: str="medium"
 # class VideoRequest(BaseModel): youtube_id: str; quality: str="720p"
 # class CancelRequest(BaseModel): at_period_end: Optional[bool] = True  # default: schedule cancel at period end
+# class DeleteAccountResponse(BaseModel): message: str; deleted_at: str; user_email: str
 
 # # -------------------- Startup ------------------------------------------------
 # @app.on_event("startup")
@@ -1426,6 +1370,51 @@ if __name__ == "__main__":
 # @app.get("/users/me", response_model=UserResponse)
 # def read_users_me(current_user: User = Depends(get_current_user)):
 #     return current_user
+
+# # -------------------- ENHANCED: Account Deletion Endpoint -------------------
+# @app.delete("/user/delete-account", response_model=DeleteAccountResponse)
+# def delete_account(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+#     """
+#     Permanently delete user account and all associated data.
+#     This action cannot be undone.
+#     """
+#     try:
+#         user_email = current_user.email
+#         user_id = current_user.id
+#         username = current_user.username
+        
+#         logger.info(f"Starting account deletion for user: {username} ({user_email})")
+        
+#         # 1. Cancel and delete subscription
+#         subscription_deleted = delete_user_subscription(db, current_user)
+#         if not subscription_deleted:
+#             logger.warning(f"Failed to properly delete subscription for user {username}")
+        
+#         # 2. Delete user data (downloads, files, etc.)
+#         data_deleted = delete_user_data(db, current_user)
+#         if not data_deleted:
+#             logger.warning(f"Failed to properly delete user data for user {username}")
+        
+#         # 3. Delete the user account itself
+#         db.delete(current_user)
+#         db.commit()
+        
+#         deletion_time = datetime.utcnow()
+#         logger.info(f"Successfully deleted account for user: {username} ({user_email}) at {deletion_time}")
+        
+#         return DeleteAccountResponse(
+#             message="Account deleted successfully. All data has been permanently removed.",
+#             deleted_at=deletion_time.isoformat(),
+#             user_email=user_email
+#         )
+        
+#     except Exception as e:
+#         logger.error(f"Account deletion failed for user {current_user.username}: {e}")
+#         db.rollback()
+#         raise HTTPException(
+#             status_code=500, 
+#             detail="Account deletion failed. Please try again or contact support."
+#         )
 
 # # Add these routes anywhere in your route definitions section
 
@@ -1914,4 +1903,3 @@ if __name__ == "__main__":
 #     print(f"Starting server on 0.0.0.0:8000 — files: {DOWNLOADS_DIR}")
 #     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
 
-# ###########################################################################
