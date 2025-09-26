@@ -1,9 +1,4 @@
 # backend/tests/test_cancel_subscription.py
-# Minimal FastAPI tests for the cancel endpoint (no real DB/Stripe).
-
-###################
-
-# backend/tests/test_cancel_subscription.py
 # why: verify cancel endpoint behavior without real DB/Stripe
 from fastapi.testclient import TestClient
 from main import app

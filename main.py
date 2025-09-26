@@ -535,14 +535,49 @@ def root():
 
 @app.post("/register")
 def register(user: UserCreate, db: Session = Depends(get_db)):
-    if db.query(User).filter(User.username == user.username).first():
+    username = (user.username or "").strip()
+    email = (user.email or "").strip().lower()
+
+    if db.query(User).filter(User.username == username).first():
         raise HTTPException(status_code=400, detail="Username already exists.")
-    if db.query(User).filter(User.email == user.email).first():
+    if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=400, detail="Email already exists.")
-    obj = User(username=user.username, email=(user.email or "").strip().lower(),
-               hashed_password=get_password_hash(user.password), created_at=datetime.utcnow())
-    db.add(obj); db.commit(); db.refresh(obj)
-    return {"message": "User registered successfully.", "account": canonical_account(obj)}
+
+    obj = User(
+        username=username,
+        email=email,
+        hashed_password=get_password_hash(user.password),
+        created_at=datetime.utcnow(),
+        subscription_tier="free",
+    )
+
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+
+    # --- NEW: auto-create a Stripe customer if Stripe is configured ---
+    if stripe:
+        try:
+            # idempotency prevents accidental duplicates on retry
+            customer = stripe.Customer.create(
+                email=email,
+                name=username,
+                metadata={"app_user_id": str(obj.id)},
+                idempotency_key=f"user_register_{obj.id}",
+            )
+            obj.stripe_customer_id = customer["id"]
+            db.commit()
+            db.refresh(obj)
+            logger.info("✅ Created Stripe customer %s for user %s", obj.stripe_customer_id, username)
+        except Exception as e:
+            # Don’t block registration; just log
+            logger.warning("Stripe customer creation failed for %s: %s", email, e)
+
+    return {
+        "message": "User registered successfully.",
+        "account": canonical_account(obj),
+        "stripe_customer_id": getattr(obj, "stripe_customer_id", None),}
+
 
 @app.post("/token")
 def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
