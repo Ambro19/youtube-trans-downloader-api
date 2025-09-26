@@ -5,8 +5,16 @@
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Tuple
-import os, re, time, socket, mimetypes, logging, jwt, threading
+import re, time, socket, mimetypes, logging, jwt, threading #os
 from collections import deque, defaultdict
+
+#Newly added import
+from security_headers import SecurityHeadersMiddleware
+from rate_limit import RateLimitMiddleware, rules_for_env
+
+from models import engine  # add this
+from db_migrations import run_startup_migrations
+import os
 
 # ✅ use the shared dependency (no circular import)
 from auth_deps import get_current_user
@@ -103,7 +111,19 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
           )
       return response
 
-app.add_middleware(SecurityHeadersMiddleware)
+#app.add_middleware(SecurityHeadersMiddleware)
+
+app.add_middleware(
+    SecurityHeadersMiddleware,
+    # In dev, keep CSP None to avoid blocking localhost assets.
+    csp=None if os.getenv("APP_ENV", "development") == "development" else "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-ancestors 'none';",
+    enable_hsts=(os.getenv("APP_ENV") == "production"),
+)
+
+app.add_middleware(
+    RateLimitMiddleware,
+    rules=rules_for_env(os.getenv("APP_ENV", "development") == "development"),
+)
 
 # ---------- Simple In-Memory Rate Limiter ----------
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -511,6 +531,7 @@ def _cleanup_stale_files_loop():
 @app.on_event("startup")
 async def on_startup():
     initialize_database()
+    run_startup_migrations(engine)    # <-- add this line
     # Spawn cleanup thread
     threading.Thread(target=_cleanup_stale_files_loop, daemon=True).start()
     logger.info("Environment: %s", ENVIRONMENT)

@@ -3,7 +3,7 @@
 import os
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, DateTime, Boolean, Float, Text, ForeignKey, create_engine, Index, text
-from sqlalchemy.orm import sessionmaker, relationship, declarative_base
+from sqlalchemy.orm import sessionmaker, relationship #declarative_base
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./youtube_trans_downloader.db")
 
@@ -14,7 +14,15 @@ engine = create_engine(
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
-Base = declarative_base()
+#Base = declarative_base()
+# New (v2-forward compatible with fallback):
+try:
+    from sqlalchemy.orm import DeclarativeBase
+    class Base(DeclarativeBase):
+        pass
+except Exception:  # SQLAlchemy < 2
+    from sqlalchemy.ext.declarative import declarative_base
+    Base = declarative_base()
 
 class User(Base):
     __tablename__ = "users"
