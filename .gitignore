@@ -327,3 +327,10 @@ batch_jobs_*.json
 server_files/
 downloads/
 
+# SQLite
+*.db-shm
+*.db-wal
+# (usually also ignore the DB itself)
+*.db
+
+
