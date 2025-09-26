@@ -39,6 +39,9 @@ load_dotenv(dotenv_path=find_dotenv(".env"),       override=False)
 
 from youtube_transcript_api import YouTubeTranscriptApi
 
+from security_headers import SecurityHeadersMiddleware
+
+
 # Stripe optional
 stripe = None
 try:
