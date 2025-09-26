@@ -26,20 +26,30 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.base import BaseHTTPMiddleware
+#from starlette.middleware.base import BaseHTTPMiddleware
 
 from pydantic import BaseModel
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
-
+### ###
+import os, time, threading
+from collections import defaultdict, deque
+from typing import Optional, Dict, Deque
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+### ###
 from dotenv import load_dotenv, find_dotenv
 load_dotenv()
 load_dotenv(dotenv_path=find_dotenv(".env.local"), override=True)
 load_dotenv(dotenv_path=find_dotenv(".env"),       override=False)
 
 from youtube_transcript_api import YouTubeTranscriptApi
-
 from security_headers import SecurityHeadersMiddleware
+
+APP_ENV = os.getenv("APP_ENV", os.getenv("ENV", "development")).lower()
+IS_PROD = APP_ENV == "production"
 
 
 # Stripe optional
@@ -82,82 +92,134 @@ except Exception as e:
 
 # ---------- Security Headers Middleware ----------
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """
+    Sane security headers with optional CSP/HSTS. Accepts kwargs so add_middleware works.
+    - In dev, pass csp=None so it doesn't block hot-reload/assets.
+    - HSTS only makes sense behind HTTPS.
+    """
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        csp: Optional[str] = None,
+        hsts: bool = False,
+        hsts_max_age: int = 31536000,
+        hsts_preload: bool = False,
+        referrer_policy: str = "no-referrer",
+        x_frame_options: str = "DENY",
+        permissions_policy: Optional[str] = "geolocation=(), microphone=(), camera=()",
+        server_header: Optional[str] = "YCD",
+        apply_csp_to_api_only: bool = True,  # skip CSP on HTML/_spa to avoid breaking SPA
+    ) -> None:
+        super().__init__(app)
+        self.csp = csp
+        self.hsts = hsts
+        self.hsts_max_age = int(hsts_max_age)
+        self.hsts_preload = bool(hsts_preload)
+        self.referrer_policy = referrer_policy
+        self.x_frame_options = x_frame_options
+        self.permissions_policy = permissions_policy
+        self.server_header = server_header
+        self.apply_csp_to_api_only = apply_csp_to_api_only
+
     async def dispatch(self, request: Request, call_next):
-      response = await call_next(request)
+        response = await call_next(request)
 
-      # Always useful
-      response.headers["X-Content-Type-Options"] = "nosniff"
-      response.headers["X-Frame-Options"] = "DENY"
-      response.headers["Referrer-Policy"] = "no-referrer"
-      response.headers["Cross-Origin-Resource-Policy"] = "same-site"
-      response.headers["Server"] = "YCD"  # override default server banner
+        # Always-useful headers
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        if self.x_frame_options:
+            response.headers["X-Frame-Options"] = self.x_frame_options
+        if self.referrer_policy:
+            response.headers["Referrer-Policy"] = self.referrer_policy
+        # Don’t emit CORP by default; it can break cross-origin API usage.
+        # response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
+        response.headers.setdefault("X-XSS-Protection", "0")
+        response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
 
-      # Only set HSTS in production/HTTPS contexts
-      xf_proto = request.headers.get("x-forwarded-proto", "").lower()
-      if ENVIRONMENT == "production" and (request.url.scheme == "https" or xf_proto == "https"):
-          response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
+        if self.server_header is not None:
+            response.headers["Server"] = self.server_header
 
-      # Conservative CSP for API (don’t break the SPA)
-      # Skip CSP for HTML responses and static files
-      content_type = response.headers.get("content-type", "").split(";")[0].strip()
-      if not content_type.startswith("text/html") and not request.url.path.startswith("/_spa"):
-          response.headers["Content-Security-Policy"] = (
-              "default-src 'none'; "
-              "img-src 'self' data: blob:; "
-              "media-src 'self' data: blob:; "
-              "font-src 'self' data:; "
-              "style-src 'self' 'unsafe-inline'; "
-              "script-src 'self' 'unsafe-inline'; "
-              "connect-src 'self'; "
-              "frame-ancestors 'none'; "
-              "base-uri 'none'; "
-          )
-      return response
+        # HSTS only if explicitly enabled and the request is HTTPS (or forwarded as HTTPS)
+        if self.hsts:
+            scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+            if (scheme or "").lower() == "https":
+                hsts_value = f"max-age={self.hsts_max_age}; includeSubDomains"
+                if self.hsts_preload:
+                    hsts_value += "; preload"
+                response.headers["Strict-Transport-Security"] = hsts_value
 
-#app.add_middleware(SecurityHeadersMiddleware)
+        # CSP (skip for HTML & _spa if configured)
+        if self.csp:
+            ct = (response.headers.get("content-type", "") or "").split(";")[0].strip().lower()
+            if self.apply_csp_to_api_only:
+                if not ct.startswith("text/html") and not request.url.path.startswith("/_spa"):
+                    response.headers["Content-Security-Policy"] = self.csp
+            else:
+                response.headers["Content-Security-Policy"] = self.csp
 
-app.add_middleware(
-    SecurityHeadersMiddleware,
-    # In dev, keep CSP None to avoid blocking localhost assets.
-    csp=None if os.getenv("APP_ENV", "development") == "development" else "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; frame-ancestors 'none';",
-    enable_hsts=(os.getenv("APP_ENV") == "production"),
+        if self.permissions_policy:
+            response.headers["Permissions-Policy"] = self.permissions_policy
+
+        return response
+
+# One, clear registration with supported kwargs
+DEV_CSP = None
+PROD_CSP = (
+    "default-src 'self'; "
+    "img-src 'self' data: blob:; "
+    "media-src 'self' data: blob:; "
+    "font-src 'self' data:; "
+    "style-src 'self' 'unsafe-inline'; "
+    "script-src 'self'; "
+    "connect-src 'self' https://api.stripe.com; "
+    "frame-ancestors 'none'; "
+    "base-uri 'none'; "
 )
 
 app.add_middleware(
-    RateLimitMiddleware,
-    rules=rules_for_env(os.getenv("APP_ENV", "development") == "development"),
+    SecurityHeadersMiddleware,
+    csp=(PROD_CSP if IS_PROD else DEV_CSP),
+    hsts=IS_PROD,
+    hsts_max_age=63072000,
+    hsts_preload=False,
+    referrer_policy="no-referrer",
+    x_frame_options="DENY",
+    permissions_policy="geolocation=(), microphone=(), camera=()",
+    server_header="YCD",
+    apply_csp_to_api_only=True,
 )
 
 # ---------- Simple In-Memory Rate Limiter ----------
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """
-    Tokenless sliding-window limiter per client IP + (optionally) route group.
-    For production at scale, back with Redis.
+    Simple sliding-window limiter per client IP.
+    For production scale, back with Redis.
+    Env overrides:
+      RL_ENABLED=true|false
+      RL_DEFAULT_WINDOW_SEC=60, RL_DEFAULT_MAX=120
+      RL_AUTH_WINDOW_SEC=60, RL_AUTH_MAX=10
+      RL_DL_WINDOW_SEC=60, RL_DL_MAX=40
     """
-    def __init__(self, app):
+    def __init__(self, app: ASGIApp) -> None:
         super().__init__(app)
         self.now = time.time
-        self.buckets: Dict[str, deque] = defaultdict(deque)
+        self.buckets: Dict[str, Deque[float]] = defaultdict(deque)
         self.lock = threading.Lock()
 
-        # Defaults (env-overridable)
+        self.enabled = os.getenv("RL_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+
         self.default_window = int(os.getenv("RL_DEFAULT_WINDOW_SEC", "60"))
-        self.default_max = int(os.getenv("RL_DEFAULT_MAX", "120"))
+        self.default_max    = int(os.getenv("RL_DEFAULT_MAX", "120"))
 
-        # Stricter for auth/checkout
         self.auth_window = int(os.getenv("RL_AUTH_WINDOW_SEC", "60"))
-        self.auth_max = int(os.getenv("RL_AUTH_MAX", "10"))
+        self.auth_max    = int(os.getenv("RL_AUTH_MAX", "10"))
 
-        # Download endpoints (moderate)
-        self.dl_window = int(os.getenv("RL_DL_WINDOW_SEC", "60"))
-        self.dl_max = int(os.getenv("RL_DL_MAX", "40"))
-
-        self.enabled = os.getenv("RL_ENABLED", "true").lower() in {"1","true","yes","on"}
+        self.dl_window   = int(os.getenv("RL_DL_WINDOW_SEC", "60"))
+        self.dl_max      = int(os.getenv("RL_DL_MAX", "40"))
 
     def key_for(self, request: Request) -> tuple[str, int, int]:
         ip = (request.client.host if request.client else "unknown")
         path = request.url.path
-
         if path.startswith(("/token", "/register", "/webhook/stripe")):
             return (f"AUTH:{ip}", self.auth_window, self.auth_max)
         if path.startswith(("/download_", "/download-file/")):
@@ -172,7 +234,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         now = self.now()
         with self.lock:
             q = self.buckets[key]
-            # pop old
             while q and now - q[0] > window:
                 q.popleft()
             if len(q) >= limit:
@@ -186,6 +247,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         return await call_next(request)
 
+# Register exactly once
 app.add_middleware(RateLimitMiddleware)
 
 # ---------- Routers ----------
