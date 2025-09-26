@@ -5,16 +5,16 @@
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Tuple
-import re, time, socket, mimetypes, logging, jwt, threading #os
+import re, time, socket, mimetypes, logging, jwt, os, threading #os
 from collections import deque, defaultdict
 
-#Newly added import
-from security_headers import SecurityHeadersMiddleware
 from rate_limit import RateLimitMiddleware, rules_for_env
 
 from models import engine  # add this
 from db_migrations import run_startup_migrations
-import os
+Base.metadata.create_all(bind=engine)
+run_startup_migrations(engine)
+#import os #os
 
 # ✅ use the shared dependency (no circular import)
 from auth_deps import get_current_user
@@ -26,13 +26,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-#from starlette.middleware.base import BaseHTTPMiddleware
 
 from pydantic import BaseModel
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
+logger = logging.getLogger("youtube_trans_downloader")
+
+
 ### ###
-import os, time, threading
+import time, threading #os
 from collections import defaultdict, deque
 from typing import Optional, Dict, Deque
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -49,7 +51,8 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from security_headers import SecurityHeadersMiddleware
 
 APP_ENV = os.getenv("APP_ENV", os.getenv("ENV", "development")).lower()
-IS_PROD = APP_ENV == "production"
+#IS_PROD = APP_ENV == "production"
+IS_PROD = (os.getenv("ENV", "development").lower() == "production")
 
 
 # Stripe optional
@@ -678,30 +681,58 @@ def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
 
 # -------------------- ENHANCED: Account Deletion Endpoint -------------------
-@app.delete("/user/delete-account", response_model=DeleteAccountResponse)
-def delete_account(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+@app.delete("/user/delete-account")
+def delete_account(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # capture safe identifier for logging before any DB I/O
+    safe_id = (getattr(current_user, "username", None)
+               or getattr(current_user, "email", None)
+               or f"id={getattr(current_user, 'id', '?')}")
+
     try:
-        user_email = current_user.email
-        username = current_user.username
-        logger.info(f"Starting account deletion for user: {username} ({user_email})")
-        subscription_deleted = delete_user_subscription(db, current_user)
-        if not subscription_deleted:
-            logger.warning(f"Failed to properly delete subscription for user {username}")
-        data_deleted = delete_user_data(db, current_user)
-        if not data_deleted:
-            logger.warning(f"Failed to properly delete user data for user {username}")
-        db.delete(current_user); db.commit()
-        deletion_time = datetime.utcnow()
-        logger.info(f"Successfully deleted account for user: {username} ({user_email}) at {deletion_time}")
-        return DeleteAccountResponse(
-            message="Account deleted successfully. All data has been permanently removed.",
-            deleted_at=deletion_time.isoformat(),
-            user_email=user_email
-        )
-    except Exception as e:
-        logger.error(f"Account deletion failed for user {current_user.username}: {e}")
+        # Reattach user to this session to avoid stale state
+        user = db.get(User, current_user.id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Look up subscription defensively (column may be mid-migration)
+        stripe_customer_id = None
+        try:
+            sub = db.query(Subscription).filter(Subscription.user_id == user.id).first()
+            if sub is not None:
+                stripe_customer_id = getattr(sub, "stripe_customer_id", None)
+        except Exception as e:
+            logger.warning("Subscription lookup during delete failed (continuing): %s", e)
+
+        # Best-effort Stripe cleanup (won't block account deletion)
+        if stripe_customer_id:
+            try:
+                import stripe  # configured elsewhere
+                # If you cancel instead of deleting customers, call Subscription delete here
+                stripe.Customer.delete(stripe_customer_id)
+            except Exception as e:
+                logger.warning("Stripe cleanup failed for %s: %s", safe_id, e)
+
+        # If you have child rows without ON DELETE CASCADE, delete them here idempotently.
+        # Example (keep only what exists in your schema):
+        try:
+            db.query(Subscription).filter(Subscription.user_id == user.id).delete()
+        except Exception:
+            pass
+
+        # Finally delete the user
+        db.delete(user)
+        db.commit()
+        return {"detail": "Account deleted"}
+    except HTTPException:
         db.rollback()
-        raise HTTPException(status_code=500, detail="Account deletion failed. Please try again or contact support.")
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.exception("Account deletion failed for %s: %s", safe_id, e)
+        raise HTTPException(status_code=500, detail="Account deletion failed")
 
 # -------------------- Stripe webhook (verified + idempotent) ----------------
 _IDEMP_STORE = {}
