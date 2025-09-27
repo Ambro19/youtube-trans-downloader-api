@@ -32,6 +32,8 @@ from pydantic import BaseModel
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import OperationalError, IntegrityError
+from sqlalchemy import delete as sqla_delete
+
 ### ###
 import os, time, threading
 from collections import defaultdict, deque
@@ -734,49 +736,62 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
 
-# -------------------- BULLETPROOF: Account Deletion Endpoint (final) -------------------
-from fastapi import Body
-
+# -------------------- Account Deletion (schema-tolerant) --------------------
 @app.delete("/user/delete-account")
-def delete_account(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """
-    Deletes the authenticated user's account and all related data.
-    - Cancels Stripe subs (if any)
-    - Deletes subscriptions + download records
-    - Cleans up local files
-    - Deletes the user row
-    """
+def delete_account(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    uid = int(current_user.id)
+    email = (current_user.email or "unknown@unknown.com")
+    warnings: list[str] = []
+
+    # 1) Cancel Stripe subs by customer id (no DB reads)
     try:
-        # 1) Cancel/cleanup subscription (Stripe + DB)
-        try:
-            delete_user_subscription(db, current_user)
-        except Exception as e:
-            logger.warning(f"Subscription cleanup warning for user {current_user.id}: {e}")
+        if stripe and getattr(current_user, "stripe_customer_id", None):
+            try:
+                subs = stripe.Subscription.list(customer=current_user.stripe_customer_id, limit=100)
+                for sub in getattr(subs, "data", []):
+                    try:
+                        stripe.Subscription.delete(sub.id)
+                    except Exception as e:
+                        warnings.append(f"stripe cancel {sub.id}: {str(e)[:60]}")
+            except Exception as e:
+                warnings.append(f"stripe list: {str(e)[:60]}")
+    except Exception as e:
+        warnings.append(f"stripe: {str(e)[:60]}")
 
-        # 2) Delete related app data + files
-        try:
-            delete_user_data(db, current_user)
-        except Exception as e:
-            logger.warning(f"Data cleanup warning for user {current_user.id}: {e}")
-
-        # 3) Finally delete the user row itself
-        db.delete(current_user)
+    # 2) Delete related DB rows WITHOUT selecting (no created_at touch)
+    try:
+        db.execute(sqla_delete(Subscription).where(Subscription.user_id == uid))
+        db.execute(sqla_delete(TranscriptDownload).where(TranscriptDownload.user_id == uid))
+        db.execute(sqla_delete(User).where(User.id == uid))
         db.commit()
-
-        deletion_time = datetime.utcnow().isoformat()
-        return {
-            "message": "Account deleted successfully. All data has been removed.",
-            "deleted_at": deletion_time,
-            "user_email": (current_user.email or "unknown@unknown.com"),
-        }
     except Exception as e:
         db.rollback()
-        logger.error(f"Account deletion failed for user {getattr(current_user, 'username', '?')}: {e}")
+        logger.error(f"DB delete failed for user {uid}: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete account")
 
+    # 3) Best-effort file cleanup (after commit)
+    try:
+        deleted_files = 0
+        for p in DOWNLOADS_DIR.glob(f"*{uid}*"):
+            try:
+                p.unlink(missing_ok=True)
+                deleted_files += 1
+            except Exception:
+                pass
+        if deleted_files == 0:
+            logger.info(f"no cached files found for user {uid}")
+    except Exception as e:
+        warnings.append(f"file cleanup: {str(e)[:60]}")
+
+    msg = "Account deleted successfully."
+    if warnings:
+        msg = f"Account deleted with warnings: {'; '.join(warnings)}"
+
+    return {
+        "message": msg,
+        "deleted_at": datetime.utcnow().isoformat(),
+        "user_email": email,
+    }
 
 # -------------------- Stripe webhook (verified + idempotent) ----------------
 _IDEMP_STORE = {}
