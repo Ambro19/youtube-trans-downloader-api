@@ -734,7 +734,7 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
 
-# -------------------- FINAL BULLETPROOF: Account Deletion Endpoint -------------------
+# -------------------- BULLETPROOF: Account Deletion Endpoint -------------------
 @app.delete("/user/delete-account")
 async def delete_account(request: Request):
     """
@@ -864,7 +864,7 @@ async def delete_account(request: Request):
         except Exception:
             pass
         
-        return JSONResponse({"detail": f"Account deletion failed: {str(e)[:100]}
+        return JSONResponse({"detail": f"Account deletion failed: {str(e)[:100]}"}, status_code=500)
 
 # -------------------- Stripe webhook (verified + idempotent) ----------------
 _IDEMP_STORE = {}
