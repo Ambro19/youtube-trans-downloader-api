@@ -734,137 +734,49 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
 
-# -------------------- BULLETPROOF: Account Deletion Endpoint -------------------
+# -------------------- BULLETPROOF: Account Deletion Endpoint (final) -------------------
+from fastapi import Body
+
 @app.delete("/user/delete-account")
-async def delete_account(request: Request):
+def delete_account(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """
-    Completely independent account deletion that bypasses all SQLAlchemy dependencies
+    Deletes the authenticated user's account and all related data.
+    - Cancels Stripe subs (if any)
+    - Deletes subscriptions + download records
+    - Cleans up local files
+    - Deletes the user row
     """
-    # Manual token extraction and validation
-    auth_header = request.headers.get("authorization", "")
-    if not auth_header.startswith("Bearer "):
-        return JSONResponse({"detail": "Authentication required"}, status_code=401)
-    
-    token = auth_header.split(" ", 1)[1]
-    
-    # Manual JWT validation
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username = payload.get("sub")
-        if not username:
-            return JSONResponse({"detail": "Invalid token"}, status_code=401)
-    except jwt.ExpiredSignatureError:
-        return JSONResponse({"detail": "Token expired"}, status_code=401)
-    except Exception:
-        return JSONResponse({"detail": "Invalid token"}, status_code=401)
-    
-    # Independent database connection - zero FastAPI/SQLAlchemy involvement
-    import sqlite3
-    db_path = DATABASE_URL.replace("sqlite:///", "").replace("./", "")
-    
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        
-        # Get user details first
-        cursor.execute("SELECT id, username, email, subscription_tier, stripe_customer_id FROM users WHERE username = ?", (username,))
-        user_row = cursor.fetchone()
-        
-        if not user_row:
-            conn.close()
-            return JSONResponse({"detail": "User not found"}, status_code=404)
-        
-        user_id, user_username, user_email, subscription_tier, stripe_customer_id = user_row
-        logger.info(f"Starting FINAL account deletion for user: {user_username} ({user_email}) ID: {user_id}")
-        
-        deletion_errors = []
-        
-        # Step 1: Cancel Stripe subscription if applicable
-        if stripe and subscription_tier and subscription_tier != "free":
-            try:
-                if stripe_customer_id:
-                    subscriptions = stripe.Subscription.list(customer=stripe_customer_id)
-                    for sub in subscriptions.data:
-                        try:
-                            stripe.Subscription.delete(sub.id)
-                            logger.info(f"Cancelled Stripe subscription {sub.id} for user {user_id}")
-                        except Exception as e:
-                            logger.warning(f"Failed to cancel Stripe subscription {sub.id}: {e}")
-            except Exception as e:
-                logger.warning(f"Stripe cleanup failed for user {user_username}: {e}")
-                deletion_errors.append(f"stripe cleanup: {str(e)[:50]}")
-        
-        # Step 2: Delete all related data
+        # 1) Cancel/cleanup subscription (Stripe + DB)
         try:
-            cursor.execute("DELETE FROM subscriptions WHERE user_id = ?", (user_id,))
-            deleted_subs = cursor.rowcount
-            logger.info(f"Deleted {deleted_subs} subscription records for user {user_id}")
+            delete_user_subscription(db, current_user)
         except Exception as e:
-            logger.warning(f"Subscription deletion failed: {e}")
-            deletion_errors.append(f"subscription cleanup: {str(e)[:50]}")
-        
+            logger.warning(f"Subscription cleanup warning for user {current_user.id}: {e}")
+
+        # 2) Delete related app data + files
         try:
-            cursor.execute("DELETE FROM transcript_downloads WHERE user_id = ?", (user_id,))
-            deleted_downloads = cursor.rowcount
-            logger.info(f"Deleted {deleted_downloads} download records for user {user_id}")
+            delete_user_data(db, current_user)
         except Exception as e:
-            logger.warning(f"Download records deletion failed: {e}")
-            deletion_errors.append(f"download records: {str(e)[:50]}")
-        
-        # Step 3: Delete user files
-        try:
-            user_files = list(DOWNLOADS_DIR.glob(f"*{user_id}*"))
-            deleted_files = 0
-            for file_path in user_files:
-                try:
-                    file_path.unlink(missing_ok=True)
-                    deleted_files += 1
-                except Exception:
-                    pass
-            logger.info(f"Deleted {deleted_files} user files for user {user_id}")
-        except Exception as e:
-            logger.warning(f"File cleanup failed: {e}")
-            deletion_errors.append(f"file cleanup: {str(e)[:50]}")
-        
-        # Step 4: DELETE THE USER ACCOUNT - THE CRITICAL PART
-        logger.info(f"About to delete user {user_id} from users table...")
-        cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
-        deleted_users = cursor.rowcount
-        logger.info(f"User deletion executed. Rows affected: {deleted_users}")
-        
-        if deleted_users > 0:
-            conn.commit()
-            conn.close()
-            
-            logger.info(f"✅ SUCCESSFULLY DELETED USER ACCOUNT: {user_username} ({user_email}) ID: {user_id}")
-            
-            deletion_time = datetime.utcnow()
-            message = "Account deleted successfully. All data has been permanently removed."
-            if deletion_errors:
-                message = f"Account deleted with minor cleanup issues: {'; '.join(deletion_errors[:2])}"
-                logger.info(f"Account deletion completed with cleanup warnings: {deletion_errors}")
-            
-            return JSONResponse({
-                "message": message,
-                "deleted_at": deletion_time.isoformat(),
-                "user_email": user_email or "unknown@unknown.com"
-            })
-        else:
-            logger.error(f"❌ CRITICAL: User deletion failed - no rows affected for user {user_id}")
-            conn.rollback()
-            conn.close()
-            return JSONResponse({"detail": "Failed to delete user account"}, status_code=500)
-            
+            logger.warning(f"Data cleanup warning for user {current_user.id}: {e}")
+
+        # 3) Finally delete the user row itself
+        db.delete(current_user)
+        db.commit()
+
+        deletion_time = datetime.utcnow().isoformat()
+        return {
+            "message": "Account deleted successfully. All data has been removed.",
+            "deleted_at": deletion_time,
+            "user_email": (current_user.email or "unknown@unknown.com"),
+        }
     except Exception as e:
-        logger.error(f"❌ CRITICAL: Account deletion failed for user {username}: {e}")
-        try:
-            if 'conn' in locals():
-                conn.rollback()
-                conn.close()
-        except Exception:
-            pass
-        
-        return JSONResponse({"detail": f"Account deletion failed: {str(e)[:100]}"}, status_code=500)
+        db.rollback()
+        logger.error(f"Account deletion failed for user {getattr(current_user, 'username', '?')}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete account")
+
 
 # -------------------- Stripe webhook (verified + idempotent) ----------------
 _IDEMP_STORE = {}
@@ -1251,7 +1163,7 @@ if __name__ == "__main__":
 
 ## BACKUP FILE
 # # Adds middlewares, webhook signature verification + idempotency, and a background cleanup thread. 
-# # (Everything else preserved.)
+# # (Everything else preserved.) No User Account Deletion.
 
 # # backend/main.py
 # from pathlib import Path
