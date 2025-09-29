@@ -208,7 +208,6 @@ def create_checkout_session(
         msg = getattr(e, "user_message", None) or str(e)
         raise HTTPException(status_code=500, detail=f"Failed to create checkout session: {msg}")
 
-
 @router.post("/create_portal_session")
 def create_portal_session(
     user: User = Depends(get_current_user),

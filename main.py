@@ -68,7 +68,9 @@ except Exception:
 
 # Local modules
 from payment import router as payment_router
-from payment import sync_user_subscription_from_stripe
+#from payment import router as billing_router   # the FastAPI router for /billing/*
+from subscription_sync import sync_user_subscription_from_stripe
+
 from models import User, TranscriptDownload, Subscription, get_db, initialize_database
 from transcript_utils import (
     get_transcript_with_ytdlp,
@@ -764,7 +766,6 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
         "account": canonical_account(obj),
         "stripe_customer_id": getattr(obj, "stripe_customer_id", None),
     }
-
 
 
 @app.post("/token")
