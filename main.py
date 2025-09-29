@@ -48,6 +48,7 @@ load_dotenv()
 load_dotenv(dotenv_path=find_dotenv(".env.local"), override=True)
 load_dotenv(dotenv_path=find_dotenv(".env"),       override=False)
 
+#------------ YouTube API ----------------
 from youtube_transcript_api import YouTubeTranscriptApi
 from security_headers import SecurityHeadersMiddleware
 
@@ -67,6 +68,7 @@ except Exception:
 
 # Local modules
 from payment import router as payment_router
+from payment import sync_user_subscription_from_stripe
 from models import User, TranscriptDownload, Subscription, get_db, initialize_database
 from transcript_utils import (
     get_transcript_with_ytdlp,
@@ -1154,23 +1156,99 @@ def get_recent_activity(current_user: User = Depends(get_current_user), db: Sess
         })
     return {"activities": activities, "total_count": len(activities), "account": canonical_account(current_user), "fetched_at": datetime.utcnow().isoformat()}
 
-@app.get("/subscription_status")
+#------------------------------------------ Subscription endpoint 2 -----------------
+# from fastapi import Query, Depends
+# from sqlalchemy.orm import Session
+# from models import User, Subscription  # adjust import path if different
+# from payment import sync_user_subscription_from_stripe  # helper I gave you
+# # make sure logger, DOWNLOADS_DIR, canonical_account, get_db, get_current_user are already imported
+
+# @app.get("/subscription_status")
+# @app.get("/subscription_status/")
+# def subscription_status(
+#     sync: bool = Query(False, description="When true, reconcile status with Stripe"),
+#     db: Session = Depends(get_db),
+#     current_user: User = Depends(get_current_user),
+# ):
+#     # start with whatever the user currently has locally
+#     tier = getattr(current_user, "subscription_tier", "free") or "free"
+
+#     # If explicitly asked to sync (or still looks free), reconcile with Stripe once.
+#     if sync or tier == "free":
+#         try:
+#             new_tier, _ = sync_user_subscription_from_stripe(db, current_user)
+#             if new_tier:
+#                 tier = new_tier
+#         except Exception as e:
+#             logger.warning(f"Stripe sync skipped: {e}")
+
+#     # ---- your original payload, unchanged ----
+#     usage = {
+#         "clean_transcripts": getattr(current_user, "usage_clean_transcripts", 0) or 0,
+#         "unclean_transcripts": getattr(current_user, "usage_unclean_transcripts", 0) or 0,
+#         "audio_downloads": getattr(current_user, "usage_audio_downloads", 0) or 0,
+#         "video_downloads": getattr(current_user, "usage_video_downloads", 0) or 0,
+#     }
+
+#     LIM = {
+#         "free":    {"clean_transcripts": 5,   "unclean_transcripts": 3,  "audio_downloads": 2,  "video_downloads": 1},
+#         "pro":     {"clean_transcripts": 100, "unclean_transcripts": 50, "audio_downloads": 50, "video_downloads": 20},
+#         "premium": {"clean_transcripts": float("inf"), "unclean_transcripts": float("inf"),
+#                     "audio_downloads": float("inf"),   "video_downloads": float("inf")},
+#     }.get(tier, {})
+
+#     limits = {k: ("unlimited" if v == float("inf") else v) for k, v in LIM.items()}
+#     status = "active" if tier != "free" else "inactive"
+
+#     return {
+#         "tier": tier,
+#         "status": status,
+#         "usage": usage,
+#         "limits": limits,
+#         "downloads_folder": str(DOWNLOADS_DIR),
+#         "account": canonical_account(current_user),
+#     }
+
+#------------------------------------ Subscription endpoint 1 -----------------
+# from fastapi import Depends, Query
+# from sqlalchemy.orm import Session
+# from models import User, Subscription
+# from payment import sync_user_subscription_from_stripe
+
 @app.get("/subscription_status/")
-def subscription_status(current_user: User = Depends(get_current_user)):
-    tier = getattr(current_user, "subscription_tier", "free")
-    usage = {
-        "clean_transcripts": getattr(current_user, "usage_clean_transcripts", 0) or 0,
-        "unclean_transcripts": getattr(current_user, "usage_unclean_transcripts", 0) or 0,
-        "audio_downloads": getattr(current_user, "usage_audio_downloads", 0) or 0,
-        "video_downloads": getattr(current_user, "usage_video_downloads", 0) or 0,
+@app.get("/subscription_status/")
+def subscription_status(
+    sync: bool = Query(False, description="When true, reconcile status with Stripe"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Returns plan/usage, and (optionally) asks Stripe for ground-truth to keep DB in sync.
+    """
+    # existing usage accounting (keep your real logic)
+    def current_usage():
+        # ... your existing code that compiles usage/limits ...
+        return {"usage": {}, "limits": {}}
+
+    # get local sub row first
+    sub = db.query(Subscription).filter(Subscription.user_id == current_user.id).first()
+    local_tier = (sub.tier if sub and sub.tier else "free")
+
+    # sync if requested OR if we still look free but might have paid
+    if sync or local_tier == "free":
+        try:
+            tier, _cust = sync_user_subscription_from_stripe(db, current_user)
+            local_tier = tier or local_tier
+        except Exception as e:
+            logger.warning(f"Stripe sync skipped: {e}")
+
+    payload = {
+        "tier": local_tier,
+        "status": (sub.status if sub else "none"),
+        **current_usage(),
     }
-    LIM = {
-        "free": {"clean_transcripts": 5, "unclean_transcripts": 3, "audio_downloads": 2, "video_downloads": 1},
-        "pro": {"clean_transcripts": 100, "unclean_transcripts": 50, "audio_downloads": 50, "video_downloads": 20},
-        "premium": {"clean_transcripts": float("inf"), "unclean_transcripts": float("inf"), "audio_downloads": float("inf"), "video_downloads": float("inf")},
-    }.get(tier, {})
-    limits = {k: ("unlimited" if v == float("inf") else v) for k, v in LIM.items()}
-    return {"tier": tier, "status": ("active" if tier != "free" else "inactive"), "usage": usage, "limits": limits, "downloads_folder": str(DOWNLOADS_DIR), "account": canonical_account(current_user)}
+    return payload
+
 
 @app.get("/health")
 def health():
