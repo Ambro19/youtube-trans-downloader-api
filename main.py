@@ -1210,44 +1210,50 @@ def get_recent_activity(current_user: User = Depends(get_current_user), db: Sess
 #     }
 
 #------------------------------------ Subscription endpoint 1 -----------------
-# from fastapi import Depends, Query
-# from sqlalchemy.orm import Session
-# from models import User, Subscription
-# from payment import sync_user_subscription_from_stripe
-
-@app.get("/subscription_status/")
+@app.get("/subscription_status")
 @app.get("/subscription_status/")
 def subscription_status(
     sync: bool = Query(False, description="When true, reconcile status with Stripe"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Returns plan/usage, and (optionally) asks Stripe for ground-truth to keep DB in sync.
-    """
-    # existing usage accounting (keep your real logic)
-    def current_usage():
-        # ... your existing code that compiles usage/limits ...
-        return {"usage": {}, "limits": {}}
+    # Start with whatever is in the DB now
+    tier = getattr(current_user, "subscription_tier", "free") or "free"
 
-    # get local sub row first
-    sub = db.query(Subscription).filter(Subscription.user_id == current_user.id).first()
-    local_tier = (sub.tier if sub and sub.tier else "free")
-
-    # sync if requested OR if we still look free but might have paid
-    if sync or local_tier == "free":
+    # Self-heal after checkout or when explicitly requested
+    if sync or tier == "free":
         try:
-            tier, _cust = sync_user_subscription_from_stripe(db, current_user)
-            local_tier = tier or local_tier
+            new_tier, _ = sync_user_subscription_from_stripe(db, current_user)
+            if new_tier:
+                tier = new_tier
         except Exception as e:
-            logger.warning(f"Stripe sync skipped: {e}")
+            logger.warning(f"subscription_status sync skipped: {e}")
 
-    payload = {
-        "tier": local_tier,
-        "status": (sub.status if sub else "none"),
-        **current_usage(),
+    usage = {
+        "clean_transcripts": getattr(current_user, "usage_clean_transcripts", 0) or 0,
+        "unclean_transcripts": getattr(current_user, "usage_unclean_transcripts", 0) or 0,
+        "audio_downloads": getattr(current_user, "usage_audio_downloads", 0) or 0,
+        "video_downloads": getattr(current_user, "usage_video_downloads", 0) or 0,
     }
-    return payload
+
+    LIM = {
+        "free":    {"clean_transcripts": 5,   "unclean_transcripts": 3,  "audio_downloads": 2,  "video_downloads": 1},
+        "pro":     {"clean_transcripts": 100, "unclean_transcripts": 50, "audio_downloads": 50, "video_downloads": 20},
+        "premium": {"clean_transcripts": float("inf"), "unclean_transcripts": float("inf"),
+                    "audio_downloads": float("inf"),   "video_downloads": float("inf")},
+    }.get(tier, {})
+
+    limits = {k: ("unlimited" if v == float("inf") else v) for k, v in LIM.items()}
+    status = "active" if tier != "free" else "inactive"
+
+    return {
+        "tier": tier,
+        "status": status,
+        "usage": usage,
+        "limits": limits,
+        "downloads_folder": str(DOWNLOADS_DIR),
+        "account": canonical_account(current_user),
+    }
 
 
 @app.get("/health")
