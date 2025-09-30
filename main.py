@@ -1157,106 +1157,44 @@ def get_recent_activity(current_user: User = Depends(get_current_user), db: Sess
         })
     return {"activities": activities, "total_count": len(activities), "account": canonical_account(current_user), "fetched_at": datetime.utcnow().isoformat()}
 
-#------------------------------------------ Subscription endpoint 2 -----------------
-# from fastapi import Query, Depends
-# from sqlalchemy.orm import Session
-# from models import User, Subscription  # adjust import path if different
-# from payment import sync_user_subscription_from_stripe  # helper I gave you
-# # make sure logger, DOWNLOADS_DIR, canonical_account, get_db, get_current_user are already imported
-
-# @app.get("/subscription_status")
-# @app.get("/subscription_status/")
-# def subscription_status(
-#     sync: bool = Query(False, description="When true, reconcile status with Stripe"),
-#     db: Session = Depends(get_db),
-#     current_user: User = Depends(get_current_user),
-# ):
-#     # start with whatever the user currently has locally
-#     tier = getattr(current_user, "subscription_tier", "free") or "free"
-
-#     # If explicitly asked to sync (or still looks free), reconcile with Stripe once.
-#     if sync or tier == "free":
-#         try:
-#             new_tier, _ = sync_user_subscription_from_stripe(db, current_user)
-#             if new_tier:
-#                 tier = new_tier
-#         except Exception as e:
-#             logger.warning(f"Stripe sync skipped: {e}")
-
-#     # ---- your original payload, unchanged ----
-#     usage = {
-#         "clean_transcripts": getattr(current_user, "usage_clean_transcripts", 0) or 0,
-#         "unclean_transcripts": getattr(current_user, "usage_unclean_transcripts", 0) or 0,
-#         "audio_downloads": getattr(current_user, "usage_audio_downloads", 0) or 0,
-#         "video_downloads": getattr(current_user, "usage_video_downloads", 0) or 0,
-#     }
-
-#     LIM = {
-#         "free":    {"clean_transcripts": 5,   "unclean_transcripts": 3,  "audio_downloads": 2,  "video_downloads": 1},
-#         "pro":     {"clean_transcripts": 100, "unclean_transcripts": 50, "audio_downloads": 50, "video_downloads": 20},
-#         "premium": {"clean_transcripts": float("inf"), "unclean_transcripts": float("inf"),
-#                     "audio_downloads": float("inf"),   "video_downloads": float("inf")},
-#     }.get(tier, {})
-
-#     limits = {k: ("unlimited" if v == float("inf") else v) for k, v in LIM.items()}
-#     status = "active" if tier != "free" else "inactive"
-
-#     return {
-#         "tier": tier,
-#         "status": status,
-#         "usage": usage,
-#         "limits": limits,
-#         "downloads_folder": str(DOWNLOADS_DIR),
-#         "account": canonical_account(current_user),
-#     }
-
-#------------------------------------ Subscription endpoint 1 -----------------
+#---------------------------- Subscription endpoint 1 ---------------------------
 @app.get("/subscription_status")
 @app.get("/subscription_status/")
 def subscription_status(
-    sync: bool = Query(False, description="When true, reconcile status with Stripe"),
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Start with whatever is in the DB now
+    # If the client sends ?sync=1 (your SubscriptionPage does while polling), sync with Stripe
+    do_sync = request.query_params.get("sync") in {"1", "true", "yes"}
+    if do_sync:
+        sync_user_subscription_from_stripe(db, current_user)
+
     tier = getattr(current_user, "subscription_tier", "free") or "free"
-
-    # Self-heal after checkout or when explicitly requested
-    if sync or tier == "free":
-        try:
-            new_tier, _ = sync_user_subscription_from_stripe(db, current_user)
-            if new_tier:
-                tier = new_tier
-        except Exception as e:
-            logger.warning(f"subscription_status sync skipped: {e}")
-
     usage = {
         "clean_transcripts": getattr(current_user, "usage_clean_transcripts", 0) or 0,
         "unclean_transcripts": getattr(current_user, "usage_unclean_transcripts", 0) or 0,
         "audio_downloads": getattr(current_user, "usage_audio_downloads", 0) or 0,
         "video_downloads": getattr(current_user, "usage_video_downloads", 0) or 0,
     }
-
     LIM = {
         "free":    {"clean_transcripts": 5,   "unclean_transcripts": 3,  "audio_downloads": 2,  "video_downloads": 1},
         "pro":     {"clean_transcripts": 100, "unclean_transcripts": 50, "audio_downloads": 50, "video_downloads": 20},
         "premium": {"clean_transcripts": float("inf"), "unclean_transcripts": float("inf"),
-                    "audio_downloads": float("inf"),   "video_downloads": float("inf")},
+                    "audio_downloads": float("inf"), "video_downloads": float("inf")},
     }.get(tier, {})
-
     limits = {k: ("unlimited" if v == float("inf") else v) for k, v in LIM.items()}
-    status = "active" if tier != "free" else "inactive"
 
     return {
         "tier": tier,
-        "status": status,
+        "status": ("active" if tier != "free" else "inactive"),
         "usage": usage,
         "limits": limits,
         "downloads_folder": str(DOWNLOADS_DIR),
         "account": canonical_account(current_user),
     }
 
-
+#---------------------------- health endpoint ---------------------------
 @app.get("/health")
 def health():
     return {
@@ -1272,6 +1210,8 @@ def health():
         "downloads_path": str(DOWNLOADS_DIR),
     }
 
+
+#---------------------------- healthdebug/users endpoint ---------------------------
 @app.get("/debug/users")
 def debug_users(db: Session = Depends(get_db)):
     if os.getenv("ENVIRONMENT") != "development":
