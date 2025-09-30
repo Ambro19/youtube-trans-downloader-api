@@ -1162,13 +1162,15 @@ def get_recent_activity(current_user: User = Depends(get_current_user), db: Sess
 @app.get("/subscription_status/")
 def subscription_status(
     request: Request,
-    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    # If the client sends ?sync=1 (your SubscriptionPage does while polling), sync with Stripe
-    do_sync = request.query_params.get("sync") in {"1", "true", "yes"}
-    if do_sync:
-        sync_user_subscription_from_stripe(db, current_user)
+    # optional self-heal from Stripe when the UI polls with ?sync=1
+    if request.query_params.get("sync") == "1":
+        try:
+            sync_user_subscription_from_stripe(current_user, db)
+        except Exception as e:
+            logger.warning(f"Stripe sync skipped (non-fatal): {e}")
 
     tier = getattr(current_user, "subscription_tier", "free") or "free"
     usage = {
@@ -1181,10 +1183,9 @@ def subscription_status(
         "free":    {"clean_transcripts": 5,   "unclean_transcripts": 3,  "audio_downloads": 2,  "video_downloads": 1},
         "pro":     {"clean_transcripts": 100, "unclean_transcripts": 50, "audio_downloads": 50, "video_downloads": 20},
         "premium": {"clean_transcripts": float("inf"), "unclean_transcripts": float("inf"),
-                    "audio_downloads": float("inf"), "video_downloads": float("inf")},
+                    "audio_downloads": float("inf"),    "video_downloads": float("inf")},
     }.get(tier, {})
     limits = {k: ("unlimited" if v == float("inf") else v) for k, v in LIM.items()}
-
     return {
         "tier": tier,
         "status": ("active" if tier != "free" else "inactive"),
