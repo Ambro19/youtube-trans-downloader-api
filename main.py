@@ -684,6 +684,8 @@ def root():
 
 
 # -------------------- User Register (find-or-create Stripe customer) --------------------
+
+#logger.info(f"✅ Registered new user: {username} ({email})")
 @app.post("/register")
 def register(user: UserCreate, db: Session = Depends(get_db)):
     username = (user.username or "").strip()
@@ -704,6 +706,8 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     db.add(obj)
     db.commit()
     db.refresh(obj)
+
+    logger.info(f"✅ Registered new user: {username} ({email})")
 
     # --- Stripe: reuse existing customer by email if present; else create one ---
     if stripe:
@@ -768,13 +772,43 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     }
 
 
+# @app.post("/token")
+# def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+#     user = db.query(User).filter(User.username == form.username).first()
+#     if not user or not verify_password(form.password, user.hashed_password):
+#         raise HTTPException(status_code=401, detail="Incorrect username or password")
+#     token = create_access_token({"sub": user.username}, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+#     return {"access_token": token, "token_type": "bearer", "user": canonical_account(user)}
+
 @app.post("/token")
 def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == form.username).first()
-    if not user or not verify_password(form.password, user.hashed_password):
+    username_input = form.username.strip()
+    password_input = form.password
+
+    user = db.query(User).filter(User.username == username_input).first()
+
+    if not user:
+        logger.warning(f"❌ Login failed: user not found for username='{username_input}'")
         raise HTTPException(status_code=401, detail="Incorrect username or password")
-    token = create_access_token({"sub": user.username}, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    return {"access_token": token, "token_type": "bearer", "user": canonical_account(user)}
+
+    if not verify_password(password_input, user.hashed_password):
+        logger.warning(f"❌ Login failed: password mismatch for username='{username_input}'")
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+
+    logger.info(f"✅ Login successful for: {user.username}")
+
+    token = create_access_token(
+        {"sub": user.username},
+        timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": canonical_account(user),
+    }
+
+
 
 @app.get("/users/me", response_model=UserResponse)
 def read_users_me(current_user: User = Depends(get_current_user)):
@@ -1157,7 +1191,7 @@ def get_recent_activity(current_user: User = Depends(get_current_user), db: Sess
         })
     return {"activities": activities, "total_count": len(activities), "account": canonical_account(current_user), "fetched_at": datetime.utcnow().isoformat()}
 
-#---------------------------- Subscription endpoint 1 ---------------------------
+#---------------------------- Subscription endpoint ---------------------------
 @app.get("/subscription_status")
 @app.get("/subscription_status/")
 def subscription_status(
@@ -1212,7 +1246,7 @@ def health():
     }
 
 
-#---------------------------- healthdebug/users endpoint ---------------------------
+#---------------------------- debug/users endpoint ---------------------------
 @app.get("/debug/users")
 def debug_users(db: Session = Depends(get_db)):
     if os.getenv("ENVIRONMENT") != "development":
