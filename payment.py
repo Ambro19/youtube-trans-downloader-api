@@ -49,7 +49,6 @@ def _get_price_id(lookup_key: str) -> Optional[str]:
         logger.warning("Stripe price lookup failed for %s: %s", lookup_key, e)
     return None
 
-
 def _get_or_create_customer(user: User, db: Session) -> str:
     """
     Get or create a Stripe customer for the user.

@@ -42,6 +42,9 @@ class User(Base):
     hashed_password = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
+    # 🔽 add this line
+    must_change_password = Column(Boolean, nullable=False, default=False, server_default="0")
+ 
 
     # ✅ Keep both: tier (current) + status (legacy compat)
     subscription_tier = Column(String, default="free")
@@ -129,6 +132,13 @@ def initialize_database():
                     "UPDATE users SET subscription_status='inactive' WHERE subscription_status IS NULL"
                 )
 
+                 # 🔽 new: add must_change_password if missing
+                if "must_change_password" not in colnames:
+                    # SQLite stores booleans as 0/1
+                    conn.exec_driver_sql(
+                        "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"
+                    )
+        
         print(f"✅ Database tables created successfully at: {db_path}")
         return True
     except Exception as e:
