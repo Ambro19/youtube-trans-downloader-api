@@ -189,14 +189,17 @@ def create_checkout_session(
     try:
         session_params = {
             "mode": "subscription",
-            "customer": customer_id,  # Always use customer ID, never email
+            "customer": customer_id,
             "line_items": [{"price": price_id, "quantity": 1}],
             "success_url": f"{FRONTEND_URL}/subscription?checkout=success&session_id={{CHECKOUT_SESSION_ID}}",
             "cancel_url": f"{FRONTEND_URL}/subscription",
-            "allow_promotion_codes": True,
+
+            # --- make UI predictable ---
+            "payment_method_types": ["card"],   # card only
+            "phone_number_collection": {"enabled": False},  # removes phone row
             "billing_address_collection": "auto",
-            "automatic_tax": {"enabled": False},  # Avoid test-mode tax config errors
-            "payment_method_types": ["card"],  # Only allow cards (Link disabled in dashboard)
+            "allow_promotion_codes": True,
+            "automatic_tax": {"enabled": False},
         }
 
         session = stripe.checkout.Session.create(**session_params)
