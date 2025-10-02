@@ -42,6 +42,7 @@ class User(Base):
     hashed_password = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
+    
     # 🔽 add this line
     must_change_password = Column(Boolean, nullable=False, default=False, server_default="0")
  
@@ -115,14 +116,16 @@ def initialize_database():
             os.makedirs(db_dir)
             print(f"📁 Created database directory: {db_dir}")
 
-        # Create tables normally
+        # Create tables normally (covers fresh installs)
         Base.metadata.create_all(bind=engine)
 
-        # ✅ Lightweight SQLite migration (adds legacy column if missing)
+        # ✅ Lightweight SQLite migrations (add columns if missing)
         if DATABASE_URL.startswith("sqlite"):
             with engine.begin() as conn:
                 cols = conn.exec_driver_sql("PRAGMA table_info(users)").fetchall()
                 colnames = {c[1] for c in cols}
+
+                # --- legacy column kept for backwards compat ---
                 if "subscription_status" not in colnames:
                     conn.exec_driver_sql(
                         "ALTER TABLE users ADD COLUMN subscription_status TEXT NOT NULL DEFAULT 'inactive'"
@@ -132,13 +135,16 @@ def initialize_database():
                     "UPDATE users SET subscription_status='inactive' WHERE subscription_status IS NULL"
                 )
 
-                 # 🔽 new: add must_change_password if missing
+                # --- new: force-password-change flag (0/1 boolean in SQLite) ---
                 if "must_change_password" not in colnames:
-                    # SQLite stores booleans as 0/1
                     conn.exec_driver_sql(
                         "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"
                     )
-        
+                # Normalize any NULLs from older rows/migrations
+                conn.exec_driver_sql(
+                    "UPDATE users SET must_change_password=0 WHERE must_change_password IS NULL"
+                )
+
         print(f"✅ Database tables created successfully at: {db_path}")
         return True
     except Exception as e:

@@ -637,11 +637,11 @@ class VideoRequest(BaseModel): youtube_id: str; quality: str="720p"
 class CancelRequest(BaseModel): at_period_end: Optional[bool] = True
 class DeleteAccountResponse(BaseModel): message: str; deleted_at: str; user_email: str
 class ChangePasswordRequest(BaseModel):
-    current_password: Optional[str] = None  # optional when must_change_password = True
+    # current_password: Optional[str] = None  # optional when must_change_password = True
+    # new_password: str
+    current_password: str
     new_password: str
-
-
-
+    
 # -------------------- Startup ------------------------------------------------
 def _cleanup_stale_files_loop():
     keep_days = max(1, FILE_RETENTION_DAYS)
@@ -687,7 +687,7 @@ def root():
             "version": "3.3.0", "features": ["transcripts","audio","video","mobile","history","payments"],
             "downloads_path": str(DOWNLOADS_DIR)}
 
-# -------------------- User password change ----------------
+# -------------------- Users password change ----------------
 @app.post("/users/change_password")
 def change_password(req: ChangePasswordRequest,
                     current_user: User = Depends(get_current_user),
@@ -723,6 +723,29 @@ def change_password(req: ChangePasswordRequest,
         db.rollback()
         logger.error(f"change_password failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to update password")
+
+# -------------------- User password change ----------------
+@app.post("/user/change_password")
+def change_password(
+    req: ChangePasswordRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # Verify old password
+    if not verify_password(req.current_password, current_user.hashed_password):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+    # Set new hash
+    current_user.hashed_password = get_password_hash(req.new_password)
+    # Clear the must-change flag
+    try:
+        current_user.must_change_password = False
+    except Exception:
+        pass
+
+    db.commit(); db.refresh(current_user)
+    logger.info("🔑 Password changed for user %s", current_user.username)
+    return {"status": "ok"}
 
 # -------------------- User Register (find-or-create Stripe customer) --------------------
 @app.post("/register")
@@ -809,14 +832,15 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
         "account": canonical_account(obj),
         "stripe_customer_id": getattr(obj, "stripe_customer_id", None),
     }
-    
+
 # -------------------- token endpoint --------------------
 @app.post("/token")
 def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    username_input = (form.username or "").strip()
+    username_input = form.username.strip()
     password_input = form.password
 
     user = db.query(User).filter(User.username == username_input).first()
+
     if not user:
         logger.warning(f"❌ Login failed: user not found for username='{username_input}'")
         raise HTTPException(status_code=401, detail="Incorrect username or password")
@@ -832,14 +856,13 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
         timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
 
+    # ✅ include flag so UI can redirect to /change-password if required
     return {
         "access_token": token,
         "token_type": "bearer",
         "user": canonical_account(user),
-        # 👇 expose the flag so the UI can redirect to change password
         "must_change_password": bool(getattr(user, "must_change_password", False)),
     }
-
 
 @app.get("/users/me", response_model=UserResponse)
 def read_users_me(current_user: User = Depends(get_current_user)):
