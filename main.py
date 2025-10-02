@@ -1253,13 +1253,14 @@ def subscription_status(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # optional self-heal from Stripe when the UI polls with ?sync=1
+    # ✅ Sync with Stripe if ?sync=1 is provided
     if request.query_params.get("sync") == "1":
         try:
             sync_user_subscription_from_stripe(current_user, db)
         except Exception as e:
             logger.warning(f"Stripe sync skipped (non-fatal): {e}")
 
+    # ✅ Determine current tier and usage
     tier = getattr(current_user, "subscription_tier", "free") or "free"
     usage = {
         "clean_transcripts": getattr(current_user, "usage_clean_transcripts", 0) or 0,
@@ -1267,18 +1268,23 @@ def subscription_status(
         "audio_downloads": getattr(current_user, "usage_audio_downloads", 0) or 0,
         "video_downloads": getattr(current_user, "usage_video_downloads", 0) or 0,
     }
-    LIM = {
+
+    # ✅ Define limits per plan
+    PLAN_LIMITS = {
         "free":    {"clean_transcripts": 5,   "unclean_transcripts": 3,  "audio_downloads": 2,  "video_downloads": 1},
         "pro":     {"clean_transcripts": 100, "unclean_transcripts": 50, "audio_downloads": 50, "video_downloads": 20},
         "premium": {"clean_transcripts": float("inf"), "unclean_transcripts": float("inf"),
                     "audio_downloads": float("inf"),    "video_downloads": float("inf")},
-    }.get(tier, {})
-    limits = {k: ("unlimited" if v == float("inf") else v) for k, v in LIM.items()}
+    }
+
+    limits = PLAN_LIMITS.get(tier, PLAN_LIMITS["free"])
+    limits_display = {k: ("unlimited" if v == float("inf") else v) for k, v in limits.items()}
+
     return {
         "tier": tier,
-        "status": ("active" if tier != "free" else "inactive"),
+        "status": "active" if tier != "free" else "inactive",
         "usage": usage,
-        "limits": limits,
+        "limits": limits_display,
         "downloads_folder": str(DOWNLOADS_DIR),
         "account": canonical_account(current_user),
     }
