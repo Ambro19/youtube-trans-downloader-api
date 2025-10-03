@@ -595,6 +595,9 @@ class DeleteAccountResponse(BaseModel): message: str; deleted_at: str; user_emai
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str
+class LoginJSON(BaseModel):
+    username: str
+    password: str
 
 # ----------------- Startup -----------------
 def _cleanup_stale_files_loop():
@@ -717,6 +720,25 @@ def token_login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depen
         "must_change_password": bool(getattr(user, "must_change_password", False)),
     }
 
+@app.post("/token_json")
+def token_login_json(req: LoginJSON, db: Session = Depends(get_db)):
+    username_input = (req.username or "").strip()
+    password_input = req.password or ""
+
+    user = db.query(User).filter(User.username == username_input).first()
+    if not user or not verify_password(password_input, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+
+    token = create_access_token(
+        {"sub": user.username},
+        timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": canonical_account(user),
+        "must_change_password": bool(getattr(user, "must_change_password", False)),
+    }
 
 @app.get("/users/me", response_model=UserResponse)
 def read_users_me(current_user: User = Depends(get_current_user)):
