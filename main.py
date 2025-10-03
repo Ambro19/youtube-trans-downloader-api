@@ -687,25 +687,36 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     return {"message": "User registered successfully.", "account": canonical_account(obj),
             "stripe_customer_id": getattr(obj, "stripe_customer_id", None)}
 
-@app.post("/token")
-def login(form: OAuth2PasswordBearer = Depends(), db: Session = Depends(get_db)):
-    # FastAPI's OAuth2PasswordBearer only provides token retrieval; we keep our old form
-    raise HTTPException(status_code=405, detail="Use /token (password grant) with OAuth2PasswordRequestForm")
+from fastapi.security import OAuth2PasswordRequestForm  # make sure this import exists
 
+# ----------------- Auth: Token (password grant) -----------------
 @app.post("/token")
 def token_login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    username_input = form.username.strip()
-    password_input = form.password
+    """
+    Standard OAuth2 'password' grant: expects x-www-form-urlencoded with fields:
+      - username
+      - password
+    Returns: { access_token, token_type, user, must_change_password }
+    """
+    username_input = (form.username or "").strip()
+    password_input = form.password or ""
+
     user = db.query(User).filter(User.username == username_input).first()
     if not user or not verify_password(password_input, user.hashed_password):
+        # keep message short & safe for UI
         raise HTTPException(status_code=401, detail="Incorrect username or password")
-    token = create_access_token({"sub": user.username}, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+
+    token = create_access_token(
+        {"sub": user.username},
+        timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
     return {
         "access_token": token,
         "token_type": "bearer",
         "user": canonical_account(user),
         "must_change_password": bool(getattr(user, "must_change_password", False)),
     }
+
 
 @app.get("/users/me", response_model=UserResponse)
 def read_users_me(current_user: User = Depends(get_current_user)):
