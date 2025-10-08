@@ -76,7 +76,7 @@ logger = logging.getLogger("youtube_trans_downloader")
 
 APP_ENV = os.getenv("APP_ENV", os.getenv("ENV", "development")).lower()
 IS_PROD = APP_ENV == "production"
-ENVIRONMENT = os.getenv("ENVIRONMENT", APP_ENV or "development")
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development") #os.getenv("ENVIRONMENT", APP_ENV or "development")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 FILE_RETENTION_DAYS = int(os.getenv("FILE_RETENTION_DAYS", "7"))
 
@@ -229,22 +229,14 @@ PUBLIC_ORIGINS = [
     "https://www.onetechly.com",
 ]
 
-allowed_origins = (
-    [
-        # dev
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://192.168.1.185:3000",
-        FRONTEND_URL,
-        *PUBLIC_ORIGINS,
-    ]
-    if ENVIRONMENT != "production"
-    else [
-        # prod
-        *(PUBLIC_ORIGINS or []),
-        *( [FRONTEND_URL] if FRONTEND_URL else [] ),
-    ]
-)
+DEV_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://192.168.1.185:3000",
+    FRONTEND_URL,
+]
+
+allow_origins = PUBLIC_ORIGINS + (DEV_ORIGINS if ENVIRONMENT != "production" else [])
 
 app.add_middleware(
     CORSMiddleware,
