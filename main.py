@@ -223,29 +223,50 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(RateLimitMiddleware)
 
-# -------------------- CORS -------------------------
+# -------------------- CORS CONFIG --------------------
+from fastapi.middleware.cors import CORSMiddleware
+import os
+
+# Environment info
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+# ✅ Public domains (Render + Cloudflare)
 PUBLIC_ORIGINS = [
     "https://onetechly.com",
     "https://www.onetechly.com",
 ]
 
+# ✅ Local/dev origins for testing
 DEV_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://192.168.1.185:3000",
-    FRONTEND_URL,
 ]
 
-allow_origins = PUBLIC_ORIGINS + (DEV_ORIGINS if ENVIRONMENT != "production" else [])
+# ✅ Combine origins dynamically
+if ENVIRONMENT != "production":
+    allow_origins = PUBLIC_ORIGINS + DEV_ORIGINS + ([FRONTEND_URL] if FRONTEND_URL else [])
+else:
+    allow_origins = PUBLIC_ORIGINS + ([FRONTEND_URL] if FRONTEND_URL else [])
 
+# ✅ Apply CORSMiddleware safely
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o for o in allowed_origins if o],
+    allow_origins=[o for o in allow_origins if o],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Disposition", "Content-Type", "Content-Length", "Content-Range"],
+    expose_headers=[
+        "Content-Disposition",
+        "Content-Type",
+        "Content-Length",
+        "Content-Range",
+    ],
 )
+
+print("✅ CORS enabled for origins:", allow_origins)
+# -----------------------------------------------------
 
 # ----------------- Downloads dir -----------------
 USE_SYSTEM_DOWNLOADS = os.getenv("USE_SYSTEM_DOWNLOADS", "false").lower() == "true"
