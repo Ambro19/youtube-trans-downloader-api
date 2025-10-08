@@ -79,17 +79,6 @@ class Subscription(Base):
     extra_data = Column(Text, nullable=True)
     user = relationship("User", back_populates="subscriptions")
 
-# class Subscription(Base):
-#     __tablename__ = "subscriptions"
-#     id = Column(Integer, primary_key=True, index=True)
-#     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-#     tier = Column(String, nullable=False)
-#     status = Column(String, default="active")
-#     stripe_subscription_id = Column(String, nullable=True, unique=True)
-#     stripe_customer_id = Column(String, nullable=True)
-#     start_date = Column(DateTime, default=datetime.utcnow, nullable=False)  # ADD THIS
-#     created_at = Column(DateTime, default=datetime.utcnow, index=True)
-
 class TranscriptDownload(Base):
     __tablename__ = "transcript_downloads"
     id = Column(Integer, primary_key=True, index=True)

@@ -223,11 +223,29 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(RateLimitMiddleware)
 
-# ----------------- CORS -----------------
+# -------------------- CORS -------------------------
+PUBLIC_ORIGINS = [
+    "https://onetechly.com",
+    "https://www.onetechly.com",
+]
+
 allowed_origins = (
-    ["http://localhost:3000", "http://127.0.0.1:3000", "http://192.168.1.185:3000", FRONTEND_URL]
-    if ENVIRONMENT != "production" else [FRONTEND_URL]
+    [
+        # dev
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://192.168.1.185:3000",
+        FRONTEND_URL,
+        *PUBLIC_ORIGINS,
+    ]
+    if ENVIRONMENT != "production"
+    else [
+        # prod
+        *(PUBLIC_ORIGINS or []),
+        *( [FRONTEND_URL] if FRONTEND_URL else [] ),
+    ]
 )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o for o in allowed_origins if o],
