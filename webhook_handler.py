@@ -2,7 +2,6 @@
 Stripe webhook handler for automatic subscription upgrades.
 Integrates with existing YouTube Content Downloader API.
 """
-
 import os
 import json
 import logging
