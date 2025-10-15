@@ -1262,7 +1262,7 @@ def subscription_status(request: Request, current_user: User = Depends(get_curre
         "account": canonical_account(current_user),
     }
 
-# ----------------- Contact Us page (https://onetechly.com) -----------------
+# ---------- Contact Us page (https://onetechly.com) ---------------
 @app.post("/contact")
 @app.post("/contact")
 def send_contact_message(req: ContactMessage, request: Request):
