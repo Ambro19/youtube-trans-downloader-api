@@ -159,19 +159,20 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         if self.permissions_policy:
             response.headers["Permissions-Policy"] = self.permissions_policy
         return response
-
-DEV_CSP = None
+        
 PROD_CSP = (
     "default-src 'self'; "
     "img-src 'self' data: blob:; "
     "media-src 'self' data: blob:; "
     "font-src 'self' data:; "
     "style-src 'self' 'unsafe-inline'; "
+    # 👇 ADDED your API origin so the browser may call it
     "script-src 'self'; "
-    "connect-src 'self' https://api.stripe.com; "
+    "connect-src 'self' https://api.stripe.com https://youtube-trans-downloader-api.onrender.com; "
     "frame-ancestors 'none'; "
     "base-uri 'none'; "
 )
+
 app.add_middleware(
     SecurityHeadersMiddleware,
     csp=(PROD_CSP if IS_PROD else DEV_CSP),
