@@ -1,19 +1,22 @@
+# ---------------------------
 # Core API stack
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
 
 # Database & ORM
 sqlalchemy==2.0.25
+psycopg2-binary==2.9.9     # Postgres driver for SQLAlchemy (works great on Render)
 
-# Pydantic (for FastAPI validation)
+# Validation
 pydantic==2.5.3
+email-validator==2.1.1     # robust email parsing/validation (nice for signup/reset)
 
-# Authentication & Security
+# Auth & Security
 PyJWT==2.8.0
 passlib[bcrypt]==1.7.4
-bcrypt==3.2.2        # <--- DO NOT upgrade this until passlib supports 4.x+
+bcrypt==3.2.2              # keep pinned (passlib 1.7.x expects bcrypt 3.x)
 
-# Multipart/formdata (for file uploads)
+# Multipart/form-data
 python-multipart==0.0.6
 
 # Payments
@@ -26,26 +29,29 @@ yt-dlp==2024.12.6
 # .env support
 python-dotenv==1.0.0
 
-# HTTP/Network utils
+# HTTP clients (both are fine to keep)
 requests==2.32.4
 httpx==0.26.0
 
 # Timezones
 pytz==2023.3
 
-# XML parsing (required for YouTube transcript)
+# XML parsing (used by transcript lib)
 defusedxml==0.7.1
 
-# Fast JSON handling (optional, used only if you import/use orjson)
+# Fast JSON (optional; FastAPI will use it if present)
 orjson==3.9.10
 
-# For async file operations
+# Async file ops
 aiofiles==23.2.0
 
-# For better MIME type detection (optional - can use built-in mimetypes instead)
+# MIME type detection (optional; okay to remove if unused)
 python-magic==0.4.27
 
-# Optional: Error reporting for production
+# Password reset / email
+itsdangerous==2.2.0        # secure token signer (already in your code)
+sendgrid==6.11.0           # email sending; falls back to logging if key not set
+
+# Optional: production error reporting
 # sentry-sdk[fastapi]==1.40.0
 
-# --- Remove any unused or "leftover" libraries you don't actually import in your codebase! ---

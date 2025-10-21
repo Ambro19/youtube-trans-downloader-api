@@ -33,6 +33,18 @@ from sqlalchemy.exc import OperationalError, IntegrityError
 import smtplib, ssl
 from email.message import EmailMessage
 
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+from pydantic import BaseModel, EmailStr
+
+# backend/main.py (top-level imports)
+from email_utils import send_password_reset_email
+# ... keep your existing imports
+
+
+serializer = URLSafeTimedSerializer(SECRET_KEY)
+
+RESET_TOKEN_TTL_SECONDS = 3600  # 60 minutes
+
 from models import (
     User, TranscriptDownload, Subscription, get_db, initialize_database, engine
 )
@@ -160,20 +172,6 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             response.headers["Permissions-Policy"] = self.permissions_policy
         return response
 
-#----------------------------------
-# DEV_CSP = None
-# PROD_CSP = (
-#     "default-src 'self'; "
-#     "img-src 'self' data: blob:; "
-#     "media-src 'self' data: blob:; "
-#     "font-src 'self' data:; "
-#     "style-src 'self' 'unsafe-inline'; "
-#     "script-src 'self'; "
-#     "connect-src 'self' https://api.stripe.com; "
-#     "frame-ancestors 'none'; "
-#     "base-uri 'none'; "
-# )
-#--------------------------
 
 # Dev: no CSP so it's easy to debug locally
 DEV_CSP = None
@@ -290,7 +288,6 @@ app.add_middleware(
 )
 
 print("✅ CORS enabled for origins:", allow_origins)
-# -----------------------------------------------------
 
 # ----------------- Downloads dir -----------------
 USE_SYSTEM_DOWNLOADS = os.getenv("USE_SYSTEM_DOWNLOADS", "false").lower() == "true"
@@ -634,10 +631,8 @@ def delete_user_data(db: Session, user: User) -> bool:
     except Exception as e:
         logger.error(f"Error deleting user data: {e}")
         return False
-# ----------------- Contact / Mail helpers -----------------
-#CONTACT_TO = os.getenv("CONTACT_RECIPIENT", "onetechly@gmail.com")
-#CONTACT_FROM = os.getenv("CONTACT_FROM", "no-reply@onetechly.com")
 
+# ----------------- Contact / Mail helpers -----------------
 def _send_contact_email(name: str, email: str, message: str) -> None:
     """
     Try SendGrid first (SENDGRID_API_KEY). If missing, fall back to Gmail SMTP.
@@ -713,6 +708,13 @@ class ChangePasswordRequest(BaseModel):
 class LoginJSON(BaseModel):
     username: str
     password: str
+class ForgotPasswordIn(BaseModel):
+    email: EmailStr
+
+class ResetPasswordIn(BaseModel):
+    token: str
+    new_password: str
+
 class ContactMessage(BaseModel):
     name: str
     email: str
@@ -723,6 +725,7 @@ _email_re = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # In-memory micro throttle just for /contact (per-IP)
 _contact_hits: Dict[str, deque] = defaultdict(deque)
 _contact_lock = threading.Lock()
+
 
 # ----------------- Startup -----------------
 def _cleanup_stale_files_loop():
@@ -816,6 +819,52 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
             "stripe_customer_id": getattr(obj, "stripe_customer_id", None)}
 
 from fastapi.security import OAuth2PasswordRequestForm  # make sure this import exists
+
+# in your /auth/forgot-password route
+@app.post("/auth/forgot-password")
+def forgot_password(payload: ForgotPasswordIn):
+    db = SessionLocal()
+    try:
+        user = get_user_by_email(db, payload.email)
+        # Always return 200 (don’t reveal account existence)
+        if user:
+            token = serializer.dumps({"email": payload.email})
+            reset_link = f"{FRONTEND_URL}/reset?token={token}"
+
+            try:
+                send_password_reset_email(payload.email, reset_link)
+            except Exception as e:
+                logger.exception("Failed to send reset email; link still valid")
+                # NOTE: We deliberately do not expose email state to the client.
+
+        return {"ok": True}
+    finally:
+        db.close()
+
+
+@app.post("/auth/reset-password")
+def reset_password(payload: ResetPasswordIn):
+    try:
+        data = serializer.loads(payload.token, max_age=RESET_TOKEN_TTL_SECONDS)
+        email = data.get("email")
+    except SignatureExpired:
+        raise HTTPException(status_code=400, detail="Reset link expired")
+    except BadSignature:
+        raise HTTPException(status_code=400, detail="Reset link invalid")
+
+    db = SessionLocal()
+    try:
+        user = get_user_by_email(db, email)
+        if not user:
+            # Don’t leak which accounts exist
+            raise HTTPException(status_code=400, detail="Reset link invalid")
+
+        user.hashed_password = get_password_hash(payload.new_password)
+        db.add(user)
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
 
 # ----------------- Auth: Token (password grant) -----------------
 @app.post("/token")
