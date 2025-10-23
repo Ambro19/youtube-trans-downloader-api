@@ -13,6 +13,7 @@ import re, time, socket, mimetypes, logging, jwt, threading, os
 from collections import defaultdict, deque
 
 from dotenv import load_dotenv, find_dotenv
+# Load .env (works locally). On Render, vars come from the dashboard and this is harmless.
 load_dotenv()
 load_dotenv(dotenv_path=find_dotenv(".env.local"), override=True)
 load_dotenv(dotenv_path=find_dotenv(".env"),       override=False)
@@ -22,7 +23,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 from passlib.context import CryptContext
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
@@ -38,12 +38,41 @@ from pydantic import BaseModel, EmailStr
 
 # backend/main.py (top-level imports)
 from email_utils import send_password_reset_email
-# ... keep your existing imports
 
 
+#-------- Newly Added Snippet (Note that os, and URLSafeTimedSerializer aleady existed)-------------
+# SECRET_KEY: required
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError(
+        "SECRET_KEY env var is required. "
+        "Generate one with:  python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+    )
+
+# Token TTL (in seconds) for password reset links
+RESET_TOKEN_TTL_SECONDS = int(os.getenv("RESET_TOKEN_TTL_SECONDS", "3600"))
+
+# Create itsdangerous serializer AFTER we have SECRET_KEY
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 
-RESET_TOKEN_TTL_SECONDS = 3600  # 60 minutes
+# DATABASE_URL: default to local sqlite, upgrade to psycopg2 driver if using postgres
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./youtube_trans_downloader.db")
+
+# Accept common postgres URL formats and normalize for SQLAlchemy
+if DATABASE_URL.startswith("postgres://"):
+    # old Heroku-style
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg2://", 1)
+elif DATABASE_URL.startswith("postgresql://") and "+psycopg2" not in DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
+
+import logging
+logger = logging.getLogger("youtube_trans_downloader")
+logger.setLevel(logging.INFO)
+
+driver = "sqlite" if DATABASE_URL.startswith("sqlite") else "postgres"
+logger.info(f"✅ Config OK — using database driver: {driver}")
+
+#------------------ Newly Added Snippet ---------------
 
 from models import (
     User, TranscriptDownload, Subscription, get_db, initialize_database, engine
