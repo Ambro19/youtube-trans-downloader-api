@@ -1303,6 +1303,9 @@
 
 
 # =============================================================================
+# -----My Old transcript_utiles.py that was worked good with actual main.py ---
+
+# ====================================================================
 # transcript_utils.py — Enhanced helpers for transcripts, audio, and video
 # Public API kept stable for main.py:
 #   - get_transcript_with_ytdlp(video_id, clean=True, retries=3, wait_sec=1)
