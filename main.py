@@ -1,9 +1,7 @@
 # backend/main.py
 # YouTube Content Downloader API — production-ready main
-# - Security headers + simple rate-limit
-# - Stripe webhook verification + idempotency
-# - Monthly usage reset on anniversary + next_reset in API responses
-# - Auto-downgrade to free if subscription lapsed
+# - Security headers + simple rate-limit # - Stripe webhook verification + idempotency
+# - Monthly usage reset on anniversary + next_reset in API responses # - Auto-downgrade to free if subscription lapsed
 # - Consistent usage updates to fix Dashboard/Download mismatch
 
 from pathlib import Path
@@ -39,6 +37,8 @@ from pydantic import BaseModel, EmailStr
 # backend/main.py (top-level imports)
 from email_utils import send_password_reset_email
 
+
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound, NoTranscriptAvailable
 
 #-------- Newly Added Snippet (Note that os, and URLSafeTimedSerializer aleady existed)-------------
 # SECRET_KEY: required
@@ -427,128 +427,112 @@ def segments_to_srt(transcript) -> str:
     return "\n".join(out)
 
 #--------------------------- More robust, multi-strategy transcript fetch ---------------
+# --- replace your existing get_transcript_youtube_api with this version ---
+#from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound, NoTranscriptAvailable
+
+_EN_PRIORITY = ["en", "en-US", "en-GB", "en-CA", "en-AU", "en-IE", "en-NZ"]
+
+def _clean_plain_blocks(blocks: list[str]) -> str:
+    # paragraph every ~400 chars, favoring sentence endings
+    out, cur, chars = [], [], 0
+    for word in " ".join(blocks).split():
+        cur.append(word); chars += len(word) + 1
+        if chars > 400 and word.endswith((".", "!", "?")):
+            out.append(" ".join(cur)); cur, chars = [], 0
+    if cur: out.append(" ".join(cur))
+    return "\n\n".join(out)
+
+def _format_timestamped(segments):
+    lines = []
+    for seg in segments:
+        t = int(seg.get("start", 0))
+        lines.append(f"[{t//60:02d}:{t%60:02d}] {(seg.get('text') or '').replace('\n',' ')}")
+    return "\n".join(lines)
+
 def get_transcript_youtube_api(video_id: str, clean: bool = True, fmt: Optional[str] = None) -> str:
-    """
-    Robust transcript getter with several fallbacks:
-
-    Strategy A — Official API (direct):
-      - Try en, en-US, en-GB first.
-
-    Strategy B — Official API (discover & translate):
-      - List available transcripts, prefer authored English, then generated English.
-      - If no English available, try .translate('en') on a generated track.
-
-    Strategy C — yt-dlp fallback:
-      - Use your transcript_utils.get_transcript_with_ytdlp(video_id, clean).
-
-    On success returns text (TXT/SRT/VTT). On failure raises HTTPException with helpful detail.
-    """
     logger.info("Transcript for %s (clean=%s, fmt=%s)", video_id, clean, fmt)
 
-    if not check_internet():
-        raise HTTPException(status_code=503, detail="No internet connection available.")
-    if not check_youtube():
-        raise HTTPException(status_code=503, detail="Cannot reach YouTube right now.")
-
-    def _format_from_segments(segments):
-        # Shared formatter: clean text, timestamped TXT, or SRT/VTT
-        if clean:
-            text = " ".join((seg.get("text") or "").replace("\n", " ") for seg in segments)
-            text = " ".join(text.split())  # collapse whitespace
-            # Nice paragraph wrapping (~400 chars; break at sentence end)
-            out, cur, chars = [], [], 0
-            for word in text.split():
-                cur.append(word); chars += len(word) + 1
-                if chars > 400 and word.endswith((".", "!", "?")):
-                    out.append(" ".join(cur)); cur, chars = [], 0
-            if cur: out.append(" ".join(cur))
-            return "\n\n".join(out)
-
-        if (fmt or "").lower() == "srt":
-            return segments_to_srt(segments)
-        if (fmt or "").lower() == "vtt":
-            return segments_to_vtt(segments)
-
-        # default = timestamped TXT
-        lines = []
-        for seg in segments:
-            t = int(seg.get("start", 0))
-            timestamp = f"[{t//60:02d}:{t%60:02d}]"
-            txt = (seg.get("text") or "").replace("\n", " ")
-            lines.append(f"{timestamp} {txt}")
-        return "\n".join(lines)
-
-    # --- Strategy A: direct fetch in common English variants
-    try:
-        segments = YouTubeTranscriptApi.get_transcript(
-            video_id, languages=["en", "en-US", "en-GB"]
-        )
-        return _format_from_segments(segments)
-    except Exception as e_direct:
-        logger.info("Direct English transcript not found: %s", e_direct)
-
-    # --- Strategy B: list transcripts, then choose best, or translate
+    # 1) Try to list all tracks once
     try:
         listing = YouTubeTranscriptApi.list_transcripts(video_id)
+    except TranscriptsDisabled:
+        logger.warning("TranscriptsDisabled by uploader for %s", video_id)
+        listing = None
+    except Exception as e:
+        logger.warning("list_transcripts failed: %s", e)
+        listing = None
 
-        # Prefer authored English, then generated English
-        preferred = None
-        authored = None
-        generated = None
-
-        for t in listing:
-            try:
-                lang = (getattr(t, "language_code", "") or "").lower()
-                is_gen = bool(getattr(t, "is_generated", False))
-                # Keep first matching authored English
-                if lang in {"en", "en-us", "en-gb"} and not is_gen and authored is None:
-                    authored = t
-                # Keep first matching generated English
-                if lang in {"en", "en-us", "en-gb"} and is_gen and generated is None:
-                    generated = t
-            except Exception:
-                continue
-
-        preferred = authored or generated
-        if preferred:
-            segments = preferred.fetch()
-            return _format_from_segments(segments)
-
-        # No English track — try translating a generated track to English
-        # Pick any generated track that supports translation.
-        candidate = None
-        for t in listing:
-            try:
-                if getattr(t, "is_generated", False) and "en" in (getattr(t, "translation_languages", []) or []):
-                    candidate = t
-                    break
-            except Exception:
-                continue
-
-        if candidate:
-            try:
-                translated = candidate.translate("en")
-                segments = translated.fetch()
-                return _format_from_segments(segments)
-            except Exception as e_tr:
-                logger.info("Generated->EN translation failed: %s", e_tr)
-
-    except Exception as e_list:
-        logger.info("Transcript listing failed (will fallback to yt-dlp): %s", e_list)
-
-    # --- Strategy C: yt-dlp fallback
     try:
+        # 2) Prefer true English variants
+        if listing:
+            for code in _EN_PRIORITY:
+                try:
+                    t = listing.find_transcript([code])
+                    segments = t.fetch()
+                    if fmt == "srt":
+                        return segments_to_srt(segments)
+                    if fmt == "vtt":
+                        return segments_to_vtt(segments)
+                    if clean:
+                        return _clean_plain_blocks([(s.get("text") or "").replace("\n"," ") for s in segments])
+                    return _format_timestamped(segments)
+                except NoTranscriptFound:
+                    pass
+
+            # 3) Prefer **generated** English if available
+            try:
+                t = listing.find_generated_transcript(_EN_PRIORITY)
+                segments = t.fetch()
+                if fmt == "srt":
+                    return segments_to_srt(segments)
+                if fmt == "vtt":
+                    return segments_to_vtt(segments)
+                if clean:
+                    return _clean_plain_blocks([(s.get("text") or "").replace("\n"," ") for s in segments])
+                return _format_timestamped(segments)
+            except NoTranscriptFound:
+                pass
+
+            # 4) Any language → translate to English
+            for t in listing:
+                try:
+                    translated = t.translate("en")
+                    segments = translated.fetch()
+                    if fmt == "srt":
+                        return segments_to_srt(segments)
+                    if fmt == "vtt":
+                        return segments_to_vtt(segments)
+                    if clean:
+                        return _clean_plain_blocks([(s.get("text") or "").replace("\n"," ") for s in segments])
+                    return _format_timestamped(segments)
+                except Exception:
+                    continue
+
+        # 5) Fallback: legacy direct call (sometimes succeeds)
+        try:
+            segments = YouTubeTranscriptApi.get_transcript(video_id, languages=_EN_PRIORITY)
+            if fmt == "srt":
+                return segments_to_srt(segments)
+            if fmt == "vtt":
+                return segments_to_vtt(segments)
+            if clean:
+                return _clean_plain_blocks([(s.get("text") or "").replace("\n"," ") for s in segments])
+            return _format_timestamped(segments)
+        except Exception as e:
+            logger.info("direct get_transcript failed: %s", e)
+
+        # 6) Last resort: yt-dlp subtitles
         fb = get_transcript_with_ytdlp(video_id, clean=clean)
         if fb:
             return fb
-    except Exception as e_fb:
-        logger.warning("yt-dlp transcript fallback failed: %s", e_fb)
 
-    # Helpful 404 message
-    raise HTTPException(
-        status_code=404,
-        detail="No transcript/captions found for this video (tried English variants, translation, and yt-dlp).",
-    )
+        raise HTTPException(status_code=404, detail="No transcript/captions found for this video.")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning("Transcript pipeline error for %s: %s", video_id, e)
+        raise HTTPException(status_code=404, detail="No transcript/captions found for this video.")
 
 #------------------------------------------
 
