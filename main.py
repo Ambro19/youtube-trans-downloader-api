@@ -37,8 +37,23 @@ from pydantic import BaseModel, EmailStr
 # backend/main.py (top-level imports)
 from email_utils import send_password_reset_email
 
+# OLD (breaks on 1.1.0)
+# from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound, NoTranscriptAvailable
 
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound, NoTranscriptAvailable
+# NEW (compat with 1.1.0 and earlier)
+from youtube_transcript_api import (
+    YouTubeTranscriptApi,
+    TranscriptsDisabled,
+    NoTranscriptFound,
+)
+
+# Some versions expose this; make a fallback so code can catch it uniformly.
+try:
+    from youtube_transcript_api import CouldNotRetrieveTranscript  # optional depending on version
+except Exception:  # pragma: no cover
+    class CouldNotRetrieveTranscript(Exception):
+        pass
+
 
 #-------- Newly Added Snippet (Note that os, and URLSafeTimedSerializer aleady existed)-------------
 # SECRET_KEY: required
@@ -428,7 +443,6 @@ def segments_to_srt(transcript) -> str:
 
 #--------------------------- More robust, multi-strategy transcript fetch ---------------
 # --- replace your existing get_transcript_youtube_api with this version ---
-#from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound, NoTranscriptAvailable
 
 _EN_PRIORITY = ["en", "en-US", "en-GB", "en-CA", "en-AU", "en-IE", "en-NZ"]
 
