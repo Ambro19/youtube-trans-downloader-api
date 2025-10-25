@@ -446,8 +446,11 @@ def _format_timestamped(segments):
     lines = []
     for seg in segments:
         t = int(seg.get("start", 0))
-        lines.append(f"[{t//60:02d}:{t%60:02d}] {(seg.get('text') or '').replace('\n',' ')}")
+        # clean the text first (avoid backslash in f-string)
+        text = (seg.get("text") or "").replace("\n", " ")
+        lines.append(f"[{t // 60:02d}:{t % 60:02d}] {text}")
     return "\n".join(lines)
+
 
 def get_transcript_youtube_api(video_id: str, clean: bool = True, fmt: Optional[str] = None) -> str:
     logger.info("Transcript for %s (clean=%s, fmt=%s)", video_id, clean, fmt)
