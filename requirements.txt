@@ -1,4 +1,5 @@
 # ---------------------------
+
 # Core API stack
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
@@ -54,4 +55,6 @@ sendgrid==6.11.0           # email sending; falls back to logging if key not set
 
 # Optional: production error reporting
 # sentry-sdk[fastapi]==1.40.0
+
+
 

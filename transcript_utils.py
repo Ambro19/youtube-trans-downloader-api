@@ -1,5 +1,4 @@
-# transcript_utils.py — Enhanced helpers for transcripts, audio, and video
-# ENHANCED VERSION with improved subtitle detection
+# transcript_utils.py — PRODUCTION-READY with enhanced error handling
 # Public API kept stable for main.py:
 #   - get_transcript_with_ytdlp(video_id, clean=True, retries=3, wait_sec=1)
 #   - download_audio_with_ytdlp(video_id, quality="medium", output_dir=None) -> str
@@ -14,6 +13,7 @@ import time
 import logging
 import tempfile
 import re
+import shutil
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from datetime import datetime
@@ -87,180 +87,246 @@ def _parse_height(quality: str, default: int = 720) -> int:
     except Exception:
         return default
 
+def _get_ytdlp_path() -> Optional[str]:
+    """Find yt-dlp executable, checking multiple locations"""
+    # Try direct command first
+    if shutil.which("yt-dlp"):
+        return "yt-dlp"
+    
+    # Try common installation paths
+    possible_paths = [
+        "/usr/local/bin/yt-dlp",
+        "/usr/bin/yt-dlp",
+        str(Path.home() / ".local" / "bin" / "yt-dlp"),
+        str(Path(sys.executable).parent / "yt-dlp"),
+    ]
+    
+    for path in possible_paths:
+        if Path(path).exists():
+            logger.info(f"Found yt-dlp at: {path}")
+            return path
+    
+    logger.error("yt-dlp not found in any common location")
+    return None
+
 # ============
 # TRANSCRIPTS
 # ============
 
 def get_transcript_with_ytdlp(video_id: str, clean: bool = True, retries: int = 3, wait_sec: int = 1) -> Optional[str]:
     """
-    ENHANCED: Fallback transcript extractor using yt-dlp with improved file detection.
-    Works in a temp dir and cleans up. Returns clean text or timestamped lines depending on `clean`.
+    PRODUCTION-READY: Fallback transcript extractor using yt-dlp with comprehensive error handling.
+    
+    Returns clean text or timestamped lines depending on `clean`.
     Prefers JSON3, then VTT, then SRT (all English variants).
     
-    IMPROVEMENTS:
+    ENHANCEMENTS:
     - Downloads both human-created (--write-sub) and auto-generated (--write-auto-sub) subtitles
+    - Tries multiple English language codes (en, en-US, en-GB, en-CA, en-AU)
     - Better file pattern matching to catch all subtitle variations
-    - More detailed debug logging
+    - Comprehensive error logging for production debugging
+    - Fallback to any available subtitle if English not found
     """
     url = f"https://www.youtube.com/watch?v={video_id}"
+    
+    # Check if yt-dlp is available
+    ytdlp_path = _get_ytdlp_path()
+    if not ytdlp_path:
+        logger.error("yt-dlp executable not found - cannot download subtitles")
+        logger.error("Install with: pip install -U yt-dlp --break-system-packages")
+        return None
+    
     try:
         with tempfile.TemporaryDirectory(prefix=f"yt_trans_{video_id}_") as tmp:
             tmpdir = Path(tmp)
 
-            cmd = [
-                "yt-dlp",
-                "--restrict-filenames",
-                "--skip-download",
-                "--write-sub",                       # ✅ Download human-created subtitles FIRST
-                "--write-auto-sub",                  # ✅ Download auto-generated subtitles (fallback)
-                "--sub-langs", "en,en-US,en-GB",     # ✅ ENHANCED: Try multiple English variants
-                "--sub-format", "json3/vtt/srt",     # First available of these formats
-                "--output", "%(id)s",                # Save as video ID only
-                "--user-agent", _ua(),
-                "--no-warnings",
-                "--quiet",
-                url,
+            # Try multiple subtitle strategies
+            strategies = [
+                # Strategy 1: Comprehensive English variants
+                {
+                    "sub_langs": "en,en-US,en-GB,en-CA,en-AU",
+                    "desc": "All English variants"
+                },
+                # Strategy 2: Just English (simpler, faster)
+                {
+                    "sub_langs": "en",
+                    "desc": "Simple English"
+                },
+                # Strategy 3: Any available subtitle
+                {
+                    "sub_langs": "all",
+                    "desc": "Any language"
+                }
             ]
-            cmd = _maybe_add_cookies(cmd)
-            cmd = _maybe_no_mtime(cmd)
 
-            logger.info(f"[transcript] Downloading subtitles for {video_id}")
-            logger.debug(f"[transcript] Command: {' '.join(cmd)}")
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=45, check=False, cwd=tmpdir)
-            if result.returncode != 0:
-                logger.warning(f"yt-dlp (subs) returned code {result.returncode}")
-                if result.stderr:
-                    logger.debug(f"yt-dlp (subs) stderr: {result.stderr.strip()}")
-                if result.stdout:
-                    logger.debug(f"yt-dlp (subs) stdout: {result.stdout.strip()}")
-
-            # ✅ ENHANCED: More flexible file finding with broader patterns
-            def _find_subtitle_files(extension: str) -> List[Path]:
-                """Find all subtitle files with given extension, trying multiple patterns"""
-                patterns = [
-                    f"{video_id}.en*.{extension}",     # Standard: videoID.en.ext or videoID.en-US.ext
-                    f"{video_id}.*.{extension}",       # Any language code
-                    f"*.en*.{extension}",              # Catch files with en in the name
-                    f"*.{extension}",                  # Last resort: any file with this extension
+            for strategy_num, strategy in enumerate(strategies, 1):
+                logger.info(f"[transcript] Strategy {strategy_num}/{len(strategies)}: {strategy['desc']}")
+                
+                cmd = [
+                    ytdlp_path,
+                    "--restrict-filenames",
+                    "--skip-download",
+                    "--write-sub",                       # Human-created subtitles
+                    "--write-auto-sub",                  # Auto-generated subtitles
+                    "--sub-langs", strategy["sub_langs"],
+                    "--sub-format", "json3/vtt/srt",     # Preferred formats
+                    "--output", "%(id)s",
+                    "--user-agent", _ua(),
+                    "--no-warnings",
+                    url,
                 ]
-                for pattern in patterns:
-                    matches = list(tmpdir.glob(pattern))
-                    if matches:
-                        logger.debug(f"Found {len(matches)} files matching pattern: {pattern}")
-                        return sorted(matches)
-                return []
+                cmd = _maybe_add_cookies(cmd)
+                cmd = _maybe_no_mtime(cmd)
 
-            # List all files in temp directory for debugging
-            all_files = list(tmpdir.iterdir())
-            if all_files:
-                logger.debug(f"Files in temp dir: {[f.name for f in all_files]}")
-            else:
-                logger.warning(f"No files found in temp directory for {video_id}")
+                logger.info(f"[transcript] Downloading subtitles for {video_id}")
+                logger.debug(f"[transcript] Command: {' '.join(cmd[:10])}...")
 
-            # Try a few times for slow disk/network
-            for attempt in range(max(1, retries)):
-                # 1) JSON3 (best for robust text extraction)
-                json3_files = _find_subtitle_files("json3")
-                if json3_files:
-                    for json3 in json3_files:
-                        try:
-                            logger.info(f"[transcript] Processing JSON3 file: {json3.name}")
-                            data = json.loads(json3.read_text(encoding="utf-8"))
-                            result_text = _process_json3_transcript(data, clean)
-                            if result_text:
-                                logger.info(f"[transcript] Successfully extracted from JSON3")
-                                return result_text
-                        except Exception as e:
-                            logger.debug(f"JSON3 parse error for {json3.name}: {e}")
-                            continue
+                try:
+                    result = subprocess.run(
+                        cmd, 
+                        capture_output=True, 
+                        text=True, 
+                        timeout=45, 
+                        check=False, 
+                        cwd=tmpdir
+                    )
+                    
+                    if result.returncode != 0:
+                        logger.warning(f"yt-dlp returned code {result.returncode}")
+                        if result.stderr:
+                            logger.debug(f"stderr: {result.stderr[:500]}")
+                    
+                    # List all files for debugging
+                    all_files = list(tmpdir.iterdir())
+                    if all_files:
+                        logger.debug(f"Files in temp dir: {[f.name for f in all_files]}")
+                    else:
+                        logger.warning(f"No files downloaded for strategy {strategy_num}")
+                        continue
 
-                # 2) VTT
-                vtt_files = _find_subtitle_files("vtt")
-                if vtt_files:
-                    for vtt in vtt_files:
-                        try:
-                            logger.info(f"[transcript] Processing VTT file: {vtt.name}")
-                            vtt_text = vtt.read_text(encoding="utf-8", errors="ignore")
-                            if vtt_text.strip():
-                                result_text = extract_vtt_text(vtt_text) if clean else format_transcript_vtt(vtt_text)
-                                if result_text:
-                                    logger.info(f"[transcript] Successfully extracted from VTT")
-                                    return result_text
-                        except Exception as e:
-                            logger.debug(f"VTT parse error for {vtt.name}: {e}")
-                            continue
+                    # Try to find and process subtitle files
+                    result_text = _process_subtitle_files(tmpdir, video_id, clean)
+                    if result_text:
+                        logger.info(f"[transcript] SUCCESS with strategy {strategy_num}")
+                        return result_text
+                    else:
+                        logger.info(f"[transcript] Strategy {strategy_num} found files but couldn't extract text")
+                        
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"yt-dlp timeout on strategy {strategy_num}")
+                    continue
+                except Exception as e:
+                    logger.warning(f"Strategy {strategy_num} error: {e}")
+                    continue
 
-                # 3) SRT (fallback)
-                srt_files = _find_subtitle_files("srt")
-                if srt_files:
-                    for srt in srt_files:
-                        try:
-                            logger.info(f"[transcript] Processing SRT file: {srt.name}")
-                            srt_text = srt.read_text(encoding="utf-8", errors="ignore")
-                            if not srt_text.strip():
-                                continue
-                                
-                            if clean:
-                                # strip indices + timecodes -> plain text
-                                lines = []
-                                for line in srt_text.splitlines():
-                                    s = line.strip()
-                                    if not s or s.isdigit() or "-->" in s:
-                                        continue
-                                    s = re.sub(r"<[^>]+>", "", s)      # drop tags
-                                    s = re.sub(r"\{[^}]+\}", "", s)    # drop styling
-                                    if s:
-                                        lines.append(s)
-                                if lines:
-                                    logger.info(f"[transcript] Successfully extracted from SRT (clean)")
-                                    return " ".join(lines)
-                            else:
-                                # convert SRT blocks -> "[MM:SS] text"
-                                out_lines = []
-                                cur_time = None
-                                cur_text = []
-                                for line in srt_text.splitlines():
-                                    s = line.strip()
-                                    if re.search(r"-->", s):
-                                        # new block starting: flush previous
-                                        if cur_time is not None and cur_text:
-                                            out_lines.append(f"[{cur_time}] " + " ".join(cur_text).strip())
-                                        cur_text = []
-                                        # parse start time
-                                        m = re.search(r"(\d{2}):(\d{2}):(\d{2})[,.]\d{3}\s+-->", s)
-                                        if m:
-                                            h, mnt, sec = int(m.group(1)), int(m.group(2)), int(m.group(3))
-                                            total = h * 3600 + mnt * 60 + sec
-                                            cur_time = f"{total//60:02d}:{total%60:02d}"
-                                        else:
-                                            cur_time = "00:00"
-                                    elif s and not s.isdigit():
-                                        s = re.sub(r"<[^>]+>", "", s)
-                                        s = re.sub(r"\{[^}]+\}", "", s)
-                                        cur_text.append(s)
-                                if cur_time is not None and cur_text:
-                                    out_lines.append(f"[{cur_time}] " + " ".join(cur_text).strip())
-                                if out_lines:
-                                    logger.info(f"[transcript] Successfully extracted from SRT (timestamped)")
-                                    return "\n".join(out_lines)
-                        except Exception as e:
-                            logger.debug(f"SRT parse error for {srt.name}: {e}")
-                            continue
-
-                if attempt < retries - 1:
-                    logger.debug(f"Attempt {attempt + 1}/{retries} failed, retrying...")
-                    time.sleep(max(0, wait_sec))
-
-            logger.error(f"No valid transcript files found/parsed for video: {video_id}")
+            logger.error(f"All subtitle download strategies failed for {video_id}")
             return None
 
-    except subprocess.TimeoutExpired:
-        logger.error(f"yt-dlp transcript timeout for {video_id}")
-        return None
     except Exception as e:
         logger.error(f"yt-dlp transcript failure for {video_id}: {e}")
         return None
+
+def _process_subtitle_files(tmpdir: Path, video_id: str, clean: bool) -> Optional[str]:
+    """Process subtitle files with multiple fallback patterns"""
+    
+    def _find_subtitle_files(extension: str) -> List[Path]:
+        """Find all subtitle files with given extension, trying multiple patterns"""
+        patterns = [
+            f"{video_id}.en*.{extension}",     # Standard: videoID.en.ext
+            f"{video_id}.*.{extension}",       # Any language code
+            f"*.en*.{extension}",              # Catch files with en anywhere
+            f"*.{extension}",                  # Last resort: any file
+        ]
+        for pattern in patterns:
+            matches = list(tmpdir.glob(pattern))
+            if matches:
+                logger.debug(f"Found {len(matches)} files matching: {pattern}")
+                return sorted(matches, key=lambda f: f.stat().st_size, reverse=True)
+        return []
+
+    # Try JSON3 first (best format)
+    for json3_file in _find_subtitle_files("json3"):
+        try:
+            logger.info(f"[transcript] Processing JSON3: {json3_file.name}")
+            data = json.loads(json3_file.read_text(encoding="utf-8"))
+            result = _process_json3_transcript(data, clean)
+            if result:
+                return result
+        except Exception as e:
+            logger.debug(f"JSON3 error ({json3_file.name}): {e}")
+            continue
+
+    # Try VTT
+    for vtt_file in _find_subtitle_files("vtt"):
+        try:
+            logger.info(f"[transcript] Processing VTT: {vtt_file.name}")
+            vtt_text = vtt_file.read_text(encoding="utf-8", errors="ignore")
+            if vtt_text.strip():
+                result = extract_vtt_text(vtt_text) if clean else format_transcript_vtt(vtt_text)
+                if result:
+                    return result
+        except Exception as e:
+            logger.debug(f"VTT error ({vtt_file.name}): {e}")
+            continue
+
+    # Try SRT
+    for srt_file in _find_subtitle_files("srt"):
+        try:
+            logger.info(f"[transcript] Processing SRT: {srt_file.name}")
+            srt_text = srt_file.read_text(encoding="utf-8", errors="ignore")
+            if not srt_text.strip():
+                continue
+                
+            result = _process_srt_text(srt_text, clean)
+            if result:
+                return result
+        except Exception as e:
+            logger.debug(f"SRT error ({srt_file.name}): {e}")
+            continue
+
+    return None
+
+def _process_srt_text(srt_text: str, clean: bool) -> Optional[str]:
+    """Process SRT subtitle text"""
+    if clean:
+        # strip indices + timecodes -> plain text
+        lines = []
+        for line in srt_text.splitlines():
+            s = line.strip()
+            if not s or s.isdigit() or "-->" in s:
+                continue
+            s = re.sub(r"<[^>]+>", "", s)      # drop tags
+            s = re.sub(r"\{[^}]+\}", "", s)    # drop styling
+            if s:
+                lines.append(s)
+        return " ".join(lines) if lines else None
+    else:
+        # convert SRT blocks -> "[MM:SS] text"
+        out_lines = []
+        cur_time = None
+        cur_text = []
+        for line in srt_text.splitlines():
+            s = line.strip()
+            if re.search(r"-->", s):
+                # new block starting: flush previous
+                if cur_time is not None and cur_text:
+                    out_lines.append(f"[{cur_time}] " + " ".join(cur_text).strip())
+                cur_text = []
+                # parse start time
+                m = re.search(r"(\d{2}):(\d{2}):(\d{2})[,.]\d{3}\s+-->", s)
+                if m:
+                    h, mnt, sec = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                    total = h * 3600 + mnt * 60 + sec
+                    cur_time = f"{total//60:02d}:{total%60:02d}"
+                else:
+                    cur_time = "00:00"
+            elif s and not s.isdigit():
+                s = re.sub(r"<[^>]+>", "", s)
+                s = re.sub(r"\{[^}]+\}", "", s)
+                cur_text.append(s)
+        if cur_time is not None and cur_text:
+            out_lines.append(f"[{cur_time}] " + " ".join(cur_text).strip())
+        return "\n".join(out_lines) if out_lines else None
 
 def _process_json3_transcript(data: Dict[Any, Any], clean: bool) -> Optional[str]:
     try:
@@ -375,6 +441,10 @@ def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir
     """
     Download audio as MP3. Returns absolute file path.
     """
+    ytdlp_path = _get_ytdlp_path()
+    if not ytdlp_path:
+        raise Exception("yt-dlp not found - install with: pip install -U yt-dlp --break-system-packages")
+    
     out_dir = _ensure_dir(output_dir or DEFAULT_DOWNLOADS_DIR)
     url = f"https://www.youtube.com/watch?v={video_id}"
     qmap = {
@@ -386,7 +456,7 @@ def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir
     output_template = f"{video_id}_audio_{quality}.%(ext)s"
 
     cmd = [
-        "yt-dlp",
+        ytdlp_path,
         "--restrict-filenames",
         "--extract-audio",
         "--audio-format", "mp3",
@@ -412,7 +482,7 @@ def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir
         if result.stderr:
             logger.debug(f"yt-dlp(audio) stderr: {result.stderr.strip()}")
 
-        # Resolve resulting file (prefer the exact template, but recover if needed)
+        # Resolve resulting file
         candidate = out_dir / f"{video_id}_audio_{quality}.mp3"
         if not candidate.exists():
             matches = (
@@ -422,7 +492,6 @@ def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir
                 or list(out_dir.glob("*.mp3"))
             )
             if matches:
-                # pick latest & largest to be safe
                 candidate = max(matches, key=lambda f: (f.stat().st_mtime, f.stat().st_size))
         if not candidate.exists():
             all_files = [f.name for f in out_dir.iterdir() if f.is_file()]
@@ -435,9 +504,7 @@ def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir
                 pass
             raise Exception("Downloaded audio appears corrupted/empty")
 
-        # Force mtime->now so it shows under 'Today' on Windows
         _touch_now(candidate)
-
         return str(candidate.absolute())
 
     except subprocess.TimeoutExpired:
@@ -454,21 +521,25 @@ def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: 
     """
     Download a video file (merged MP4 when possible). Returns absolute path or raises Exception.
     """
+    ytdlp_path = _get_ytdlp_path()
+    if not ytdlp_path:
+        raise Exception("yt-dlp not found - install with: pip install -U yt-dlp --break-system-packages")
+    
     out_dir = _ensure_dir(output_dir or DEFAULT_DOWNLOADS_DIR)
     url = f"https://www.youtube.com/watch?v={video_id}"
     height = _parse_height(quality, 720)
     output_template = f"{video_id}_video_{quality}.%(ext)s"
 
-    # Step 1: list formats to detect restrictions
+    # Step 1: list formats
     try:
-        list_cmd = ["yt-dlp", "--restrict-filenames", "--list-formats", "--no-warnings", "--user-agent", _ua(), url]
+        list_cmd = [ytdlp_path, "--restrict-filenames", "--list-formats", "--no-warnings", "--user-agent", _ua(), url]
         list_cmd = _maybe_add_cookies(list_cmd)
         list_cmd = _maybe_no_mtime(list_cmd)
         fmts = subprocess.run(list_cmd, capture_output=True, text=True, timeout=60, check=False)
         if fmts.returncode != 0:
             raise Exception(f"Cannot access video formats: {fmts.stderr.strip() or 'unknown error'}")
         if not has_actual_video_formats(fmts.stdout):
-            raise Exception("Only storyboard formats found (likely age/region/restricted content). Try another video.")
+            raise Exception("Only storyboard formats found (likely age/region/restricted content).")
     except subprocess.TimeoutExpired:
         raise Exception("Format listing timed out")
 
@@ -483,7 +554,7 @@ def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: 
     last_err = None
     for i, fmt in enumerate(strategies, 1):
         cmd = [
-            "yt-dlp",
+            ytdlp_path,
             "--restrict-filenames",
             "--no-playlist",
             "--output", output_template,
@@ -545,8 +616,13 @@ def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: 
 
 def get_video_info(video_id: str) -> Optional[Dict[str, Any]]:
     """Return compact metadata for a video."""
+    ytdlp_path = _get_ytdlp_path()
+    if not ytdlp_path:
+        logger.warning("yt-dlp not found - cannot get video info")
+        return None
+    
     url = f"https://www.youtube.com/watch?v={video_id}"
-    cmd = ["yt-dlp", "--dump-json", "--no-warnings", "--no-download", "--user-agent", _ua(), url]
+    cmd = [ytdlp_path, "--dump-json", "--no-warnings", "--no-download", "--user-agent", _ua(), url]
     cmd = _maybe_add_cookies(cmd)
     cmd = _maybe_no_mtime(cmd)
     try:
@@ -586,12 +662,17 @@ def get_video_info(video_id: str) -> Optional[Dict[str, Any]]:
 
 def check_ytdlp_availability() -> bool:
     """True if yt-dlp exists (and ffmpeg if possible)."""
+    ytdlp_path = _get_ytdlp_path()
+    if not ytdlp_path:
+        return False
+    
     try:
-        r = subprocess.run(["yt-dlp", "--version"], capture_output=True, text=True, timeout=10, check=False)
+        r = subprocess.run([ytdlp_path, "--version"], capture_output=True, text=True, timeout=10, check=False)
         if r.returncode != 0:
             return False
     except Exception:
         return False
+    
     try:
         subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, timeout=10, check=False)
     except Exception:
@@ -603,14 +684,13 @@ def estimate_file_size(video_id: str, download_type: str, quality: str) -> Optio
         info = get_video_info(video_id)
         if not info or not info.get("duration"):
             return None
-        duration = int(info["duration"])  # seconds
+        duration = int(info["duration"])
         if download_type == "audio":
             bitrates = {"high": 320, "medium": 192, "low": 96}
             bitrate = bitrates.get(quality, 192)
             return int((duration * bitrate * 1000) // 8)
         if download_type == "video":
             size_per_min = {1080: 100 * 1024 * 1024, 720: 50 * 1024 * 1024, 480: 25 * 1024 * 1024, 360: 15 * 1024 * 1024}
-            # nearest bucket
             h = _parse_height(quality, 720)
             key = min(size_per_min.keys(), key=lambda k: abs(k - h))
             return int((duration * size_per_min[key]) // 60)
@@ -620,7 +700,7 @@ def estimate_file_size(video_id: str, download_type: str, quality: str) -> Optio
         return None
 
 # =============================================================================
-# Misc utilities used elsewhere / tests
+# Misc utilities
 # =============================================================================
 
 def validate_video_id(video_id: str) -> bool:
@@ -687,6 +767,7 @@ def _test_video(video_id: str = "dQw4w9WgXcQ", quality: str = "720p"):
         return bool(p and Path(p).exists())
 
 if __name__ == "__main__":
+    import sys
     logging.basicConfig(level=logging.INFO)
     print("yt-dlp available:", check_ytdlp_availability())
     print("Downloads dir:", DEFAULT_DOWNLOADS_DIR)
