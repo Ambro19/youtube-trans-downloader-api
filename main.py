@@ -1622,7 +1622,9 @@
 #     print(f"Starting server on 0.0.0.0:8000 — files: {DOWNLOADS_DIR}")
 #     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
 
-#-----------------------------------------------------------------------
+
+# #-----------------------------------------------------------------------
+# #-----------------------------------------------------------------------
 # backend/main.py
 # YouTube Content Downloader API — production-ready main
 # - Security headers + simple rate-limit # - Stripe webhook verification + idempotency
