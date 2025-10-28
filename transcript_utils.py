@@ -14,10 +14,13 @@ import logging
 import tempfile
 import re
 import shutil
+import base64
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 import random
+import sys
+
 
 logger = logging.getLogger("transcript_utils")
 
@@ -28,8 +31,14 @@ logger = logging.getLogger("transcript_utils")
 # Default download destination (main.py passes an explicit output_dir, but keep a sane default)
 DEFAULT_DOWNLOADS_DIR = Path.home() / "Downloads"
 
-# Optional cookies file for yt-dlp (improves success for restricted content)
-COOKIES_PATH = os.getenv("YTDLP_COOKIES")  # e.g., "/path/to/cookies.txt"
+# Server files directory for storing decoded cookies
+SERVER_FILES_DIR = Path(os.getenv("SERVER_FILES_DIR", "/opt/render/project/src/server_files"))
+SERVER_FILES_DIR.mkdir(parents=True, exist_ok=True)
+
+# Cookies configuration
+_COOKIES_FILE_CACHE: str | None = None
+YTDLP_COOKIES_PATH = os.getenv("YTDLP_COOKIES_PATH", "").strip()
+YTDLP_COOKIES_B64 = os.getenv("YTDLP_COOKIES_B64", "").strip()
 
 # Control whether yt-dlp preserves remote mtimes (we want it OFF by default)
 YTDLP_NO_MTIME = os.getenv("YTDLP_NO_MTIME", "true").lower() in {"1", "true", "yes", "on"}
@@ -42,6 +51,10 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 ]
 
+# build commands routing to either `yt-dlp` or `python -m yt_dlp`
+_YTDLP_BASE_CMD: list[str] | None = None
+
+
 # ========
 # Helpers
 # ========
@@ -50,8 +63,32 @@ def _ua() -> str:
     return random.choice(USER_AGENTS)
 
 def _maybe_add_cookies(cmd: List[str]) -> List[str]:
-    if COOKIES_PATH and Path(COOKIES_PATH).exists():
-        return cmd + ["--cookies", COOKIES_PATH]
+    """
+    If cookies are provided, pass them to yt-dlp:
+      - YTDLP_COOKIES_PATH: absolute path to a cookies.txt file
+      - YTDLP_COOKIES_B64 : base64-encoded cookies.txt (Render secret)
+    """
+    global _COOKIES_FILE_CACHE
+
+    # Path mode
+    if YTDLP_COOKIES_PATH:
+        p = Path(YTDLP_COOKIES_PATH)
+        if p.exists():
+            return cmd + ["--cookies", str(p)]
+
+    # Secret (base64) mode
+    if YTDLP_COOKIES_B64:
+        if not _COOKIES_FILE_CACHE:
+            try:
+                target = SERVER_FILES_DIR / "cookies.txt"
+                target.write_bytes(base64.b64decode(YTDLP_COOKIES_B64))
+                _COOKIES_FILE_CACHE = str(target)
+                logger.info("Loaded cookies from YTDLP_COOKIES_B64 into %s", _COOKIES_FILE_CACHE)
+            except Exception as e:
+                logger.warning("Failed to decode YTDLP_COOKIES_B64: %s", e)
+        if _COOKIES_FILE_CACHE:
+            return cmd + ["--cookies", _COOKIES_FILE_CACHE]
+
     return cmd
 
 def _maybe_no_mtime(cmd: List[str]) -> List[str]:
@@ -87,463 +124,298 @@ def _parse_height(quality: str, default: int = 720) -> int:
     except Exception:
         return default
 
-def _get_ytdlp_path() -> Optional[str]:
-    """Find yt-dlp executable, checking multiple locations"""
-    # Try direct command first
+def _resolve_ytdlp_base_cmd() -> list[str] | None:
     if shutil.which("yt-dlp"):
-        return "yt-dlp"
-    
-    # Try common installation paths
-    possible_paths = [
+        return ["yt-dlp"]
+    # common paths
+    for path in [
         "/usr/local/bin/yt-dlp",
         "/usr/bin/yt-dlp",
         str(Path.home() / ".local" / "bin" / "yt-dlp"),
         str(Path(sys.executable).parent / "yt-dlp"),
-    ]
-    
-    for path in possible_paths:
+    ]:
         if Path(path).exists():
-            logger.info(f"Found yt-dlp at: {path}")
-            return path
-    
-    logger.error("yt-dlp not found in any common location")
-    return None
+            return [path]
+    # fallback to module runner if package is installed but script is not on PATH
+    try:
+        import yt_dlp  # noqa: F401
+        return [sys.executable, "-m", "yt_dlp"]
+    except Exception:
+        return None
+
+def _ytdlp_cmd(args: list[str]) -> list[str] | None:
+    global _YTDLP_BASE_CMD
+    if _YTDLP_BASE_CMD is None:
+        _YTDLP_BASE_CMD = _resolve_ytdlp_base_cmd()
+        if _YTDLP_BASE_CMD:
+            logger.info("yt-dlp command resolved to: %s", " ".join(_YTDLP_BASE_CMD))
+        else:
+            logger.error("yt-dlp not found (neither binary nor module).")
+    return (_YTDLP_BASE_CMD + args) if _YTDLP_BASE_CMD else None
 
 # ============
 # TRANSCRIPTS
 # ============
 
 def get_transcript_with_ytdlp(video_id: str, clean: bool = True, retries: int = 3, wait_sec: int = 1) -> Optional[str]:
-    """
-    PRODUCTION-READY: Fallback transcript extractor using yt-dlp with comprehensive error handling.
-    
-    Returns clean text or timestamped lines depending on `clean`.
-    Prefers JSON3, then VTT, then SRT (all English variants).
-    
-    ENHANCEMENTS:
-    - Downloads both human-created (--write-sub) and auto-generated (--write-auto-sub) subtitles
-    - Tries multiple English language codes (en, en-US, en-GB, en-CA, en-AU)
-    - Better file pattern matching to catch all subtitle variations
-    - Comprehensive error logging for production debugging
-    - Fallback to any available subtitle if English not found
-    """
     url = f"https://www.youtube.com/watch?v={video_id}"
-    
-    # Check if yt-dlp is available
-    ytdlp_path = _get_ytdlp_path()
-    if not ytdlp_path:
-        logger.error("yt-dlp executable not found - cannot download subtitles")
-        logger.error("Install with: pip install -U yt-dlp --break-system-packages")
+    base = _ytdlp_cmd([])
+    if not base:
+        logger.error("yt-dlp is unavailable; cannot fetch subtitles")
         return None
-    
     try:
         with tempfile.TemporaryDirectory(prefix=f"yt_trans_{video_id}_") as tmp:
             tmpdir = Path(tmp)
-
-            # Try multiple subtitle strategies
             strategies = [
-                # Strategy 1: Comprehensive English variants
-                {
-                    "sub_langs": "en,en-US,en-GB,en-CA,en-AU",
-                    "desc": "All English variants"
-                },
-                # Strategy 2: Just English (simpler, faster)
-                {
-                    "sub_langs": "en",
-                    "desc": "Simple English"
-                },
-                # Strategy 3: Any available subtitle
-                {
-                    "sub_langs": "all",
-                    "desc": "Any language"
-                }
+                {"sub_langs": "en,en-US,en-GB,en-CA,en-AU", "desc": "All English variants"},
+                {"sub_langs": "en", "desc": "Simple English"},
+                {"sub_langs": "all", "desc": "Any language"},
             ]
-
-            for strategy_num, strategy in enumerate(strategies, 1):
-                logger.info(f"[transcript] Strategy {strategy_num}/{len(strategies)}: {strategy['desc']}")
-                
-                cmd = [
-                    ytdlp_path,
+            for i, strat in enumerate(strategies, 1):
+                logger.info(f"[transcript] Strategy {i}/{len(strategies)}: {strat['desc']}")
+                cmd = _ytdlp_cmd([
                     "--restrict-filenames",
                     "--skip-download",
-                    "--write-sub",                       # Human-created subtitles
-                    "--write-auto-sub",                  # Auto-generated subtitles
-                    "--sub-langs", strategy["sub_langs"],
-                    "--sub-format", "json3/vtt/srt",     # Preferred formats
+                    "--write-sub",
+                    "--write-auto-sub",
+                    "--sub-langs", strat["sub_langs"],
+                    "--sub-format", "json3/vtt/srt",
                     "--output", "%(id)s",
                     "--user-agent", _ua(),
                     "--no-warnings",
                     url,
-                ]
+                ])
+                if not cmd:  # unlikely after base resolved
+                    return None
                 cmd = _maybe_add_cookies(cmd)
                 cmd = _maybe_no_mtime(cmd)
-
-                logger.info(f"[transcript] Downloading subtitles for {video_id}")
-                logger.debug(f"[transcript] Command: {' '.join(cmd[:10])}...")
-
                 try:
-                    result = subprocess.run(
-                        cmd, 
-                        capture_output=True, 
-                        text=True, 
-                        timeout=45, 
-                        check=False, 
-                        cwd=tmpdir
-                    )
-                    
-                    if result.returncode != 0:
-                        logger.warning(f"yt-dlp returned code {result.returncode}")
-                        if result.stderr:
-                            logger.debug(f"stderr: {result.stderr[:500]}")
-                    
-                    # List all files for debugging
-                    all_files = list(tmpdir.iterdir())
-                    if all_files:
-                        logger.debug(f"Files in temp dir: {[f.name for f in all_files]}")
-                    else:
-                        logger.warning(f"No files downloaded for strategy {strategy_num}")
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=45, check=False, cwd=tmpdir)
+                    if result.returncode != 0 and result.stderr:
+                        logger.debug(f"yt-dlp(subs) stderr: {result.stderr[:500]}")
+                    files = list(tmpdir.iterdir())
+                    if not files:
+                        logger.warning(f"No subtitle files produced (strategy {i}).")
                         continue
-
-                    # Try to find and process subtitle files
-                    result_text = _process_subtitle_files(tmpdir, video_id, clean)
-                    if result_text:
-                        logger.info(f"[transcript] SUCCESS with strategy {strategy_num}")
-                        return result_text
-                    else:
-                        logger.info(f"[transcript] Strategy {strategy_num} found files but couldn't extract text")
-                        
+                    out = _process_subtitle_files(tmpdir, video_id, clean)
+                    if out:
+                        logger.info(f"[transcript] SUCCESS with strategy {i}")
+                        return out
                 except subprocess.TimeoutExpired:
-                    logger.warning(f"yt-dlp timeout on strategy {strategy_num}")
+                    logger.warning(f"yt-dlp timeout on strategy {i}")
                     continue
                 except Exception as e:
-                    logger.warning(f"Strategy {strategy_num} error: {e}")
+                    logger.warning(f"Strategy {i} error: {e}")
                     continue
-
-            logger.error(f"All subtitle download strategies failed for {video_id}")
+            logger.error(f"All subtitle strategies failed for {video_id}")
             return None
-
     except Exception as e:
         logger.error(f"yt-dlp transcript failure for {video_id}: {e}")
         return None
 
 def _process_subtitle_files(tmpdir: Path, video_id: str, clean: bool) -> Optional[str]:
-    """Process subtitle files with multiple fallback patterns"""
+    """
+    Process downloaded subtitle files in order of preference:
+    1. JSON3 (most detailed)
+    2. VTT (good fallback)
+    3. SRT (last resort)
+    """
+    json3_files = list(tmpdir.glob(f"{video_id}*.json3")) or list(tmpdir.glob("*.json3"))
+    vtt_files = list(tmpdir.glob(f"{video_id}*.vtt")) or list(tmpdir.glob("*.vtt"))
+    srt_files = list(tmpdir.glob(f"{video_id}*.srt")) or list(tmpdir.glob("*.srt"))
+
+    for f in json3_files + vtt_files + srt_files:
+        logger.debug(f"Processing subtitle file: {f.name}")
+        try:
+            content = f.read_text(encoding="utf-8", errors="replace")
+            if f.suffix == ".json3":
+                return _parse_json3(content, clean)
+            elif f.suffix == ".vtt":
+                return _parse_vtt(content, clean)
+            elif f.suffix == ".srt":
+                return _parse_srt(content, clean)
+        except Exception as e:
+            logger.warning(f"Error parsing {f.name}: {e}")
+            continue
     
-    def _find_subtitle_files(extension: str) -> List[Path]:
-        """Find all subtitle files with given extension, trying multiple patterns"""
-        patterns = [
-            f"{video_id}.en*.{extension}",     # Standard: videoID.en.ext
-            f"{video_id}.*.{extension}",       # Any language code
-            f"*.en*.{extension}",              # Catch files with en anywhere
-            f"*.{extension}",                  # Last resort: any file
-        ]
-        for pattern in patterns:
-            matches = list(tmpdir.glob(pattern))
-            if matches:
-                logger.debug(f"Found {len(matches)} files matching: {pattern}")
-                return sorted(matches, key=lambda f: f.stat().st_size, reverse=True)
-        return []
-
-    # Try JSON3 first (best format)
-    for json3_file in _find_subtitle_files("json3"):
-        try:
-            logger.info(f"[transcript] Processing JSON3: {json3_file.name}")
-            data = json.loads(json3_file.read_text(encoding="utf-8"))
-            result = _process_json3_transcript(data, clean)
-            if result:
-                return result
-        except Exception as e:
-            logger.debug(f"JSON3 error ({json3_file.name}): {e}")
-            continue
-
-    # Try VTT
-    for vtt_file in _find_subtitle_files("vtt"):
-        try:
-            logger.info(f"[transcript] Processing VTT: {vtt_file.name}")
-            vtt_text = vtt_file.read_text(encoding="utf-8", errors="ignore")
-            if vtt_text.strip():
-                result = extract_vtt_text(vtt_text) if clean else format_transcript_vtt(vtt_text)
-                if result:
-                    return result
-        except Exception as e:
-            logger.debug(f"VTT error ({vtt_file.name}): {e}")
-            continue
-
-    # Try SRT
-    for srt_file in _find_subtitle_files("srt"):
-        try:
-            logger.info(f"[transcript] Processing SRT: {srt_file.name}")
-            srt_text = srt_file.read_text(encoding="utf-8", errors="ignore")
-            if not srt_text.strip():
-                continue
-                
-            result = _process_srt_text(srt_text, clean)
-            if result:
-                return result
-        except Exception as e:
-            logger.debug(f"SRT error ({srt_file.name}): {e}")
-            continue
-
+    logger.warning("No valid subtitle files could be processed")
     return None
 
-def _process_srt_text(srt_text: str, clean: bool) -> Optional[str]:
-    """Process SRT subtitle text"""
-    if clean:
-        # strip indices + timecodes -> plain text
-        lines = []
-        for line in srt_text.splitlines():
-            s = line.strip()
-            if not s or s.isdigit() or "-->" in s:
-                continue
-            s = re.sub(r"<[^>]+>", "", s)      # drop tags
-            s = re.sub(r"\{[^}]+\}", "", s)    # drop styling
-            if s:
-                lines.append(s)
-        return " ".join(lines) if lines else None
-    else:
-        # convert SRT blocks -> "[MM:SS] text"
-        out_lines = []
-        cur_time = None
-        cur_text = []
-        for line in srt_text.splitlines():
-            s = line.strip()
-            if re.search(r"-->", s):
-                # new block starting: flush previous
-                if cur_time is not None and cur_text:
-                    out_lines.append(f"[{cur_time}] " + " ".join(cur_text).strip())
-                cur_text = []
-                # parse start time
-                m = re.search(r"(\d{2}):(\d{2}):(\d{2})[,.]\d{3}\s+-->", s)
-                if m:
-                    h, mnt, sec = int(m.group(1)), int(m.group(2)), int(m.group(3))
-                    total = h * 3600 + mnt * 60 + sec
-                    cur_time = f"{total//60:02d}:{total%60:02d}"
-                else:
-                    cur_time = "00:00"
-            elif s and not s.isdigit():
-                s = re.sub(r"<[^>]+>", "", s)
-                s = re.sub(r"\{[^}]+\}", "", s)
-                cur_text.append(s)
-        if cur_time is not None and cur_text:
-            out_lines.append(f"[{cur_time}] " + " ".join(cur_text).strip())
-        return "\n".join(out_lines) if out_lines else None
-
-def _process_json3_transcript(data: Dict[Any, Any], clean: bool) -> Optional[str]:
+def _parse_json3(content: str, clean: bool) -> Optional[str]:
+    """Parse JSON3 format (YouTube's native format with word-level timing)."""
     try:
-        blocks: List[str] = []
-        for event in data.get("events", []):
-            if "segs" in event and "tStartMs" in event:
-                text_segments = [seg.get("utf8", "") for seg in event["segs"] if seg.get("utf8")]
-                if not text_segments:
-                    continue
-                text = "".join(text_segments).strip()
-                if not text:
-                    continue
-                if clean:
-                    blocks.append(text)
-                else:
-                    seconds = int(event["tStartMs"] // 1000)
-                    ts = f"[{seconds//60:02d}:{seconds%60:02d}]"
-                    blocks.append(f"{ts} {text}")
-        if not blocks:
-            return None
-        return (" ".join(blocks)) if clean else "\n".join(blocks)
-    except Exception as e:
-        logger.error(f"Error processing JSON3 transcript: {e}")
+        data = json.loads(content)
+        events = data.get("events", [])
+        
+        if clean:
+            lines = []
+            for event in events:
+                segs = event.get("segs", [])
+                text = "".join(s.get("utf8", "") for s in segs).strip()
+                if text:
+                    lines.append(text)
+            return " ".join(lines)
+        else:
+            lines = []
+            for event in events:
+                start_ms = event.get("tStartMs", 0)
+                segs = event.get("segs", [])
+                text = "".join(s.get("utf8", "") for s in segs).strip()
+                if text:
+                    timestamp = f"{start_ms // 60000:02d}:{(start_ms // 1000) % 60:02d}"
+                    lines.append(f"[{timestamp}] {text}")
+            return "\n".join(lines)
+    except (json.JSONDecodeError, Exception) as e:
+        logger.debug(f"JSON3 parse error: {e}")
         return None
 
-def extract_vtt_text(vtt_content: str) -> str:
-    try:
-        lines = vtt_content.strip().splitlines()
-        out: List[str] = []
-        for line in lines:
-            s = line.strip()
-            if not s:
-                continue
-            if s.startswith(("WEBVTT", "Kind:", "Language:", "NOTE")):
-                continue
-            if "-->" in s:
-                continue
-            if s.isdigit():
-                continue
-            if re.match(r"^\d{2}:\d{2}:\d{2}", s):
-                continue
-            s = re.sub(r"<[^>]+>", "", s)      # strip tags
-            s = re.sub(r"\{[^}]+\}", "", s)    # strip styling
-            if s:
-                out.append(s)
-        return " ".join(out)
-    except Exception as e:
-        logger.error(f"VTT clean error: {e}")
-        return ""
-
-def format_transcript_vtt(raw_vtt: str) -> str:
-    try:
-        lines = raw_vtt.strip().splitlines()
-        formatted: List[str] = ["WEBVTT", "Kind: captions", "Language: en", ""]
-        i = 0
-        while i < len(lines):
-            s = lines[i].strip()
-            if s.startswith(("WEBVTT", "Kind:", "Language:")):
-                i += 1
-                continue
-            if "-->" in s:
-                s = re.sub(r"(\d{2}:\d{2}:\d{2})[.,](\d{3})", r"\1.\2", s)
-                formatted.append(s)
-                i += 1
-                text_bits = []
-                while i < len(lines) and lines[i].strip() and "-->" not in lines[i]:
-                    t = lines[i].strip()
-                    if not t.isdigit():
-                        t = re.sub(r"<[^>]+>", "", t)
-                        t = re.sub(r"\{[^}]+\}", "", t)
-                        if t:
-                            text_bits.append(t)
-                    i += 1
-                if text_bits:
-                    formatted.append(" ".join(text_bits))
-                formatted.append("")
-            else:
-                i += 1
-        return "\n".join(formatted)
-    except Exception as e:
-        logger.error(f"VTT format error: {e}")
-        return raw_vtt
-
-# =================
-# FORMAT DISCOVERY
-# =================
-
-def has_actual_video_formats(formats_output: str) -> bool:
-    try:
-        for line in formats_output.splitlines():
-            s = line.strip().lower()
-            if not s or ("id" in s and "ext" in s):
-                continue
-            if any(ext in s for ext in ["mp4", "webm", "mkv", "avi", "flv"]):
-                if "storyboard" not in s and not s.startswith("sb"):
-                    return True
-            parts = line.split()
-            if parts:
-                fid = parts[0].lower()
-                if (fid.isdigit() or any(p in fid for p in ["dash", "hls", "http"])) and not fid.startswith("sb"):
-                    return True
-        return False
-    except Exception as e:
-        logger.error(f"Format parse error: {e}")
-        return False
-
-# ======
-# AUDIO
-# ======
-
-def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir: str | None = None) -> str:
-    """
-    Download audio as MP3. Returns absolute file path.
-    """
-    ytdlp_path = _get_ytdlp_path()
-    if not ytdlp_path:
-        raise Exception("yt-dlp not found - install with: pip install -U yt-dlp --break-system-packages")
+def _parse_vtt(content: str, clean: bool) -> Optional[str]:
+    """Parse WebVTT format."""
+    lines = content.splitlines()
+    output = []
+    current_text = []
+    current_ts = None
     
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("WEBVTT") or line.startswith("NOTE"):
+            continue
+        if "-->" in line:
+            current_ts = line.split("-->")[0].strip()[:5]
+            continue
+        if line and not line.isdigit():
+            text = re.sub(r"<[^>]+>", "", line)
+            current_text.append(text)
+    
+    if clean:
+        return " ".join(current_text)
+    else:
+        # For non-clean, we'd need to track timestamps better
+        return " ".join(current_text)
+
+def _parse_srt(content: str, clean: bool) -> Optional[str]:
+    """Parse SRT format."""
+    lines = content.splitlines()
+    output = []
+    current_text = []
+    
+    for line in lines:
+        line = line.strip()
+        if not line or line.isdigit() or "-->" in line:
+            continue
+        text = re.sub(r"<[^>]+>", "", line)
+        if text:
+            current_text.append(text)
+    
+    return " ".join(current_text) if current_text else None
+
+# ======
+# AUDIO (MP3)
+# ======
+def download_audio_with_ytdlp(video_id: str, quality: str = "192k", output_dir: str | None = None) -> Optional[str]:
+    base = _ytdlp_cmd([])
+    if not base:
+        raise Exception("yt-dlp not found (binary nor module). Install with: pip install -U yt-dlp")
+
     out_dir = _ensure_dir(output_dir or DEFAULT_DOWNLOADS_DIR)
     url = f"https://www.youtube.com/watch?v={video_id}"
-    qmap = {
-        "high":   ("0",   "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio"),
-        "medium": ("2",   "bestaudio[abr<=192]/bestaudio[ext=m4a]/bestaudio"),
-        "low":    ("5",   "bestaudio[abr<=96]/bestaudio[ext=m4a]/bestaudio"),
-    }
-    aq, fmt = qmap.get(quality, qmap["medium"])
-    output_template = f"{video_id}_audio_{quality}.%(ext)s"
+    output_template = f"{video_id}_audio.%(ext)s"
 
-    cmd = [
-        ytdlp_path,
+    # probe first (same flags)
+    try:
+        list_cmd = _ytdlp_cmd([
+            "--restrict-filenames",
+            "--list-formats",
+            "--no-warnings",
+            "--force-ipv4",
+            "--geo-bypass",
+            "--extractor-args", "youtube:player_client=android",
+            "--user-agent", _ua(),
+            url,
+        ])
+        list_cmd = _maybe_add_cookies(list_cmd)
+        list_cmd = _maybe_no_mtime(list_cmd)
+        fmts = subprocess.run(list_cmd, capture_output=True, text=True, timeout=60, check=False)
+        if fmts.returncode != 0:
+            raise Exception(f"Cannot access formats: {fmts.stderr.strip() or 'unknown error'}")
+        if not has_actual_video_formats(fmts.stdout):
+            raise Exception("Only storyboard formats found (likely restricted).")
+    except subprocess.TimeoutExpired:
+        raise Exception("Format listing timed out")
+
+    cmd = _ytdlp_cmd([
         "--restrict-filenames",
+        "--no-playlist",
+        "--output", output_template,
         "--extract-audio",
         "--audio-format", "mp3",
-        "--audio-quality", aq,
-        "--format", fmt,
-        "--output", output_template,
-        "--no-playlist",
-        "--prefer-ffmpeg",
-        "--embed-metadata",
-        "--add-metadata",
+        "--audio-quality", quality,   # e.g., "192k"
+        "--retries", "3",
+        "--fragment-retries", "3",
+        "--force-ipv4", "--geo-bypass",
+        "--extractor-args", "youtube:player_client=android",
         "--user-agent", _ua(),
         "--no-warnings",
         url,
-    ]
+    ])
     cmd = _maybe_add_cookies(cmd)
     cmd = _maybe_no_mtime(cmd)
 
-    logger.info(f"[audio] {video_id} -> {out_dir} ({quality})")
-    logger.debug(" ".join(cmd))
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd=out_dir, check=False)
+    if r.returncode != 0:
+        err = r.stderr.strip() or r.stdout.strip() or "unknown error"
+        raise Exception(err)
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, cwd=out_dir, check=False)
-        if result.stderr:
-            logger.debug(f"yt-dlp(audio) stderr: {result.stderr.strip()}")
+    # locate mp3
+    candidates = list(out_dir.glob(f"{video_id}_audio.*"))
+    if not candidates:
+        candidates = list(out_dir.glob(f"{video_id}*.*"))
+    if not candidates:
+        raise Exception("Audio file not found after download.")
+    found = max([f for f in candidates if f.is_file()], key=lambda f: f.stat().st_size)
+    if found.stat().st_size < 30_000:
+        try: found.unlink()
+        except Exception: pass
+        raise Exception("Downloaded audio appears corrupted/too small")
 
-        # Resolve resulting file
-        candidate = out_dir / f"{video_id}_audio_{quality}.mp3"
-        if not candidate.exists():
-            matches = (
-                list(out_dir.glob(f"{video_id}_audio_{quality}.mp3"))
-                or list(out_dir.glob(f"{video_id}_audio_{quality}.*"))
-                or list(out_dir.glob(f"{video_id}*.mp3"))
-                or list(out_dir.glob("*.mp3"))
-            )
-            if matches:
-                candidate = max(matches, key=lambda f: (f.stat().st_mtime, f.stat().st_size))
-        if not candidate.exists():
-            all_files = [f.name for f in out_dir.iterdir() if f.is_file()]
-            raise Exception(f"No audio file found. Files in dir: {all_files}")
-
-        if candidate.stat().st_size < 1_000:
-            try:
-                candidate.unlink()
-            except Exception:
-                pass
-            raise Exception("Downloaded audio appears corrupted/empty")
-
-        _touch_now(candidate)
-        return str(candidate.absolute())
-
-    except subprocess.TimeoutExpired:
-        raise Exception("Audio download timed out")
-    except Exception as e:
-        raise Exception(f"Audio download error: {e}")
-
+    _touch_now(found)
+    return str(found.absolute())
 
 # ======
 # VIDEO
 # ======
-
 def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: str | None = None) -> Optional[str]:
-    """
-    Download a video file (merged MP4 when possible). Returns absolute path or raises Exception.
-    """
-    ytdlp_path = _get_ytdlp_path()
-    if not ytdlp_path:
-        raise Exception("yt-dlp not found - install with: pip install -U yt-dlp --break-system-packages")
-    
+    base = _ytdlp_cmd([])
+    if not base:
+        raise Exception("yt-dlp not found (binary nor module). Install with: pip install -U yt-dlp")
+
     out_dir = _ensure_dir(output_dir or DEFAULT_DOWNLOADS_DIR)
     url = f"https://www.youtube.com/watch?v={video_id}"
     height = _parse_height(quality, 720)
     output_template = f"{video_id}_video_{quality}.%(ext)s"
 
-    # Step 1: list formats
+    # 1) probe formats first (also trips bot checks early)
     try:
-        list_cmd = [ytdlp_path, "--restrict-filenames", "--list-formats", "--no-warnings", "--user-agent", _ua(), url]
+        list_cmd = _ytdlp_cmd([
+            "--restrict-filenames",
+            "--list-formats",
+            "--no-warnings",
+            "--force-ipv4",
+            "--geo-bypass",
+            "--extractor-args", "youtube:player_client=android",
+            "--user-agent", _ua(),
+            url,
+        ])
         list_cmd = _maybe_add_cookies(list_cmd)
         list_cmd = _maybe_no_mtime(list_cmd)
         fmts = subprocess.run(list_cmd, capture_output=True, text=True, timeout=60, check=False)
         if fmts.returncode != 0:
             raise Exception(f"Cannot access video formats: {fmts.stderr.strip() or 'unknown error'}")
         if not has_actual_video_formats(fmts.stdout):
-            raise Exception("Only storyboard formats found (likely age/region/restricted content).")
+            raise Exception("Only storyboard formats found (likely age/region/consent restricted).")
     except subprocess.TimeoutExpired:
         raise Exception("Format listing timed out")
 
-    # Step 2: strategies
     strategies = [
         f"best[height<={height}][ext=mp4]+bestaudio[ext=m4a]/best[height<={height}]",
         f"(bestvideo[height<={height}]+bestaudio/best[height<={height}])[ext=mp4]/(bestvideo[height<={height}]+bestaudio/best[height<={height}])",
@@ -552,9 +424,10 @@ def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: 
     ]
 
     last_err = None
+    found: Optional[Path] = None
+
     for i, fmt in enumerate(strategies, 1):
-        cmd = [
-            ytdlp_path,
+        cmd = _ytdlp_cmd([
             "--restrict-filenames",
             "--no-playlist",
             "--output", output_template,
@@ -564,18 +437,34 @@ def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: 
             "--add-metadata",
             "--retries", "3",
             "--fragment-retries", "3",
+            "--force-ipv4", "--geo-bypass",
+            "--extractor-args", "youtube:player_client=android",
             "--user-agent", _ua(),
             "--no-warnings",
             url,
-        ]
-        cmd = _maybe_add_cookies(cmd)
+        ])
+        cmd = _maybe_add_cookies(cmd)   # <— important for bot challenges
         cmd = _maybe_no_mtime(cmd)
+
         logger.info(f"[video] strategy {i}/{len(strategies)} -> {fmt}")
-        logger.debug(" ".join(cmd))
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd=out_dir, check=False)
             if r.returncode == 0:
-                break
+                # locate resulting file
+                patterns = [
+                    out_dir / f"{video_id}_video_{quality}.mp4",
+                    out_dir / f"{video_id}_video_{quality}.*",
+                    out_dir / f"{video_id}_video.*",
+                    out_dir / f"{video_id}*.*",
+                ]
+                for pat in patterns:
+                    matches = list(out_dir.glob(pat.name))
+                    if matches:
+                        found = max(matches, key=lambda f: f.stat().st_size)
+                        break
+                if found:
+                    break
+
             last_err = r.stderr.strip() or r.stdout.strip() or "unknown error"
             logger.debug(f"strategy {i} failed: {last_err[:400]}")
             if i == len(strategies):
@@ -585,19 +474,6 @@ def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: 
             if i == len(strategies):
                 raise Exception(last_err)
 
-    # Step 3: resolve file
-    patterns = [
-        out_dir / f"{video_id}_video_{quality}.mp4",
-        out_dir / f"{video_id}_video_{quality}.*",
-        out_dir / f"{video_id}_video.*",
-        out_dir / f"{video_id}*.*",
-    ]
-    found: Optional[Path] = None
-    for pat in patterns:
-        matches = list(out_dir.glob(pat.name if pat.is_file() else pat.name))
-        if matches:
-            found = max(matches, key=lambda f: f.stat().st_size)
-            break
     if not found or not found.exists():
         all_files = [f.name for f in out_dir.iterdir() if f.is_file()]
         raise Exception(f"Video file not found after download. Files: {all_files}")
@@ -615,14 +491,12 @@ def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: 
 # =========================
 
 def get_video_info(video_id: str) -> Optional[Dict[str, Any]]:
-    """Return compact metadata for a video."""
-    ytdlp_path = _get_ytdlp_path()
-    if not ytdlp_path:
-        logger.warning("yt-dlp not found - cannot get video info")
+    base = _ytdlp_cmd([])
+    if not base:
+        logger.warning("yt-dlp unavailable - cannot get video info")
         return None
-    
     url = f"https://www.youtube.com/watch?v={video_id}"
-    cmd = [ytdlp_path, "--dump-json", "--no-warnings", "--no-download", "--user-agent", _ua(), url]
+    cmd = _ytdlp_cmd(["--dump-json", "--no-warnings", "--no-download", "--user-agent", _ua(), url])
     cmd = _maybe_add_cookies(cmd)
     cmd = _maybe_no_mtime(cmd)
     try:
@@ -662,12 +536,12 @@ def get_video_info(video_id: str) -> Optional[Dict[str, Any]]:
 
 def check_ytdlp_availability() -> bool:
     """True if yt-dlp exists (and ffmpeg if possible)."""
-    ytdlp_path = _get_ytdlp_path()
-    if not ytdlp_path:
+    base = _ytdlp_cmd([])
+    if not base:
         return False
     
     try:
-        r = subprocess.run([ytdlp_path, "--version"], capture_output=True, text=True, timeout=10, check=False)
+        r = subprocess.run(base + ["--version"], capture_output=True, text=True, timeout=10, check=False)
         if r.returncode != 0:
             return False
     except Exception:
@@ -678,6 +552,18 @@ def check_ytdlp_availability() -> bool:
     except Exception:
         pass
     return True
+
+def has_actual_video_formats(fmt_list: str) -> bool:
+    """Check if format list contains actual video formats (not just storyboards)."""
+    if not fmt_list:
+        return False
+    lines = fmt_list.lower().splitlines()
+    for line in lines:
+        if "storyboard" in line:
+            continue
+        if any(x in line for x in ["mp4", "webm", "mkv", "flv", "avi"]) and any(x in line for x in ["video", "x"]):
+            return True
+    return False
 
 def estimate_file_size(video_id: str, download_type: str, quality: str) -> Optional[int]:
     try:

@@ -2031,14 +2031,37 @@ def check_youtube() -> bool:
     except OSError:
         return False
 
+_YT_ID_RE = re.compile(r'(?<![\w-])([A-Za-z0-9_-]{11})(?![\w-])')
+
 def extract_youtube_video_id(text: str) -> str:
-    pats = [r'(?:youtube\.com\/watch\?v=)([^&\n?#]+)', r'(?:youtu\.be\/)([^&\n?#]+)',
-            r'(?:youtube\.com\/embed\/)([^&\n?#]+)', r'(?:youtube\.com\/shorts\/)([^&\n?#]+)',
-            r'[?&]v=([^&\n?#]+)']
+    """
+    Robustly extract a valid 11-char YouTube video ID from:
+      - watch URLs (?v=)
+      - youtu.be short links
+      - /embed/, /shorts/
+      - raw strings containing the ID
+    Returns the ID or empty string if none.
+    """
+    t = (text or "").strip()
+
+    # common URL patterns first
+    pats = [
+        r'(?:youtube\.com/watch\?[^#\s]*[?&]v=)([^&\n?#]{11})',
+        r'(?:youtu\.be/)([^&\n?#/]{11})',
+        r'(?:youtube\.com/embed/)([^&\n?#/]{11})',
+        r'(?:youtube\.com/shorts/)([^&\n?#/]{11})',
+    ]
     for p in pats:
-        m = re.search(p, text)
-        if m: return m.group(1)[:11]
-    return text.strip()[:11]
+        m = re.search(p, t)
+        if m:
+            cand = m.group(1)
+            if _YT_ID_RE.fullmatch(cand):
+                return cand
+
+    # raw fallback: scan for any isolated 11-char slug
+    m = _YT_ID_RE.search(t)
+    return m.group(1) if m else ""
+
 
 
 
