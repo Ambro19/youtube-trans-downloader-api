@@ -60,36 +60,40 @@ _YTDLP_BASE_CMD: list[str] | None = None
 # ========
 
 def _ua() -> str:
-    return random.choice(USER_AGENTS)
+    # Stable, modern UA helps avoid extra challenges
+    return (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
 
-def _maybe_add_cookies(cmd: List[str]) -> List[str]:
+_COOKIES_CACHE_PATH = Path("/tmp/yt_cookies.txt")
+
+def _maybe_add_cookies(cmd: list[str]) -> list[str]:
     """
-    If cookies are provided, pass them to yt-dlp:
-      - YTDLP_COOKIES_PATH: absolute path to a cookies.txt file
-      - YTDLP_COOKIES_B64 : base64-encoded cookies.txt (Render secret)
+    Prefer YTDLP_COOKIES_FILE. Fallback to YTDLP_COOKIES_B64.
+    Returns a new command list with '--cookies <path>' appended if available.
     """
-    global _COOKIES_FILE_CACHE
+    import os, base64
 
-    # Path mode
-    if YTDLP_COOKIES_PATH:
-        p = Path(YTDLP_COOKIES_PATH)
-        if p.exists():
-            return cmd + ["--cookies", str(p)]
+    file_path = os.getenv("YTDLP_COOKIES_FILE")
+    if file_path and Path(file_path).exists():
+        return [*cmd, "--cookies", file_path]
 
-    # Secret (base64) mode
-    if YTDLP_COOKIES_B64:
-        if not _COOKIES_FILE_CACHE:
-            try:
-                target = SERVER_FILES_DIR / "cookies.txt"
-                target.write_bytes(base64.b64decode(YTDLP_COOKIES_B64))
-                _COOKIES_FILE_CACHE = str(target)
-                logger.info("Loaded cookies from YTDLP_COOKIES_B64 into %s", _COOKIES_FILE_CACHE)
-            except Exception as e:
-                logger.warning("Failed to decode YTDLP_COOKIES_B64: %s", e)
-        if _COOKIES_FILE_CACHE:
-            return cmd + ["--cookies", _COOKIES_FILE_CACHE]
+    b64 = os.getenv("YTDLP_COOKIES_B64")
+    if b64:
+        try:
+            data = base64.b64decode(b64)
+            _COOKIES_CACHE_PATH.write_bytes(data)
+            try: _COOKIES_CACHE_PATH.chmod(0o600)
+            except Exception: pass
+            return [*cmd, "--cookies", str(_COOKIES_CACHE_PATH)]
+        except Exception:
+            # If bad/too large, just skip using cookies and let caller’s retries handle it.
+            pass
 
     return cmd
+
 
 def _maybe_no_mtime(cmd: List[str]) -> List[str]:
     """Ensure yt-dlp does NOT stamp remote mtime (prevents Windows 'Yesterday')."""
@@ -309,9 +313,9 @@ def _parse_srt(content: str, clean: bool) -> Optional[str]:
     
     return " ".join(current_text) if current_text else None
 
-# ======
+# =========
 # AUDIO (MP3)
-# ======
+# =========
 def download_audio_with_ytdlp(video_id: str, quality: str = "192k", output_dir: str | None = None) -> Optional[str]:
     base = _ytdlp_cmd([])
     if not base:
@@ -381,9 +385,9 @@ def download_audio_with_ytdlp(video_id: str, quality: str = "192k", output_dir: 
     _touch_now(found)
     return str(found.absolute())
 
-# ======
-# VIDEO
-# ======
+# ========
+# VIDEO MP4
+# ========
 def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: str | None = None) -> Optional[str]:
     base = _ytdlp_cmd([])
     if not base:
