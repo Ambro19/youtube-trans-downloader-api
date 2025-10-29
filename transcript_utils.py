@@ -1,6 +1,10 @@
-# transcript_utils.py — PRODUCTION-READY with AUDIO FIX
-# Fixed: Audio downloads now use direct stream selection (like video) instead of --extract-audio
-# This prevents YouTube 403 blocks on audio extraction attempts
+# transcript_utils.py — PRODUCTION v2.0 with ENHANCED BLOCKING RESISTANCE
+# Major improvements:
+# 1. Multi-strategy YouTube bypass with aggressive anti-blocking
+# 2. Comprehensive error handling with user-friendly messages
+# 3. Better cookie management for cloud deployments
+# 4. IPv6 fallback for blocked IPv4 ranges
+# 5. Smart retry logic with exponential backoff
 
 from __future__ import annotations
 
@@ -16,7 +20,8 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+import random
 
 logger = logging.getLogger("transcript_utils")
 
@@ -31,23 +36,37 @@ _COOKIES_SECRET_FILE = Path("/etc/secrets/cookies.txt")
 _COOKIES_TMP_PATH = Path("/tmp/ycd_cookies.txt")
 _YTDLP_BASE_CMD: List[str] | None = None
 
+# Enhanced user agents rotation to avoid blocking
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+]
+
+# Player clients to try (in order of effectiveness)
+_PLAYER_CLIENTS = [
+    "android",
+    "android_embedded", 
+    "ios",
+    "web",
+    "tv_embedded",
+]
+
 
 # =========
 # Helpers
 # =========
 
 def _ua() -> str:
-    """Stable, modern UA helps reduce bot challenges."""
-    return (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    )
+    """Return random user agent to avoid detection."""
+    return random.choice(_USER_AGENTS)
 
 
 def _materialize_cookies_to_tmp() -> str | None:
     """Returns a writable cookies.txt path under /tmp if cookies are configured."""
     try:
+        # Try base64-encoded cookies first (best for Render/cloud deployments)
         b64 = (os.getenv("YTDLP_COOKIES_B64") or "").strip()
         if b64:
             _COOKIES_TMP_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -62,8 +81,10 @@ def _materialize_cookies_to_tmp() -> str | None:
                 _COOKIES_TMP_PATH.chmod(0o600)
             except Exception:
                 pass
+            logger.info("✅ Loaded cookies from YTDLP_COOKIES_B64")
             return str(_COOKIES_TMP_PATH)
 
+        # Try file path
         file_path = (os.getenv("YTDLP_COOKIES_FILE") or "").strip()
         if file_path:
             src = Path(file_path)
@@ -74,8 +95,10 @@ def _materialize_cookies_to_tmp() -> str | None:
                     _COOKIES_TMP_PATH.chmod(0o600)
                 except Exception:
                     pass
+                logger.info(f"✅ Loaded cookies from {file_path}")
                 return str(_COOKIES_TMP_PATH)
 
+        # Try secret file (for Docker/K8s deployments)
         if _COOKIES_SECRET_FILE.exists():
             _COOKIES_TMP_PATH.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(_COOKIES_SECRET_FILE, _COOKIES_TMP_PATH)
@@ -83,7 +106,11 @@ def _materialize_cookies_to_tmp() -> str | None:
                 _COOKIES_TMP_PATH.chmod(0o600)
             except Exception:
                 pass
+            logger.info("✅ Loaded cookies from secret file")
             return str(_COOKIES_TMP_PATH)
+        
+        logger.warning("⚠️ No YouTube cookies configured - downloads may be limited")
+        logger.warning("   Set YTDLP_COOKIES_B64 environment variable for production")
 
     except Exception as e:
         logger.warning(f"Could not materialize cookies: {e}")
@@ -163,6 +190,49 @@ def _ytdlp_cmd(args: List[str]) -> List[str] | None:
         else:
             logger.error("yt-dlp not found (neither binary nor module).")
     return (_YTDLP_BASE_CMD + args) if _YTDLP_BASE_CMD else None
+
+
+def _get_base_download_args(url: str, output_template: str) -> List[str]:
+    """Get base arguments for all downloads with anti-blocking measures."""
+    return [
+        "--restrict-filenames",
+        "--no-playlist",
+        "--output", output_template,
+        "--retries", "5",
+        "--fragment-retries", "5",
+        "--no-warnings",
+        # Anti-blocking measures
+        "--sleep-interval", "1",
+        "--max-sleep-interval", "3",
+        "--sleep-requests", "1",
+        # Randomize to look more human
+        "--random-sleep",
+        url,
+    ]
+
+
+def _try_with_network_strategy(
+    cmd_base: List[str], 
+    force_ipv4: bool = True, 
+    use_proxy: bool = False
+) -> List[str]:
+    """Apply network strategy (IPv4/IPv6, proxy)."""
+    cmd = cmd_base.copy()
+    
+    if force_ipv4:
+        cmd.extend(["--force-ipv4"])
+    else:
+        cmd.extend(["--force-ipv6"])
+    
+    # Geo-bypass always on
+    cmd.extend(["--geo-bypass"])
+    
+    # Proxy support (if configured)
+    proxy = os.getenv("YTDLP_PROXY")
+    if use_proxy and proxy:
+        cmd.extend(["--proxy", proxy])
+    
+    return cmd
 
 
 # =============
@@ -315,23 +385,35 @@ def _parse_srt(content: str, clean: bool) -> Optional[str]:
 
 
 # =========================================
-# AUDIO MP3 — FIXED: Direct stream selection
+# AUDIO MP3 — PRODUCTION v2 with Enhanced Blocking Resistance
 # =========================================
 
-def download_audio_with_ytdlp(video_id: str, quality: str = "192k", output_dir: str | None = None) -> Optional[str]:
+def download_audio_with_ytdlp(
+    video_id: str, 
+    quality: str = "192k", 
+    output_dir: str | None = None
+) -> Optional[str]:
     """
-    Download audio using DIRECT audio stream selection (not --extract-audio).
-    This prevents YouTube 403 blocks that occur with audio extraction.
-    Uses the same proven strategy pattern as video downloads.
+    Production-ready audio download with comprehensive YouTube blocking resistance.
+    
+    Features:
+    - Multiple player client strategies (Android, iOS, TV, Web)
+    - IPv4/IPv6 fallback
+    - Cookie support for authenticated access
+    - Exponential backoff retry logic
+    - Detailed error reporting
     """
     base = _ytdlp_cmd([])
     if not base:
-        raise Exception("yt-dlp not found (binary nor module). Install with: pip install -U yt-dlp")
+        raise Exception(
+            "yt-dlp not found. Install with: pip install -U yt-dlp\n"
+            "For Render deployment, add 'yt-dlp' to requirements.txt"
+        )
 
     out_dir = _ensure_dir(output_dir or DEFAULT_DOWNLOADS_DIR)
     url = f"https://www.youtube.com/watch?v={video_id}"
     
-    # Map quality to approximate bitrate for format selection
+    # Map quality to bitrate
     quality_map = {
         "high": "192",
         "medium": "128", 
@@ -341,103 +423,174 @@ def download_audio_with_ytdlp(video_id: str, quality: str = "192k", output_dir: 
     
     output_template = f"{video_id}_audio.%(ext)s"
 
-    # Probe first (detect restrictions early)
-    try:
-        list_cmd = _ytdlp_cmd([
-            "--restrict-filenames",
-            "--list-formats",
-            "--no-warnings",
-            "--force-ipv4",
-            "--geo-bypass",
-            "--extractor-args", "youtube:player_client=android",
-            "--user-agent", _ua(),
-            url,
-        ])
-        list_cmd = _maybe_add_cookies(list_cmd)
-        list_cmd = _maybe_no_mtime(list_cmd)
-        fmts = subprocess.run(list_cmd, capture_output=True, text=True, timeout=60, check=False)
-        if fmts.returncode != 0:
-            raise Exception(f"Cannot access audio formats: {fmts.stderr.strip() or 'unknown error'}")
-        if not has_actual_audio_formats(fmts.stdout):
-            raise Exception("No audio formats available (likely restricted).")
-    except subprocess.TimeoutExpired:
-        raise Exception("Format listing timed out")
+    # Check if cookies are available
+    has_cookies = bool(_materialize_cookies_to_tmp())
+    if not has_cookies:
+        logger.warning(
+            "⚠️ No YouTube cookies found. Downloads may fail for restricted content.\n"
+            "   To fix: Set YTDLP_COOKIES_B64 environment variable on Render.\n"
+            "   See: https://github.com/yt-dlp/yt-dlp#how-do-i-pass-cookies-to-yt-dlp"
+        )
 
-    # Strategy: Download best audio stream directly, then convert to mp3
-    # This is what works for video downloads, so we use the same approach
-    strategies = [
-        # Try to get audio-only stream close to target quality
-        f"bestaudio[abr<={target_bitrate}]/bestaudio",
-        # Fallback to any audio stream
-        "bestaudio/best",
-        # Last resort: extract audio from video
-        "best[height<=480]"
-    ]
+    # Enhanced strategy matrix: player_client × network × format
+    strategies: List[Tuple[str, bool, str, str]] = []
+    
+    # Try each player client with different network settings
+    for client in _PLAYER_CLIENTS:
+        # Best audio format for each client
+        strategies.append((
+            client,
+            True,  # force_ipv4
+            f"bestaudio[abr<={target_bitrate}]/bestaudio/best[height<=480]",
+            f"Strategy: {client} client (IPv4)"
+        ))
+        
+        # If IPv4 fails, try IPv6 (some datacenters have better IPv6 routes)
+        if client in ["android", "ios"]:
+            strategies.append((
+                client,
+                False,  # force_ipv6
+                f"bestaudio[abr<={target_bitrate}]/bestaudio/best[height<=480]",
+                f"Strategy: {client} client (IPv6 fallback)"
+            ))
 
     last_err = None
     found: Optional[Path] = None
+    total_strategies = len(strategies)
 
-    for i, fmt in enumerate(strategies, 1):
-        logger.info(f"[audio] strategy {i}/{len(strategies)} -> {fmt}")
+    for i, (player_client, use_ipv4, fmt, desc) in enumerate(strategies, 1):
+        logger.info(f"[audio] Attempt {i}/{total_strategies}: {desc}")
         
-        cmd = _ytdlp_cmd([
-            "--restrict-filenames",
-            "--no-playlist",
-            "--output", output_template,
-            "--format", fmt,
-            # Post-process to mp3
+        # Build command with anti-blocking measures
+        cmd = _ytdlp_cmd(_get_base_download_args(url, output_template))
+        if not cmd:
+            continue
+            
+        # Add format selection
+        cmd.extend(["--format", fmt])
+        
+        # Add post-processing to mp3
+        cmd.extend([
             "--extract-audio",
             "--audio-format", "mp3",
             "--audio-quality", quality if quality in ["high", "medium", "low"] else "192k",
-            "--retries", "3",
-            "--fragment-retries", "3",
-            "--force-ipv4",
-            "--geo-bypass",
-            "--extractor-args", "youtube:player_client=android",
-            "--user-agent", _ua(),
-            "--no-warnings",
-            # Add extra anti-bot measures
-            "--sleep-interval", "1",
-            "--max-sleep-interval", "3",
-            url,
         ])
+        
+        # Add player client
+        cmd.extend([
+            "--extractor-args", f"youtube:player_client={player_client}",
+        ])
+        
+        # Add network strategy
+        cmd = _try_with_network_strategy(cmd, force_ipv4=use_ipv4, use_proxy=(i > 3))
+        
+        # Add user agent and cookies
+        cmd.extend(["--user-agent", _ua()])
         cmd = _maybe_add_cookies(cmd)
         cmd = _maybe_no_mtime(cmd)
 
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd=out_dir, check=False)
+            # Execute with timeout
+            r = subprocess.run(
+                cmd, 
+                capture_output=True, 
+                text=True, 
+                timeout=600, 
+                cwd=out_dir, 
+                check=False
+            )
+            
             if r.returncode == 0:
-                # Locate resulting file
+                # Success - find the file
                 candidates = (
                     list(out_dir.glob(f"{video_id}_audio.*")) or 
                     list(out_dir.glob(f"{video_id}*.*"))
                 )
                 if candidates:
-                    found = max([f for f in candidates if f.is_file()], key=lambda f: f.stat().st_size)
+                    found = max(
+                        [f for f in candidates if f.is_file()], 
+                        key=lambda f: f.stat().st_size
+                    )
                     if found and found.stat().st_size >= 30_000:
+                        logger.info(f"✅ Audio download succeeded with {desc}")
                         break
                     else:
                         found = None
 
+            # Capture error for reporting
             last_err = r.stderr.strip() or r.stdout.strip() or "unknown error"
-            logger.debug(f"strategy {i} failed: {last_err[:400]}")
+            
+            # Parse error for user-friendly message
+            if "403" in last_err or "Forbidden" in last_err:
+                last_err = "YouTube blocked the request (HTTP 403). Trying next strategy..."
+            elif "available" in last_err.lower() or "formats" in last_err.lower():
+                last_err = "No audio formats available with this method. Trying next strategy..."
+            elif "timeout" in last_err.lower():
+                last_err = "Connection timed out. Trying next strategy..."
+            
+            logger.debug(f"   Failed: {last_err[:300]}")
+            
+            # Exponential backoff between strategies (but not too long)
+            if i < total_strategies:
+                wait_time = min(2 ** min(i, 4), 8)  # Max 8 seconds
+                logger.debug(f"   Waiting {wait_time}s before next attempt...")
+                time.sleep(wait_time)
             
         except subprocess.TimeoutExpired:
-            last_err = "download timed out"
-            logger.warning(f"Audio strategy {i} timed out")
+            last_err = "Download timed out after 10 minutes"
+            logger.warning(f"   Timeout on {desc}")
+            continue
+        except Exception as e:
+            last_err = str(e)
+            logger.warning(f"   Exception on {desc}: {e}")
+            continue
 
+    # Check if we found a valid file
     if not found or not found.exists():
         all_files = [f.name for f in out_dir.iterdir() if f.is_file()]
-        raise Exception(f"Audio file not found after all strategies. Last error: {last_err}. Files: {all_files[:5]}")
+        
+        # Provide helpful error message based on the context
+        error_msg = "Failed to download audio after trying all strategies.\n\n"
+        
+        if not has_cookies:
+            error_msg += (
+                "💡 SOLUTION: This video may require authentication.\n"
+                "   Set up YouTube cookies on your Render deployment:\n"
+                "   1. Export cookies from your browser (use extension like 'Get cookies.txt LOCALLY')\n"
+                "   2. Base64 encode the cookies: cat cookies.txt | base64 -w 0\n"
+                "   3. Set YTDLP_COOKIES_B64 environment variable on Render\n\n"
+            )
+        
+        if "403" in str(last_err) or "Forbidden" in str(last_err):
+            error_msg += (
+                "YouTube is blocking downloads from this server.\n"
+                "This often happens with cloud hosting IP addresses.\n\n"
+                "💡 SOLUTIONS:\n"
+                "   1. Set up YouTube cookies (see above)\n"
+                "   2. Use a proxy server (set YTDLP_PROXY env var)\n"
+                "   3. Consider using a different hosting provider\n\n"
+            )
+        
+        error_msg += f"Last error: {last_err}\n"
+        if all_files:
+            error_msg += f"Files in directory: {all_files[:5]}"
+        
+        raise Exception(error_msg)
 
+    # Validate file size
     if found.stat().st_size < 30_000:
         try:
             found.unlink()
         except Exception:
             pass
-        raise Exception("Downloaded audio appears corrupted/too small")
+        raise Exception(
+            f"Downloaded audio file is too small ({found.stat().st_size} bytes).\n"
+            "This usually means the download was blocked or corrupted.\n"
+            "Please try again or contact support if the problem persists."
+        )
 
     _touch_now(found)
+    logger.info(f"✅ Audio file ready: {found.name} ({found.stat().st_size / 1024 / 1024:.1f} MB)")
     return str(found.absolute())
 
 
@@ -459,75 +612,71 @@ def has_actual_audio_formats(fmt_list: str) -> bool:
 
 
 # ========
-# VIDEO MP4
+# VIDEO MP4 — Production v2
 # ========
 
-def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: str | None = None) -> Optional[str]:
+def download_video_with_ytdlp(
+    video_id: str, 
+    quality: str = "720p", 
+    output_dir: str | None = None
+) -> Optional[str]:
+    """
+    Production-ready video download with enhanced blocking resistance.
+    """
     base = _ytdlp_cmd([])
     if not base:
-        raise Exception("yt-dlp not found (binary nor module). Install with: pip install -U yt-dlp")
+        raise Exception(
+            "yt-dlp not found. Install with: pip install -U yt-dlp\n"
+            "For Render deployment, add 'yt-dlp' to requirements.txt"
+        )
 
     out_dir = _ensure_dir(output_dir or DEFAULT_DOWNLOADS_DIR)
     url = f"https://www.youtube.com/watch?v={video_id}"
     height = _parse_height(quality, 720)
     output_template = f"{video_id}_video_{quality}.%(ext)s"
 
-    # Probe formats first
-    try:
-        list_cmd = _ytdlp_cmd([
-            "--restrict-filenames",
-            "--list-formats",
-            "--no-warnings",
-            "--force-ipv4",
-            "--geo-bypass",
-            "--extractor-args", "youtube:player_client=android",
-            "--user-agent", _ua(),
-            url,
-        ])
-        list_cmd = _maybe_add_cookies(list_cmd)
-        list_cmd = _maybe_no_mtime(list_cmd)
-        fmts = subprocess.run(list_cmd, capture_output=True, text=True, timeout=60, check=False)
-        if fmts.returncode != 0:
-            raise Exception(f"Cannot access video formats: {fmts.stderr.strip() or 'unknown error'}")
-        if not has_actual_video_formats(fmts.stdout):
-            raise Exception("Only storyboard formats found (likely age/region/consent restricted).")
-    except subprocess.TimeoutExpired:
-        raise Exception("Format listing timed out")
+    # Check cookies
+    has_cookies = bool(_materialize_cookies_to_tmp())
+    if not has_cookies:
+        logger.warning("⚠️ No YouTube cookies - restricted videos may fail")
 
-    strategies = [
-        f"best[height<={height}][ext=mp4]+bestaudio[ext=m4a]/best[height<={height}]",
-        f"(bestvideo[height<={height}]+bestaudio/best[height<={height}])[ext=mp4]/"
-        f"(bestvideo[height<={height}]+bestaudio/best[height<={height}])",
-        "bestvideo+bestaudio/best[ext=mp4]/best",
-        "best/worst",
-    ]
+    # Enhanced strategy matrix
+    strategies: List[Tuple[str, bool, str, str]] = []
+    
+    for client in _PLAYER_CLIENTS[:3]:  # Top 3 work best for video
+        strategies.append((
+            client,
+            True,
+            f"best[height<={height}][ext=mp4]+bestaudio[ext=m4a]/best[height<={height}]",
+            f"Strategy: {client} client (IPv4)"
+        ))
 
     last_err = None
     found: Optional[Path] = None
 
-    for i, fmt in enumerate(strategies, 1):
-        cmd = _ytdlp_cmd([
-            "--restrict-filenames",
-            "--no-playlist",
-            "--output", output_template,
+    for i, (player_client, use_ipv4, fmt, desc) in enumerate(strategies, 1):
+        logger.info(f"[video] Attempt {i}/{len(strategies)}: {desc}")
+        
+        cmd = _ytdlp_cmd(_get_base_download_args(url, output_template))
+        if not cmd:
+            continue
+            
+        cmd.extend([
             "--format", fmt,
             "--merge-output-format", "mp4",
             "--embed-metadata",
             "--add-metadata",
-            "--retries", "3",
-            "--fragment-retries", "3",
-            "--force-ipv4", "--geo-bypass",
-            "--extractor-args", "youtube:player_client=android",
-            "--user-agent", _ua(),
-            "--no-warnings",
-            url,
+            "--extractor-args", f"youtube:player_client={player_client}",
         ])
+        
+        cmd = _try_with_network_strategy(cmd, force_ipv4=use_ipv4)
+        cmd.extend(["--user-agent", _ua()])
         cmd = _maybe_add_cookies(cmd)
         cmd = _maybe_no_mtime(cmd)
 
-        logger.info(f"[video] strategy {i}/{len(strategies)} -> {fmt}")
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd=out_dir, check=False)
+            
             if r.returncode == 0:
                 patterns = [
                     out_dir / f"{video_id}_video_{quality}.mp4",
@@ -541,29 +690,40 @@ def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: 
                         found = max(matches, key=lambda f: f.stat().st_size)
                         break
                 if found:
+                    logger.info(f"✅ Video download succeeded with {desc}")
                     break
 
             last_err = r.stderr.strip() or r.stdout.strip() or "unknown error"
-            logger.debug(f"strategy {i} failed: {last_err[:400]}")
-            if i == len(strategies):
-                raise Exception(last_err)
+            logger.debug(f"   Failed: {last_err[:300]}")
+            
+            if i < len(strategies):
+                time.sleep(min(2 ** i, 8))
+                
         except subprocess.TimeoutExpired:
             last_err = "download timed out"
-            if i == len(strategies):
-                raise Exception(last_err)
+            logger.warning(f"   Timeout on {desc}")
+        except Exception as e:
+            last_err = str(e)
+            logger.warning(f"   Exception on {desc}: {e}")
 
     if not found or not found.exists():
         all_files = [f.name for f in out_dir.iterdir() if f.is_file()]
-        raise Exception(f"Video file not found after download. Files: {all_files}")
+        error_msg = f"Video download failed.\nLast error: {last_err}\n"
+        if not has_cookies:
+            error_msg += "\n💡 Set YTDLP_COOKIES_B64 for restricted videos\n"
+        if all_files:
+            error_msg += f"Files: {all_files}"
+        raise Exception(error_msg)
 
     if found.stat().st_size < 100_000:
         try:
             found.unlink()
         except Exception:
             pass
-        raise Exception("Downloaded video appears corrupted/too small")
+        raise Exception("Downloaded video is too small - likely corrupted")
 
     _touch_now(found)
+    logger.info(f"✅ Video file ready: {found.name} ({found.stat().st_size / 1024 / 1024:.1f} MB)")
     return str(found.absolute())
 
 
@@ -578,9 +738,17 @@ def get_video_info(video_id: str) -> Optional[Dict[str, Any]]:
         return None
 
     url = f"https://www.youtube.com/watch?v={video_id}"
-    cmd = _ytdlp_cmd(["--dump-json", "--no-warnings", "--no-download", "--user-agent", _ua(), url])
+    cmd = _ytdlp_cmd([
+        "--dump-json", 
+        "--no-warnings", 
+        "--no-download", 
+        "--user-agent", _ua(),
+        "--extractor-args", "youtube:player_client=android",
+        url
+    ])
     cmd = _maybe_add_cookies(cmd)
     cmd = _maybe_no_mtime(cmd)
+    
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=45, check=False)
         if r.returncode == 0 and r.stdout:
@@ -631,7 +799,7 @@ def check_ytdlp_availability() -> bool:
     try:
         subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, timeout=10, check=False)
     except Exception:
-        pass
+        logger.warning("ffmpeg not found - some features may be limited")
     return True
 
 
@@ -659,7 +827,12 @@ def estimate_file_size(video_id: str, download_type: str, quality: str) -> Optio
             bitrate = bitrates.get(quality, 192)
             return int((duration * bitrate * 1000) // 8)
         if download_type == "video":
-            size_per_min = {1080: 100 * 1024 * 1024, 720: 50 * 1024 * 1024, 480: 25 * 1024 * 1024, 360: 15 * 1024 * 1024}
+            size_per_min = {
+                1080: 100 * 1024 * 1024, 
+                720: 50 * 1024 * 1024, 
+                480: 25 * 1024 * 1024, 
+                360: 15 * 1024 * 1024
+            }
             h = _parse_height(quality, 720)
             key = min(size_per_min.keys(), key=lambda k: abs(k - h))
             return int((duration * size_per_min[key]) // 60)
@@ -745,23 +918,29 @@ def _test_video(video_id: str = "dQw4w9WgXcQ", quality: str = "720p"):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    print("yt-dlp available:", check_ytdlp_availability())
-    print("Downloads dir:", DEFAULT_DOWNLOADS_DIR)
+    print("=" * 60)
+    print("YouTube Content Downloader - Transcript Utils Test")
+    print("=" * 60)
+    print()
+    print("✓ yt-dlp available:", check_ytdlp_availability())
+    print("✓ Downloads dir:", DEFAULT_DOWNLOADS_DIR)
+    print("✓ Cookies configured:", bool(_materialize_cookies_to_tmp()))
+    print()
+    
     try:
         _test_transcript()
-        print("Transcript test: OK")
+        print("✅ Transcript test: PASSED")
     except Exception as e:
-        print("Transcript test failed:", e)
+        print(f"❌ Transcript test FAILED: {e}")
+    
     try:
         ok = _test_audio()
-        print("Audio test:", "OK" if ok else "FAIL")
+        print("✅ Audio test:", "PASSED" if ok else "FAILED")
     except Exception as e:
-        print("Audio test failed:", e)
+        print(f"❌ Audio test FAILED: {e}")
+    
     try:
         ok = _test_video()
-        print("Video test:", "OK" if ok else "FAIL")
+        print("✅ Video test:", "PASSED" if ok else "FAILED")
     except Exception as e:
-        print("Video test failed:", e)
-
-# #-----------------------------------------------------------------------------
-
+        print(f"❌ Video test FAILED: {e}")
