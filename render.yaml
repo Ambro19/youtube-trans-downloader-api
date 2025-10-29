@@ -1,35 +1,115 @@
-# render.yaml
+# render.yaml - Production Ready Configuration
+# Updated: October 2025
+
 services:
   - type: web
-    name: youtube-transcript-api
+    name: youtube-trans-downloader-api
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python run.py
+    
+    # Build Command - Install system dependencies and Python packages
+    buildCommand: |
+      set -e
+      echo "🔧 Installing system dependencies..."
+      apt-get update -qq
+      apt-get install -y --no-install-recommends ffmpeg
+      echo "✅ ffmpeg installed"
+      
+      echo "📦 Installing Python dependencies..."
+      pip install --upgrade pip
+      pip install --no-cache-dir -r requirements.txt
+      echo "✅ Python packages installed"
+      
+      echo "🎯 Verifying yt-dlp installation..."
+      python -m yt_dlp --version || pip install --no-cache-dir --force-reinstall yt-dlp==2024.12.13
+      echo "✅ yt-dlp verified"
+    
+    # Start Command
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
+    
+    # Health Check
+    healthCheckPath: /health
+    
+    # Environment Variables
     envVars:
-      - key: ENV
+      - key: APP_ENV
         value: production
+      
+      - key: ENVIRONMENT
+        value: production
+      
       - key: HOST
         value: 0.0.0.0
+      
       - key: PORT
         value: 10000
+      
+      - key: FRONTEND_URL
+        value: https://onetechly.com
+      
+      # Secret Key (set in Render dashboard)
       - key: SECRET_KEY
-        sync: false #This line'd be 'generateValue: true', if SECRET_KEY isn,t added in .en file
-        #generateValue: true
+        sync: false
+      
+      # Stripe Configuration (set in Render dashboard)
       - key: STRIPE_SECRET_KEY
         sync: false
+      
       - key: STRIPE_WEBHOOK_SECRET
         sync: false
+      
       - key: PRO_PRICE_ID
         sync: false
+      
       - key: PREMIUM_PRICE_ID
         sync: false
+      
+      # Database Connection
       - key: DATABASE_URL
         fromDatabase:
           name: youtube-trans-db
           property: connectionString
-      # Using DATABASE_URL which Render provides instead of the individual DB parameters
-      # But our code will still work as is because we have fallbacks
+      
+      # YouTube Download Configuration
+      - key: YTDLP_NO_MTIME
+        value: true
+      
+      # YouTube Cookies (set in Render dashboard OR use Secret Files)
+      # Option 1: Use Secret Files (recommended) - set cookies.txt as secret file
+      # Option 2: Set YTDLP_COOKIES_FILE=/etc/secrets/cookies.txt
+      - key: YTDLP_COOKIES_FILE
+        value: /etc/secrets/cookies.txt
+      
+      # Optional: Rate Limiting Configuration
+      - key: RL_ENABLED
+        value: true
+      
+      - key: RL_DEFAULT_MAX
+        value: 120
+      
+      - key: RL_AUTH_MAX
+        value: 10
+      
+      - key: RL_DL_MAX
+        value: 40
+      
+      # Optional: File Retention
+      - key: FILE_RETENTION_DAYS
+        value: 7
+      
+      # Optional: Email Configuration (for contact form and password reset)
+      - key: SENDGRID_API_KEY
+        sync: false
+      
+      - key: CONTACT_RECIPIENT
+        value: onetechly@gmail.com
+      
+      - key: CONTACT_FROM
+        value: no-reply@onetechly.com
+      
+      # Password Reset Token TTL (1 hour)
+      - key: RESET_TOKEN_TTL_SECONDS
+        value: 3600
 
 databases:
   - name: youtube-trans-db
