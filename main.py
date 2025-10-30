@@ -125,7 +125,9 @@ except Exception:
     stripe = None
 
 app = FastAPI(title="YouTube Content Downloader API", version="3.4.2")
-
+#----------------------
+logging.basicConfig(level=logging.INFO) ## Added it here, after the "app = FastAPI(title="YouTube...)". Is it the correct place ??
+#---------------------------
 try:
     from timestamp_patch import EnsureUtcZMiddleware
     app.add_middleware(EnsureUtcZMiddleware)
