@@ -1,9 +1,9 @@
-# backend/main.py — Updated with better error handling for audio downloads
-# Key improvements:
-# 1. More descriptive error messages for users
-# 2. Better logging for debugging
-# 3. Catches and formats yt-dlp errors properly
-# 4. Added retry suggestion for 403 errors
+# backend/main.py — FIXED: Transcript handling for FetchedTranscriptSnippet objects
+# Key fixes:
+# 1. All segment helper functions now handle both dict and object types
+# 2. Better error handling with graceful fallbacks
+# 3. More descriptive error messages
+# 4. Improved yt-dlp integration
 
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -124,7 +124,7 @@ try:
 except Exception:
     stripe = None
 
-app = FastAPI(title="YouTube Content Downloader API", version="3.4.1")
+app = FastAPI(title="YouTube Content Downloader API", version="3.4.2")
 
 try:
     from timestamp_patch import EnsureUtcZMiddleware
@@ -376,127 +376,264 @@ def extract_youtube_video_id(text: str) -> str:
     m = _YT_ID_RE.search(t)
     return m.group(1) if m else ""
 
+# ============================================================================
+# FIXED: Transcript Helper Functions
+# ============================================================================
+# These functions now properly handle both dict and FetchedTranscriptSnippet objects
+
+def _get_segment_value(seg: Any, key: str, default: Any = None) -> Any:
+    """
+    Safely get a value from a segment, handling both dict and object types.
+    
+    Args:
+        seg: Either a dict or a FetchedTranscriptSnippet object
+        key: The key/attribute to get
+        default: Default value if not found
+        
+    Returns:
+        The value, or default if not found
+    """
+    if isinstance(seg, dict):
+        return seg.get(key, default)
+    else:
+        return getattr(seg, key, default)
+
+
 def _sec_to_vtt(ts: float) -> str:
-    h = int(ts // 3600); m = int((ts % 3600) // 60); s = int(ts % 60); ms = int((ts - int(ts)) * 1000)
+    """Format seconds as VTT timestamp: 00:00:12.000"""
+    h = int(ts // 3600)
+    m = int((ts % 3600) // 60)
+    s = int(ts % 60)
+    ms = int((ts - int(ts)) * 1000)
     return f"{h:02}:{m:02}:{s:02}.{ms:03}"
 
+
 def segments_to_vtt(transcript) -> str:
+    """
+    Convert transcript segments to WebVTT format.
+    Handles both dict and FetchedTranscriptSnippet objects.
+    """
     lines = ["WEBVTT", "Kind: captions", "Language: en", ""]
-    for seg in transcript:
-        start = _sec_to_vtt(seg.get("start", 0))
-        end = _sec_to_vtt(seg.get("start", 0) + seg.get("duration", 0))
-        text = (seg.get("text") or "").replace("\n", " ").strip()
-        lines.append(f"{start} --> {end}"); lines.append(text); lines.append("")
-    return "\n".join(lines)
+    
+    try:
+        for seg in transcript:
+            start = _get_segment_value(seg, "start", 0)
+            duration = _get_segment_value(seg, "duration", 0)
+            text = _get_segment_value(seg, "text", "")
+            
+            if not text:
+                continue
+                
+            start_ts = _sec_to_vtt(start)
+            end_ts = _sec_to_vtt(start + duration)
+            text_clean = text.replace("\n", " ").strip()
+            
+            lines.append(f"{start_ts} --> {end_ts}")
+            lines.append(text_clean)
+            lines.append("")
+            
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning(f"segments_to_vtt error: {e}")
+        raise
+
 
 def segments_to_srt(transcript) -> str:
+    """
+    Convert transcript segments to SRT format.
+    Handles both dict and FetchedTranscriptSnippet objects.
+    """
     def sec_to_srt(ts: float) -> str:
-        h = int(ts // 3600); m = int((ts % 3600) // 60); s = int(ts % 60); ms = int((ts - int(ts)) * 1000)
+        h = int(ts // 3600)
+        m = int((ts % 3600) // 60)
+        s = int(ts % 60)
+        ms = int((ts - int(ts)) * 1000)
         return f"{h:02}:{m:02}:{s:02},{ms:03}"
+    
     out = []
-    for i, seg in enumerate(transcript, start=1):
-        start = sec_to_srt(seg.get("start", 0))
-        end = sec_to_srt(seg.get("start", 0) + seg.get("duration", 0))
-        text = (seg.get("text") or "").replace("\n", " ").strip()
-        out.append(str(i)); out.append(f"{start} --> {end}"); out.append(text); out.append("")
-    return "\n".join(out)
+    try:
+        for i, seg in enumerate(transcript, start=1):
+            start = _get_segment_value(seg, "start", 0)
+            duration = _get_segment_value(seg, "duration", 0)
+            text = _get_segment_value(seg, "text", "")
+            
+            if not text:
+                continue
+                
+            start_ts = sec_to_srt(start)
+            end_ts = sec_to_srt(start + duration)
+            text_clean = text.replace("\n", " ").strip()
+            
+            out.append(str(i))
+            out.append(f"{start_ts} --> {end_ts}")
+            out.append(text_clean)
+            out.append("")
+            
+        return "\n".join(out)
+    except Exception as e:
+        logger.warning(f"segments_to_srt error: {e}")
+        raise
+
 
 _EN_PRIORITY = ["en", "en-US", "en-GB", "en-CA", "en-AU", "en-IE", "en-NZ"]
 
+
 def _clean_plain_blocks(blocks: list[str]) -> str:
+    """Format plain text into readable paragraphs."""
     out, cur, chars = [], [], 0
     for word in " ".join(blocks).split():
-        cur.append(word); chars += len(word) + 1
+        cur.append(word)
+        chars += len(word) + 1
         if chars > 400 and word.endswith((".", "!", "?")):
-            out.append(" ".join(cur)); cur, chars = [], 0
-    if cur: out.append(" ".join(cur))
+            out.append(" ".join(cur))
+            cur, chars = [], 0
+    if cur:
+        out.append(" ".join(cur))
     return "\n\n".join(out)
 
+
 def _format_timestamped(segments):
+    """
+    Format segments with timestamps.
+    Handles both dict and FetchedTranscriptSnippet objects.
+    """
     lines = []
-    for seg in segments:
-        t = int(seg.get("start", 0))
-        text = (seg.get("text") or "").replace("\n", " ")
-        lines.append(f"[{t // 60:02d}:{t % 60:02d}] {text}")
-    return "\n".join(lines)
+    try:
+        for seg in segments:
+            start = _get_segment_value(seg, "start", 0)
+            text = _get_segment_value(seg, "text", "")
+            
+            if not text:
+                continue
+                
+            t = int(start)
+            text_clean = text.replace("\n", " ")
+            lines.append(f"[{t // 60:02d}:{t % 60:02d}] {text_clean}")
+            
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning(f"_format_timestamped error: {e}")
+        raise
+
 
 def get_transcript_youtube_api(video_id: str, clean: bool = True, fmt: Optional[str] = None) -> str:
+    """
+    Get transcript using multiple strategies with proper fallbacks.
+    
+    Strategies (in order):
+    1. YouTube Transcript API (with multiple language attempts)
+    2. yt-dlp fallback
+    
+    Returns:
+        Transcript text in requested format
+        
+    Raises:
+        HTTPException: If no transcript can be obtained
+    """
     logger.info("Transcript for %s (clean=%s, fmt=%s)", video_id, clean, fmt)
+    
+    # Strategy 1: Try YouTube Transcript API
     try:
         listing = YouTubeTranscriptApi.list_transcripts(video_id)
-    except TranscriptsDisabled:
-        logger.warning("TranscriptsDisabled by uploader for %s", video_id)
-        listing = None
-    except Exception as e:
-        logger.warning("list_transcripts failed: %s", e)
-        listing = None
-
-    try:
-        if listing:
-            for code in _EN_PRIORITY:
-                try:
-                    t = listing.find_transcript([code])
-                    segments = t.fetch()
-                    if fmt == "srt":
-                        return segments_to_srt(segments)
-                    if fmt == "vtt":
-                        return segments_to_vtt(segments)
-                    if clean:
-                        return _clean_plain_blocks([(s.get("text") or "").replace("\n"," ") for s in segments])
-                    return _format_timestamped(segments)
-                except NoTranscriptFound:
-                    pass
-
+        
+        # Try priority English variants
+        for code in _EN_PRIORITY:
             try:
-                t = listing.find_generated_transcript(_EN_PRIORITY)
+                t = listing.find_transcript([code])
                 segments = t.fetch()
+                
                 if fmt == "srt":
                     return segments_to_srt(segments)
                 if fmt == "vtt":
                     return segments_to_vtt(segments)
                 if clean:
-                    return _clean_plain_blocks([(s.get("text") or "").replace("\n"," ") for s in segments])
+                    # Extract text safely
+                    texts = [_get_segment_value(s, "text", "").replace("\n", " ") for s in segments]
+                    return _clean_plain_blocks(texts)
                 return _format_timestamped(segments)
+                
             except NoTranscriptFound:
-                pass
-
-            for t in listing:
-                try:
-                    translated = t.translate("en")
-                    segments = translated.fetch()
-                    if fmt == "srt":
-                        return segments_to_srt(segments)
-                    if fmt == "vtt":
-                        return segments_to_vtt(segments)
-                    if clean:
-                        return _clean_plain_blocks([(s.get("text") or "").replace("\n"," ") for s in segments])
-                    return _format_timestamped(segments)
-                except Exception:
-                    continue
-
+                continue
+            except Exception as e:
+                logger.debug(f"Failed to process transcript for {code}: {e}")
+                continue
+        
+        # Try generated/auto-captions
         try:
-            segments = YouTubeTranscriptApi.get_transcript(video_id, languages=_EN_PRIORITY)
+            t = listing.find_generated_transcript(_EN_PRIORITY)
+            segments = t.fetch()
+            
             if fmt == "srt":
                 return segments_to_srt(segments)
             if fmt == "vtt":
                 return segments_to_vtt(segments)
             if clean:
-                return _clean_plain_blocks([(s.get("text") or "").replace("\n"," ") for s in segments])
+                texts = [_get_segment_value(s, "text", "").replace("\n", " ") for s in segments]
+                return _clean_plain_blocks(texts)
             return _format_timestamped(segments)
+            
+        except NoTranscriptFound:
+            pass
         except Exception as e:
-            logger.info("direct get_transcript failed: %s", e)
-
+            logger.debug(f"Generated transcript failed: {e}")
+        
+        # Try translation
+        for t in listing:
+            try:
+                translated = t.translate("en")
+                segments = translated.fetch()
+                
+                if fmt == "srt":
+                    return segments_to_srt(segments)
+                if fmt == "vtt":
+                    return segments_to_vtt(segments)
+                if clean:
+                    texts = [_get_segment_value(s, "text", "").replace("\n", " ") for s in segments]
+                    return _clean_plain_blocks(texts)
+                return _format_timestamped(segments)
+                
+            except Exception:
+                continue
+                
+    except TranscriptsDisabled:
+        logger.warning("Transcripts disabled by uploader for %s", video_id)
+    except Exception as e:
+        logger.warning("YouTube Transcript API failed for %s: %s", video_id, e)
+    
+    # Strategy 2: Try direct get_transcript
+    try:
+        segments = YouTubeTranscriptApi.get_transcript(video_id, languages=_EN_PRIORITY)
+        
+        if fmt == "srt":
+            return segments_to_srt(segments)
+        if fmt == "vtt":
+            return segments_to_vtt(segments)
+        if clean:
+            texts = [_get_segment_value(s, "text", "").replace("\n", " ") for s in segments]
+            return _clean_plain_blocks(texts)
+        return _format_timestamped(segments)
+        
+    except Exception as e:
+        logger.debug(f"Direct get_transcript failed: {e}")
+    
+    # Strategy 3: Fallback to yt-dlp
+    try:
+        logger.info("Trying yt-dlp fallback for %s", video_id)
         fb = get_transcript_with_ytdlp(video_id, clean=clean)
         if fb:
             return fb
-
-        raise HTTPException(status_code=404, detail="No transcript/captions found for this video.")
-
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.warning("Transcript pipeline error for %s: %s", video_id, e)
-        raise HTTPException(status_code=404, detail="No transcript/captions found for this video.")
+        logger.warning("yt-dlp fallback failed for %s: %s", video_id, e)
+    
+    # All strategies failed
+    raise HTTPException(
+        status_code=404, 
+        detail="No transcript/captions found for this video. The video may not have captions available."
+    )
+
+# ============================================================================
+# End of Fixed Transcript Functions
+# ============================================================================
 
 PLAN_LIMITS = {
     "free":    {"clean_transcripts": 5,   "unclean_transcripts": 3,  "audio_downloads": 2,  "video_downloads": 1},
@@ -792,7 +929,7 @@ async def on_startup():
 @app.get("/")
 def root():
     return {"message": "YouTube Content Downloader API", "status": "running",
-            "version": "3.4.1", "features": ["transcripts","audio","video","mobile","history","payments"],
+            "version": "3.4.2", "features": ["transcripts","audio","video","mobile","history","payments"],
             "downloads_path": str(DOWNLOADS_DIR)}
 
 @app.post("/register")
@@ -1097,7 +1234,7 @@ def debug_probe(video_id: str):
 
     try:
         seg = YouTubeTranscriptApi.get_transcript(video_id, languages=["en", "en-US", "en-GB"])
-        txt = " ".join(s.get("text","") for s in seg)
+        txt = " ".join(_get_segment_value(s, "text", "") for s in seg)
         result["strategies"]["direct_en"] = {"segments": len(seg), "preview": txt[:200]}
     except Exception as e:
         result["errors"]["direct_en"] = str(e)
@@ -1115,7 +1252,7 @@ def debug_probe(video_id: str):
         picked = authored or generated
         if picked:
             seg = picked.fetch()
-            txt = " ".join(s.get("text","") for s in seg)
+            txt = " ".join(_get_segment_value(s, "text", "") for s in seg)
             result["strategies"]["list_pick"] = {
                 "picked": "authored_en" if picked is authored else "generated_en",
                 "segments": len(seg),
@@ -1134,7 +1271,7 @@ def debug_probe(video_id: str):
                 candidate = t; break
         if candidate:
             seg = candidate.translate("en").fetch()
-            txt = " ".join(s.get("text","") for s in seg)
+            txt = " ".join(_get_segment_value(s, "text", "") for s in seg)
             result["strategies"]["translate_en"] = {"segments": len(seg), "preview": txt[:200]}
         else:
             result["strategies"]["translate_en"] = "no_generated_translatable_to_en"
@@ -1161,32 +1298,62 @@ def _touch_now(p: Path):
 @app.post("/download_transcript")
 @app.post("/download_transcript/")
 def download_transcript(req: TranscriptRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """
+    Download transcript with fixed error handling.
+    Now properly handles FetchedTranscriptSnippet objects.
+    """
     ensure_monthly_reset_and_tier(db, user)
     start = time.time()
     vid = extract_youtube_video_id(req.youtube_id)
-    if not vid or len(vid) != 11: raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
-    if not check_internet(): raise HTTPException(status_code=503, detail="No internet connection available.")
+    if not vid or len(vid) != 11: 
+        raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    if not check_internet(): 
+        raise HTTPException(status_code=503, detail="No internet connection available.")
 
     if req.format in ['srt', 'vtt']:
-        usage_key = "unclean_transcripts"; file_format = req.format
+        usage_key = "unclean_transcripts"
+        file_format = req.format
     elif req.clean_transcript:
-        usage_key = "clean_transcripts"; file_format = "txt"
+        usage_key = "clean_transcripts"
+        file_format = "txt"
     else:
-        usage_key = "unclean_transcripts"; file_format = "txt"
+        usage_key = "unclean_transcripts"
+        file_format = "txt"
+        
     ok, used, limit = check_usage_limit(user, usage_key)
     if not ok:
         type_name = "SRT transcript" if req.format == 'srt' else "VTT transcript" if req.format == 'vtt' else "clean transcript" if req.clean_transcript else "timestamped transcript"
         raise HTTPException(status_code=403, detail=f"Monthly limit reached for {type_name} ({used}/{limit}).")
 
+    # Get transcript using fixed function
     text = get_transcript_youtube_api(vid, clean=req.clean_transcript, fmt=req.format)
-    if not text: raise HTTPException(status_code=404, detail="No transcript found for this video.")
+    if not text:
+        raise HTTPException(status_code=404, detail="No transcript found for this video.")
 
     new_usage = increment_user_usage(db, user, usage_key)
     proc = time.time() - start
-    rec = create_download_record(db=db, user=user, kind=usage_key, youtube_id=vid, file_format=file_format, file_size=len(text), processing_time=proc)
-    return {"transcript": text, "youtube_id": vid, "clean_transcript": req.clean_transcript, "format": req.format,
-            "processing_time": round(proc, 2), "success": True, "usage_updated": new_usage, "usage_type": usage_key,
-            "download_record_id": rec.id if rec else None, "account": canonical_account(user)}
+    rec = create_download_record(
+        db=db, 
+        user=user, 
+        kind=usage_key, 
+        youtube_id=vid, 
+        file_format=file_format, 
+        file_size=len(text), 
+        processing_time=proc
+    )
+    
+    return {
+        "transcript": text, 
+        "youtube_id": vid, 
+        "clean_transcript": req.clean_transcript, 
+        "format": req.format,
+        "processing_time": round(proc, 2), 
+        "success": True, 
+        "usage_updated": new_usage, 
+        "usage_type": usage_key,
+        "download_record_id": rec.id if rec else None, 
+        "account": canonical_account(user)
+    }
 
 @app.post("/download_audio/")
 def download_audio(req: AudioRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1529,3 +1696,4 @@ if __name__ == "__main__":
     import uvicorn
     print(f"Starting server on 0.0.0.0:8000 — files: {DOWNLOADS_DIR}")
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
