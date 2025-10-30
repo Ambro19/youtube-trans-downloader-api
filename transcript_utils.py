@@ -1,10 +1,9 @@
-# transcript_utils.py — PRODUCTION v2.0 with ENHANCED BLOCKING RESISTANCE
-# Major improvements:
-# 1. Multi-strategy YouTube bypass with aggressive anti-blocking
-# 2. Comprehensive error handling with user-friendly messages
-# 3. Better cookie management for cloud deployments
-# 4. IPv6 fallback for blocked IPv4 ranges
-# 5. Smart retry logic with exponential backoff
+# transcript_utils.py — PRODUCTION v2.1 (FIXED: removed --random-sleep, better errors)
+# Key fixes:
+# 1. Removed --random-sleep option (not supported in older yt-dlp versions)
+# 2. Better error messages for users
+# 3. Simplified strategies for reliability
+# 4. Added fallback handling
 
 from __future__ import annotations
 
@@ -50,7 +49,6 @@ _PLAYER_CLIENTS = [
     "android_embedded", 
     "ios",
     "web",
-    "tv_embedded",
 ]
 
 
@@ -109,8 +107,7 @@ def _materialize_cookies_to_tmp() -> str | None:
             logger.info("✅ Loaded cookies from secret file")
             return str(_COOKIES_TMP_PATH)
         
-        logger.warning("⚠️ No YouTube cookies configured - downloads may be limited")
-        logger.warning("   Set YTDLP_COOKIES_B64 environment variable for production")
+        logger.warning("⚠️ No YouTube cookies configured - some downloads may fail")
 
     except Exception as e:
         logger.warning(f"Could not materialize cookies: {e}")
@@ -201,12 +198,9 @@ def _get_base_download_args(url: str, output_template: str) -> List[str]:
         "--retries", "5",
         "--fragment-retries", "5",
         "--no-warnings",
-        # Anti-blocking measures
+        # Anti-blocking measures (removed --random-sleep for compatibility)
         "--sleep-interval", "1",
         "--max-sleep-interval", "3",
-        "--sleep-requests", "1",
-        # Randomize to look more human
-        "--random-sleep",
         url,
     ]
 
@@ -385,7 +379,7 @@ def _parse_srt(content: str, clean: bool) -> Optional[str]:
 
 
 # =========================================
-# AUDIO MP3 — PRODUCTION v2 with Enhanced Blocking Resistance
+# AUDIO MP3 — PRODUCTION v2.1 FIXED
 # =========================================
 
 def download_audio_with_ytdlp(
@@ -394,14 +388,7 @@ def download_audio_with_ytdlp(
     output_dir: str | None = None
 ) -> Optional[str]:
     """
-    Production-ready audio download with comprehensive YouTube blocking resistance.
-    
-    Features:
-    - Multiple player client strategies (Android, iOS, TV, Web)
-    - IPv4/IPv6 fallback
-    - Cookie support for authenticated access
-    - Exponential backoff retry logic
-    - Detailed error reporting
+    Production-ready audio download with simplified strategies for maximum compatibility.
     """
     base = _ytdlp_cmd([])
     if not base:
@@ -425,43 +412,21 @@ def download_audio_with_ytdlp(
 
     # Check if cookies are available
     has_cookies = bool(_materialize_cookies_to_tmp())
-    if not has_cookies:
-        logger.warning(
-            "⚠️ No YouTube cookies found. Downloads may fail for restricted content.\n"
-            "   To fix: Set YTDLP_COOKIES_B64 environment variable on Render.\n"
-            "   See: https://github.com/yt-dlp/yt-dlp#how-do-i-pass-cookies-to-yt-dlp"
-        )
 
-    # Enhanced strategy matrix: player_client × network × format
-    strategies: List[Tuple[str, bool, str, str]] = []
-    
-    # Try each player client with different network settings
-    for client in _PLAYER_CLIENTS:
-        # Best audio format for each client
-        strategies.append((
-            client,
-            True,  # force_ipv4
-            f"bestaudio[abr<={target_bitrate}]/bestaudio/best[height<=480]",
-            f"Strategy: {client} client (IPv4)"
-        ))
-        
-        # If IPv4 fails, try IPv6 (some datacenters have better IPv6 routes)
-        if client in ["android", "ios"]:
-            strategies.append((
-                client,
-                False,  # force_ipv6
-                f"bestaudio[abr<={target_bitrate}]/bestaudio/best[height<=480]",
-                f"Strategy: {client} client (IPv6 fallback)"
-            ))
+    # Simplified strategy matrix for maximum compatibility
+    strategies: List[Tuple[str, str, str]] = [
+        ("android", f"bestaudio[abr<={target_bitrate}]/bestaudio", "Android client"),
+        ("ios", f"bestaudio[abr<={target_bitrate}]/bestaudio", "iOS client"),
+        ("web", "bestaudio/best", "Web client"),
+    ]
 
     last_err = None
     found: Optional[Path] = None
-    total_strategies = len(strategies)
 
-    for i, (player_client, use_ipv4, fmt, desc) in enumerate(strategies, 1):
-        logger.info(f"[audio] Attempt {i}/{total_strategies}: {desc}")
+    for i, (player_client, fmt, desc) in enumerate(strategies, 1):
+        logger.info(f"[audio] Attempt {i}/{len(strategies)}: {desc}")
         
-        # Build command with anti-blocking measures
+        # Build command
         cmd = _ytdlp_cmd(_get_base_download_args(url, output_template))
         if not cmd:
             continue
@@ -482,7 +447,7 @@ def download_audio_with_ytdlp(
         ])
         
         # Add network strategy
-        cmd = _try_with_network_strategy(cmd, force_ipv4=use_ipv4, use_proxy=(i > 3))
+        cmd = _try_with_network_strategy(cmd, force_ipv4=True)
         
         # Add user agent and cookies
         cmd.extend(["--user-agent", _ua()])
@@ -519,22 +484,11 @@ def download_audio_with_ytdlp(
 
             # Capture error for reporting
             last_err = r.stderr.strip() or r.stdout.strip() or "unknown error"
-            
-            # Parse error for user-friendly message
-            if "403" in last_err or "Forbidden" in last_err:
-                last_err = "YouTube blocked the request (HTTP 403). Trying next strategy..."
-            elif "available" in last_err.lower() or "formats" in last_err.lower():
-                last_err = "No audio formats available with this method. Trying next strategy..."
-            elif "timeout" in last_err.lower():
-                last_err = "Connection timed out. Trying next strategy..."
-            
             logger.debug(f"   Failed: {last_err[:300]}")
             
-            # Exponential backoff between strategies (but not too long)
-            if i < total_strategies:
-                wait_time = min(2 ** min(i, 4), 8)  # Max 8 seconds
-                logger.debug(f"   Waiting {wait_time}s before next attempt...")
-                time.sleep(wait_time)
+            # Small delay between attempts
+            if i < len(strategies):
+                time.sleep(2)
             
         except subprocess.TimeoutExpired:
             last_err = "Download timed out after 10 minutes"
@@ -547,33 +501,22 @@ def download_audio_with_ytdlp(
 
     # Check if we found a valid file
     if not found or not found.exists():
-        all_files = [f.name for f in out_dir.iterdir() if f.is_file()]
-        
-        # Provide helpful error message based on the context
-        error_msg = "Failed to download audio after trying all strategies.\n\n"
+        error_msg = (
+            f"Failed to download audio for video {video_id}.\n\n"
+            f"Possible reasons:\n"
+            f"1. The video may have geographic restrictions\n"
+            f"2. The video may require authentication\n"
+            f"3. YouTube may be blocking server downloads\n\n"
+        )
         
         if not has_cookies:
             error_msg += (
-                "💡 SOLUTION: This video may require authentication.\n"
-                "   Set up YouTube cookies on your Render deployment:\n"
-                "   1. Export cookies from your browser (use extension like 'Get cookies.txt LOCALLY')\n"
-                "   2. Base64 encode the cookies: cat cookies.txt | base64 -w 0\n"
-                "   3. Set YTDLP_COOKIES_B64 environment variable on Render\n\n"
+                "💡 TIP: Set up YouTube cookies for restricted content:\n"
+                "   Set YTDLP_COOKIES_B64 environment variable\n\n"
             )
         
-        if "403" in str(last_err) or "Forbidden" in str(last_err):
-            error_msg += (
-                "YouTube is blocking downloads from this server.\n"
-                "This often happens with cloud hosting IP addresses.\n\n"
-                "💡 SOLUTIONS:\n"
-                "   1. Set up YouTube cookies (see above)\n"
-                "   2. Use a proxy server (set YTDLP_PROXY env var)\n"
-                "   3. Consider using a different hosting provider\n\n"
-            )
-        
-        error_msg += f"Last error: {last_err}\n"
-        if all_files:
-            error_msg += f"Files in directory: {all_files[:5]}"
+        if last_err:
+            error_msg += f"Last error: {last_err[:500]}"
         
         raise Exception(error_msg)
 
@@ -584,9 +527,8 @@ def download_audio_with_ytdlp(
         except Exception:
             pass
         raise Exception(
-            f"Downloaded audio file is too small ({found.stat().st_size} bytes).\n"
-            "This usually means the download was blocked or corrupted.\n"
-            "Please try again or contact support if the problem persists."
+            f"Downloaded audio file is too small ({found.stat().st_size} bytes). "
+            "The download may have been corrupted."
         )
 
     _touch_now(found)
@@ -594,25 +536,8 @@ def download_audio_with_ytdlp(
     return str(found.absolute())
 
 
-def has_actual_audio_formats(fmt_list: str) -> bool:
-    """Check if format list contains actual audio formats (not just storyboards)."""
-    if not fmt_list:
-        return False
-    lines = fmt_list.lower().splitlines()
-    for line in lines:
-        if "storyboard" in line:
-            continue
-        # Look for audio indicators
-        if any(x in line for x in ["audio only", "m4a", "opus", "webm audio"]):
-            return True
-        # Also check for generic audio formats
-        if "audio" in line and any(x in line for x in ["kbps", "k ", " k"]):
-            return True
-    return False
-
-
 # ========
-# VIDEO MP4 — Production v2
+# VIDEO MP4 — FIXED
 # ========
 
 def download_video_with_ytdlp(
@@ -621,13 +546,12 @@ def download_video_with_ytdlp(
     output_dir: str | None = None
 ) -> Optional[str]:
     """
-    Production-ready video download with enhanced blocking resistance.
+    Production-ready video download with simplified strategies.
     """
     base = _ytdlp_cmd([])
     if not base:
         raise Exception(
-            "yt-dlp not found. Install with: pip install -U yt-dlp\n"
-            "For Render deployment, add 'yt-dlp' to requirements.txt"
+            "yt-dlp not found. Install with: pip install -U yt-dlp"
         )
 
     out_dir = _ensure_dir(output_dir or DEFAULT_DOWNLOADS_DIR)
@@ -637,24 +561,18 @@ def download_video_with_ytdlp(
 
     # Check cookies
     has_cookies = bool(_materialize_cookies_to_tmp())
-    if not has_cookies:
-        logger.warning("⚠️ No YouTube cookies - restricted videos may fail")
 
-    # Enhanced strategy matrix
-    strategies: List[Tuple[str, bool, str, str]] = []
-    
-    for client in _PLAYER_CLIENTS[:3]:  # Top 3 work best for video
-        strategies.append((
-            client,
-            True,
-            f"best[height<={height}][ext=mp4]+bestaudio[ext=m4a]/best[height<={height}]",
-            f"Strategy: {client} client (IPv4)"
-        ))
+    # Simplified strategies
+    strategies: List[Tuple[str, str, str]] = [
+        ("android", f"best[height<={height}][ext=mp4]/best[height<={height}]", "Android client"),
+        ("ios", f"best[height<={height}]", "iOS client"),
+        ("web", f"best[height<={height}]", "Web client"),
+    ]
 
     last_err = None
     found: Optional[Path] = None
 
-    for i, (player_client, use_ipv4, fmt, desc) in enumerate(strategies, 1):
+    for i, (player_client, fmt, desc) in enumerate(strategies, 1):
         logger.info(f"[video] Attempt {i}/{len(strategies)}: {desc}")
         
         cmd = _ytdlp_cmd(_get_base_download_args(url, output_template))
@@ -665,11 +583,10 @@ def download_video_with_ytdlp(
             "--format", fmt,
             "--merge-output-format", "mp4",
             "--embed-metadata",
-            "--add-metadata",
             "--extractor-args", f"youtube:player_client={player_client}",
         ])
         
-        cmd = _try_with_network_strategy(cmd, force_ipv4=use_ipv4)
+        cmd = _try_with_network_strategy(cmd, force_ipv4=True)
         cmd.extend(["--user-agent", _ua()])
         cmd = _maybe_add_cookies(cmd)
         cmd = _maybe_no_mtime(cmd)
@@ -697,7 +614,7 @@ def download_video_with_ytdlp(
             logger.debug(f"   Failed: {last_err[:300]}")
             
             if i < len(strategies):
-                time.sleep(min(2 ** i, 8))
+                time.sleep(2)
                 
         except subprocess.TimeoutExpired:
             last_err = "download timed out"
@@ -707,12 +624,17 @@ def download_video_with_ytdlp(
             logger.warning(f"   Exception on {desc}: {e}")
 
     if not found or not found.exists():
-        all_files = [f.name for f in out_dir.iterdir() if f.is_file()]
-        error_msg = f"Video download failed.\nLast error: {last_err}\n"
+        error_msg = (
+            f"Failed to download video for {video_id}.\n\n"
+            f"Possible reasons:\n"
+            f"1. Geographic restrictions\n"
+            f"2. Authentication required\n"
+            f"3. Server blocking\n\n"
+        )
         if not has_cookies:
-            error_msg += "\n💡 Set YTDLP_COOKIES_B64 for restricted videos\n"
-        if all_files:
-            error_msg += f"Files: {all_files}"
+            error_msg += "💡 TIP: Set YTDLP_COOKIES_B64 for restricted videos\n\n"
+        if last_err:
+            error_msg += f"Last error: {last_err[:500]}"
         raise Exception(error_msg)
 
     if found.stat().st_size < 100_000:
@@ -803,19 +725,6 @@ def check_ytdlp_availability() -> bool:
     return True
 
 
-def has_actual_video_formats(fmt_list: str) -> bool:
-    """Check if format list contains actual video formats (not just storyboards)."""
-    if not fmt_list:
-        return False
-    lines = fmt_list.lower().splitlines()
-    for line in lines:
-        if "storyboard" in line:
-            continue
-        if any(x in line for x in ["mp4", "webm", "mkv", "flv", "avi"]) and any(x in line for x in ["video", "x"]):
-            return True
-    return False
-
-
 def estimate_file_size(video_id: str, download_type: str, quality: str) -> Optional[int]:
     try:
         info = get_video_info(video_id)
@@ -896,26 +805,6 @@ def set_downloads_directory(path: str) -> bool:
         return False
 
 
-# ------------------ Optional local test harness ------------------
-
-def _test_transcript(video_id: str = "dQw4w9WgXcQ"):
-    clean = get_transcript_with_ytdlp(video_id, clean=True)
-    ts = get_transcript_with_ytdlp(video_id, clean=False)
-    logger.info(f"Transcript clean={bool(clean)} ts={bool(ts)}")
-    return clean, ts
-
-
-def _test_audio(video_id: str = "dQw4w9WgXcQ", quality: str = "medium"):
-    with tempfile.TemporaryDirectory() as td:
-        return bool(download_audio_with_ytdlp(video_id, quality, td))
-
-
-def _test_video(video_id: str = "dQw4w9WgXcQ", quality: str = "720p"):
-    with tempfile.TemporaryDirectory() as td:
-        p = download_video_with_ytdlp(video_id, quality, td)
-        return bool(p and Path(p).exists())
-
-
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     print("=" * 60)
@@ -925,27 +814,8 @@ if __name__ == "__main__":
     print("✓ yt-dlp available:", check_ytdlp_availability())
     print("✓ Downloads dir:", DEFAULT_DOWNLOADS_DIR)
     print("✓ Cookies configured:", bool(_materialize_cookies_to_tmp()))
-    print()
-    
-    try:
-        _test_transcript()
-        print("✅ Transcript test: PASSED")
-    except Exception as e:
-        print(f"❌ Transcript test FAILED: {e}")
-    
-    try:
-        ok = _test_audio()
-        print("✅ Audio test:", "PASSED" if ok else "FAILED")
-    except Exception as e:
-        print(f"❌ Audio test FAILED: {e}")
-    
-    try:
-        ok = _test_video()
-        print("✅ Video test:", "PASSED" if ok else "FAILED")
-    except Exception as e:
-        print(f"❌ Video test FAILED: {e}")
 
-# # ======================================================================
+# # ==================================================================
 
 # # transcript_utils.py — PRODUCTION v2.0 with ENHANCED BLOCKING RESISTANCE
 # # Major improvements:
@@ -1893,3 +1763,4 @@ if __name__ == "__main__":
 #         print("✅ Video test:", "PASSED" if ok else "FAILED")
 #     except Exception as e:
 #         print(f"❌ Video test FAILED: {e}")
+

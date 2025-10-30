@@ -1,58 +1,41 @@
 # requirements.txt - Production Ready
 # Updated: October 2025
 
-# Core API stack
+# Core dependencies
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
-
-# Database & ORM
-sqlalchemy==2.0.25
-psycopg2-binary==2.9.9     # Postgres driver for SQLAlchemy (works great on Render)
-
-# Validation
-pydantic==2.5.3
-email-validator==2.1.1     # robust email parsing/validation (nice for signup/reset)
-
-# Auth & Security
-PyJWT==2.8.0
-passlib[bcrypt]==1.7.4
-bcrypt==3.2.2              # keep pinned (passlib 1.7.x expects bcrypt 3.x)
-
-# Multipart/form-data
 python-multipart==0.0.6
-
-# Payments
-stripe==7.10.0
-
-# YouTube transcript & download
-youtube-transcript-api==1.1.0
-# yt-dlp==2024.12.13         # Updated to latest stable version (fixes --random-sleep issue)
-yt-dlp==2024.11.18
-# .env support
 python-dotenv==1.0.0
 
-# HTTP clients (both are fine to keep)
-requests==2.32.4
+# Database
+sqlalchemy==2.0.25
+psycopg2-binary==2.9.9
+
+# Authentication & Security
+pyjwt==2.8.0
+passlib[bcrypt]==1.7.4
+itsdangerous==2.2.0
+
+# YouTube & Media Processing
+yt-dlp>=2024.12.13
+youtube-transcript-api==1.1.0
+
+# Payment Processing
+stripe==7.10.0
+
+# Email
+sendgrid==6.11.0
+email-validator==2.1.1
+
+# HTTP & Utilities
 httpx==0.26.0
-
-# Timezones
-pytz==2023.3
-
-# XML parsing (used by transcript lib)
+requests==2.32.4
+aiofiles==23.2.0
+python-magic==0.4.27
 defusedxml==0.7.1
 
-# Fast JSON (optional; FastAPI will use it if present)
-orjson==3.9.10
+# Additional utilities
+pytz==2023.3
 
-# Async file ops
-aiofiles==23.2.0
+# ======================
 
-# MIME type detection (optional; okay to remove if unused)
-python-magic==0.4.27
-
-# Password reset / email
-itsdangerous==2.2.0        # secure token signer (already in your code)
-sendgrid==6.11.0           # email sending; falls back to logging if key not set
-
-# Optional: production error reporting
-# sentry-sdk[fastapi]==1.40.0
