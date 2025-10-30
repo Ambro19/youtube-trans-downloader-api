@@ -26,8 +26,8 @@ stripe==7.10.0
 
 # YouTube transcript & download
 youtube-transcript-api==1.1.0
-yt-dlp==2024.12.13         # Updated to latest stable version (fixes --random-sleep issue)
-
+# yt-dlp==2024.12.13         # Updated to latest stable version (fixes --random-sleep issue)
+yt-dlp==2024.11.18
 # .env support
 python-dotenv==1.0.0
 
