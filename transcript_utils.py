@@ -815,3 +815,4 @@ if __name__ == "__main__":
     print("✓ Downloads dir:", DEFAULT_DOWNLOADS_DIR)
     print("✓ Cookies configured:", bool(_materialize_cookies_to_tmp()))
 
+#--------------------------------------------------
