@@ -52,6 +52,14 @@ try:
 except Exception:
     class CouldNotRetrieveTranscript(Exception): pass
 
+# Configure logging FIRST ---------------
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("youtube_trans_downloader")
+#---------------------------------------
+
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
     raise RuntimeError(
@@ -95,6 +103,7 @@ except Exception:
 
 from subscription_sync import sync_user_subscription_from_stripe
 from youtube_transcript_api import YouTubeTranscriptApi
+
 from transcript_utils import (
     get_transcript_with_ytdlp,
     download_audio_with_ytdlp,
@@ -125,9 +134,11 @@ except Exception:
     stripe = None
 
 app = FastAPI(title="YouTube Content Downloader API", version="3.4.2")
+
 #----------------------
-logging.basicConfig(level=logging.INFO) ## Added it here, after the "app = FastAPI(title="YouTube...)". Is it the correct place ??
+#logging.basicConfig(level=logging.INFO) ## Added it here, after the "app = FastAPI(title="YouTube...)". Is it the correct place ??
 #---------------------------
+
 try:
     from timestamp_patch import EnsureUtcZMiddleware
     app.add_middleware(EnsureUtcZMiddleware)
@@ -255,40 +266,104 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(RateLimitMiddleware)
 
+# Replace your existing CORS configuration with this:
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+# Get allowed origins from environment variable for flexibility
+env_origins = os.getenv("ALLOWED_ORIGINS", "")
+allowed_origins_from_env = []
+if env_origins:
+    allowed_origins_from_env = [origin.strip() for origin in env_origins.split(",")]
+
+#-----------------------------
+# PUBLIC_ORIGINS = [
+#     "https://onetechly.com",
+#     "https://www.onetechly.com",
+# ]
+
+# DEV_ORIGINS = [
+#     "http://localhost:3000",
+#     "http://127.0.0.1:3000",
+#     "http://192.168.1.185:3000",
+# ]
+#---------------------------
 
 PUBLIC_ORIGINS = [
     "https://onetechly.com",
     "https://www.onetechly.com",
+    "https://api.onetechly.com",  # Add API domain for completeness
 ]
 
 DEV_ORIGINS = [
     "http://localhost:3000",
-    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3000", 
     "http://192.168.1.185:3000",
+    "http://localhost:8000",  # For local backend development
 ]
 
+#---------------------
+# if ENVIRONMENT != "production":
+#     allow_origins = PUBLIC_ORIGINS + DEV_ORIGINS + ([FRONTEND_URL] if FRONTEND_URL else [])
+# else:
+#     allow_origins = PUBLIC_ORIGINS + ([FRONTEND_URL] if FRONTEND_URL else [])
+#--------------------
+
+# Combine all allowed origins
 if ENVIRONMENT != "production":
-    allow_origins = PUBLIC_ORIGINS + DEV_ORIGINS + ([FRONTEND_URL] if FRONTEND_URL else [])
+    allow_origins = list(set(PUBLIC_ORIGINS + DEV_ORIGINS + allowed_origins_from_env + ([FRONTEND_URL] if FRONTEND_URL else [])))
 else:
-    allow_origins = PUBLIC_ORIGINS + ([FRONTEND_URL] if FRONTEND_URL else [])
+    allow_origins = list(set(PUBLIC_ORIGINS + allowed_origins_from_env + ([FRONTEND_URL] if FRONTEND_URL else [])))
+
+#-----------------------
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=[o for o in allow_origins if o],
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+#     expose_headers=[
+#         "Content-Disposition",
+#         "Content-Type",
+#         "Content-Length",
+#         "Content-Range",
+#     ],
+# )
+#-----------------
+
+# Remove any empty strings and ensure uniqueness
+allow_origins = [origin for origin in allow_origins if origin]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o for o in allow_origins if o],
+    allow_origins=allow_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "Accept",
+        "Origin",
+        "X-Requested-With",
+        "X-CSRF-Token",
+        "Access-Control-Allow-Headers",
+        "Access-Control-Allow-Origin",
+        "Stripe-Signature"  # Important for Stripe webhooks
+    ],
     expose_headers=[
         "Content-Disposition",
-        "Content-Type",
+        "Content-Type", 
         "Content-Length",
         "Content-Range",
+        "X-Total-Count",
     ],
+    max_age=600,  # Cache preflight requests for 10 minutes
 )
 
+logger.info("✅ CORS enabled for origins: %s", allow_origins)
+
 print("✅ CORS enabled for origins:", allow_origins)
+
 
 USE_SYSTEM_DOWNLOADS = os.getenv("USE_SYSTEM_DOWNLOADS", "false").lower() == "true"
 if USE_SYSTEM_DOWNLOADS:
@@ -1638,19 +1713,102 @@ def send_contact_message(req: ContactMessage, request: Request):
         logger.error(f"Contact email failed: {e}")
         raise HTTPException(status_code=500, detail="Unable to send message right now.")
 
+#----------------------
+# @app.get("/health")
+# def health():
+#     return {
+#         "status": "healthy",
+#         "timestamp": datetime.utcnow().isoformat(),
+#         "environment": ENVIRONMENT,
+#         "services": {
+#             "youtube_api": "available",
+#             "stripe": "configured" if os.getenv("STRIPE_SECRET_KEY") else "not_configured",
+#             "file_system": "accessible",
+#             "yt_dlp": "available" if check_ytdlp_availability() else "unavailable",
+#         },
+#         "downloads_path": str(DOWNLOADS_DIR),
+#     }
+#------------------------
 @app.get("/health")
-def health():
-    return {
+async def health_check(db: Session = Depends(get_db)):
+    """
+    Comprehensive health check endpoint for frontend, load balancers, and monitoring
+    """
+    health_status = {
         "status": "healthy",
+        "service": "YouTube Content Downloader API",
+        "version": "3.4.2",
         "timestamp": datetime.utcnow().isoformat(),
         "environment": ENVIRONMENT,
+        "database": {
+            "status": "unknown",
+            "driver": driver,
+            "url": DATABASE_URL.split('@')[-1] if '@' in DATABASE_URL else "local"  # Hide credentials
+        },
         "services": {
             "youtube_api": "available",
             "stripe": "configured" if os.getenv("STRIPE_SECRET_KEY") else "not_configured",
             "file_system": "accessible",
             "yt_dlp": "available" if check_ytdlp_availability() else "unavailable",
+            "email": "configured" if os.getenv("SMTP_PASSWORD") else "not_configured",
         },
-        "downloads_path": str(DOWNLOADS_DIR),
+        "system": {
+            "downloads_path": str(DOWNLOADS_DIR),
+            "file_retention_days": FILE_RETENTION_DAYS,
+            "frontend_url": FRONTEND_URL,
+        }
+    }
+    
+    # Test database connection
+    try:
+        db.execute("SELECT 1")
+        health_status["database"]["status"] = "connected"
+    except Exception as e:
+        health_status["database"]["status"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
+    
+    # Test file system access
+    try:
+        DOWNLOADS_DIR.mkdir(exist_ok=True)
+        test_file = DOWNLOADS_DIR / "health_check.txt"
+        test_file.write_text("health check")
+        test_file.unlink()
+        health_status["services"]["file_system"] = "accessible"
+    except Exception as e:
+        health_status["services"]["file_system"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
+    
+    # Test yt-dlp availability more thoroughly
+    try:
+        if check_ytdlp_availability():
+            health_status["services"]["yt_dlp"] = "available"
+        else:
+            health_status["services"]["yt_dlp"] = "unavailable"
+            health_status["status"] = "degraded"
+    except Exception as e:
+        health_status["services"]["yt_dlp"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
+    
+    # If any critical service is down, mark as unhealthy
+    if health_status["database"]["status"] != "connected":
+        health_status["status"] = "unhealthy"
+    
+    status_code = 200 if health_status["status"] == "healthy" else 503
+    
+    return JSONResponse(
+        status_code=status_code,
+        content=health_status
+    )
+
+@app.get("/")
+async def root():
+    """Simple root endpoint for basic connectivity checks"""
+    return {
+        "message": "YouTube Content Downloader API",
+        "version": "3.4.2", 
+        "status": "operational",
+        "docs": "/docs",
+        "health": "/health"
     }
 
 @app.get("/debug/users")
