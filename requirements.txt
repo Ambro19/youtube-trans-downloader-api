@@ -1,5 +1,5 @@
 # requirements.txt - Production Ready
-# Updated: October 2025
+# Updated: November 2025
 
 # Core dependencies
 fastapi==0.109.0
@@ -17,7 +17,7 @@ passlib[bcrypt]==1.7.4
 itsdangerous==2.2.0
 
 # YouTube & Media Processing
-yt-dlp>=2024.12.13
+yt-dlp==2025.10.22
 youtube-transcript-api==1.1.0
 
 # Payment Processing
@@ -31,11 +31,8 @@ email-validator==2.1.1
 httpx==0.26.0
 requests==2.32.4
 aiofiles==23.2.0
-python-magic==0.4.27
+# Use python-magic on Linux/macOS, python-magic-bin on Windows
+python-magic==0.4.27; sys_platform != "win32"
+python-magic-bin==0.4.14; sys_platform == "win32"
 defusedxml==0.7.1
-
-# Additional utilities
 pytz==2023.3
-
-# ======================
-
