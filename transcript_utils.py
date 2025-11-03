@@ -12,38 +12,101 @@ import logging
 import os
 import re
 from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError
 
 logger = logging.getLogger("youtube_trans_downloader")
 
-def _common_ydl_opts(tmp_dir: str | None = None) -> dict:
-    """Base yt-dlp options shared by audio/video flows."""
-    prefer_ipv4 = str(os.getenv("YTDLP_BIND_IPV4", "1")).lower() in ("1", "true", "yes")
-    headers = {
-        # Keep a modern UA; some CDNs 403 on unknown agents
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/119.0 Safari/537.36"
+#------------------- Newly Added functions ------------
+
+def _norm_youtube_url(video_id_or_url: str) -> str:
+    # Accept ID or any YT URL (watch/shorts/youtu.be)
+    s = video_id_or_url.strip()
+    m = re.search(r'(?:v=|/shorts/|youtu\.be/)([A-Za-z0-9_-]{6,})', s)
+    vid = m.group(1) if m else s
+    return f'https://www.youtube.com/watch?v={vid}'
+
+def _ensure_ffmpeg_location() -> Optional[str]:
+    # If you ship FFmpeg with the app, return its folder here and set in opts
+    # Otherwise return None and make sure FFmpeg is on PATH
+    return None
+
+def _outtmpl(output_dir: str) -> Dict[str, str]:
+    # Title + ID + height; Windows-safe; keeps original ext after remux
+    # .200B caps long titles safely
+    return {
+        'default': os.path.join(
+            output_dir, '%(title).200B [%(id)s]_%(height)sp.%(ext)s'
+        )
+    }
+
+def _common_ydl_opts(output_dir: str) -> Dict:
+    return {
+        # Avoid the problematic web client; prefer Android to bypass SABR
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'android_embedded']
+            }
+        },
+        # Pick AVC video first (widely compatible), then best available; always include audio
+        'format': (
+            # mp4/avc first, merged with best audio
+            'bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/'
+            # any bestvideo + bestaudio fallback
+            'bv*+ba/best'
         ),
-        "Accept-Language": "en-US,en;q=0.9",
+        # Merge/remux to MP4 even if the best stream is webm
+        'merge_output_format': 'mp4',
+        'postprocessors': [
+            {'key': 'FFmpegVideoRemuxer', 'preferedformat': 'mp4'},
+            {'key': 'FFmpegMetadata'},         # write title/artist where possible
+            {'key': 'EmbedThumbnail', 'already_have_thumbnail': False},  # harmless if none
+        ],
+        'writethumbnail': True,
+        'outtmpl': _outtmpl(output_dir),
+        'noprogress': True,
+        'quiet': True,
+        'concurrent_fragment_downloads': 4,
+        'retries': 5,
+        'fragment_retries': 5,
+        # Slightly “Android-ish” headers help in some edge cases
+        'http_headers': {
+            'User-Agent': 'com.google.android.youtube/19.20.34 (Linux; U; Android 11)',
+            'Accept-Language': 'en-US,en;q=0.9',
+        },
+        # Make sure ffmpeg is found
+        **({'ffmpeg_location': _ensure_ffmpeg_location()} if _ensure_ffmpeg_location() else {})
     }
-    opts = {
-        "quiet": True,
-        "noprogress": True,
-        "concurrent_fragment_downloads": 4,
-        "retries": 3,
-        "fragment_retries": 10,
-        "retry_sleep": "1,2,4,8",
-        "http_headers": headers,
-        "nocheckcertificate": True,
-        # IPv4 preference to dodge some ISP/IPv6 routing/CDN blocks
-        "prefer_ipv6": False if prefer_ipv4 else None,
-        "source_address": "0.0.0.0" if prefer_ipv4 else None,
-        # Temp/work dir
-        "paths": {"home": tmp_dir} if tmp_dir else None,
-    }
-    # Remove None values to keep yt-dlp happy
-    return {k: v for k, v in opts.items() if v is not None}
+#-------------------- End of - Newly Added functions -------------
+
+# def _common_ydl_opts(tmp_dir: str | None = None) -> dict:
+#     """Base yt-dlp options shared by audio/video flows."""
+#     prefer_ipv4 = str(os.getenv("YTDLP_BIND_IPV4", "1")).lower() in ("1", "true", "yes")
+#     headers = {
+#         # Keep a modern UA; some CDNs 403 on unknown agents
+#         "User-Agent": (
+#             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+#             "AppleWebKit/537.36 (KHTML, like Gecko) "
+#             "Chrome/119.0 Safari/537.36"
+#         ),
+#         "Accept-Language": "en-US,en;q=0.9",
+#     }
+#     opts = {
+#         "quiet": True,
+#         "noprogress": True,
+#         "concurrent_fragment_downloads": 4,
+#         "retries": 3,
+#         "fragment_retries": 10,
+#         "retry_sleep": "1,2,4,8",
+#         "http_headers": headers,
+#         "nocheckcertificate": True,
+#         # IPv4 preference to dodge some ISP/IPv6 routing/CDN blocks
+#         "prefer_ipv6": False if prefer_ipv4 else None,
+#         "source_address": "0.0.0.0" if prefer_ipv4 else None,
+#         # Temp/work dir
+#         "paths": {"home": tmp_dir} if tmp_dir else None,
+#     }
+#     # Remove None values to keep yt-dlp happy
+#     return {k: v for k, v in opts.items() if v is not None}
 
 
 
@@ -261,242 +324,121 @@ def _finalize_path(output_dir: str, filename: str) -> Path:
     _ensure_dir(base)
     return base / filename
 
+def download_video_with_ytdlp(video_id_or_url: str, quality: str, output_dir: str) -> str:
+    """
+    quality: '1080p' | '720p' | '480p' | '360p'
+    Returns final absolute file path.
+    """
+    url = _norm_youtube_url(video_id_or_url)
+    q = re.sub(r'[^0-9]', '', quality or '')
+    height = int(q) if q.isdigit() else None
 
-# def download_audio_with_ytdlp(video_id: str, quality: str = "medium", output_dir: str = ".") -> str:
+    fmt = _common_ydl_opts(output_dir)
+    if height:
+        # prefer requested height, then nearest lower, still merging with audio
+        fmt['format'] = (
+            f"bv*[height={height}][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
+            f"bv*[height<={height}][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
+            "bv*+ba/best"
+        )
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    with YoutubeDL(fmt) as ydl:
+        info = ydl.extract_info(url, download=True)
+        # yt-dlp returns final filename here (after remux/merge)
+        fname = ydl.prepare_filename(info)
+        # after remux it might have changed extension to mp4
+        base, _ = os.path.splitext(fname)
+        mp4 = base + '.mp4'
+        return mp4 if os.path.exists(mp4) else fname
+
+def download_audio_with_ytdlp(video_id_or_url: str, output_dir: str) -> str:
+    """
+    Extracts audio to MP3 (with correct title in filename).
+    """
+    url = _norm_youtube_url(video_id_or_url)
+    opts = _common_ydl_opts(output_dir)
+    opts.update({
+        'format': 'bestaudio/best',
+        'postprocessors': [
+            {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'},
+            {'key': 'FFmpegMetadata'},
+            {'key': 'EmbedThumbnail', 'already_have_thumbnail': False},
+        ],
+        'outtmpl': {
+            'default': os.path.join(output_dir, '%(title).200B [%(id)s].%(ext)s')
+        }
+    })
+
+    os.makedirs(output_dir, exist_ok=True)
+    with YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        # yt-dlp tells us the actual filename after audio extraction
+        return ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
+#----------------------
+
+# def download_audio_with_ytdlp(video_id: str, quality: str, output_dir: str) -> str:
 #     """
-#     Download audio and transcode to **MP3** using a single, stable post-processor.
-#     Returns the final .mp3 path.
+#     Extracts audio as MP3 using FFmpegExtractAudio (the robust, standard PP).
 #     """
-#     if not validate_video_id(video_id):
-#         raise ValueError("Invalid YouTube video ID")
-#     if not check_ytdlp_availability():
-#         raise RuntimeError("yt-dlp is not available")
+#     abr_map = {"low": "64", "medium": "128", "high": "192"}
+#     abr = abr_map.get(quality.lower(), "128")
+#     base_opts = _common_ydl_opts(tmp_dir=output_dir)
 
-#     kbps = _audio_quality_to_kbps(quality)
-#     # Deterministic template; ExtractAudio will replace ext to .mp3
-#     out_tmpl = _finalize_path(output_dir, f"{video_id}_audio_{quality}.%(ext)s")
-
-#     yt_dlp = _yt_dlp()
-#     ydl_opts: Dict[str, Any] = {
-#         "quiet": True,
-#         "no_warnings": True,
-#         "noprogress": True,
-#         "concurrent_fragment_downloads": 1,  # reduces flakiness on Windows
-#         "outtmpl": str(out_tmpl),
+#     ydl_opts = {
+#         **base_opts,
 #         "format": "bestaudio/best",
-#         "prefer_ffmpeg": True,
+#         "outtmpl": os.path.join(output_dir, f"{video_id}_audio_%(abr)sk.%(ext)s"),
 #         "postprocessors": [
 #             {
-#                 # ✅ stable, supported PP – handles extraction & mp3 encode
 #                 "key": "FFmpegExtractAudio",
 #                 "preferredcodec": "mp3",
-#                 "preferredquality": kbps,  # kbps as string, e.g. "160"
-#             },
-#             {"key": "FFmpegMetadata"},
+#                 "preferredquality": abr,
+#             }
 #         ],
-#         **_ffmpeg_location_opts(),
+#         # Better container probing
+#         "postprocessor_args": ["-vn"],
 #     }
 
-#     # Execute
-#     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-#         info = ydl.extract_info(_youtube_url(video_id), download=True)
-
-#     # Resolve expected final path
-#     final_path = _finalize_path(output_dir, f"{video_id}_audio_{quality}.mp3")
-#     if final_path.exists() and final_path.stat().st_size > 0:
-#         return str(final_path)
-
-#     # Fallback: search produced files
-#     for p in Path(output_dir).glob(f"{video_id}_audio_{quality}*.mp3"):
-#         if p.is_file() and p.stat().st_size > 0:
-#             return str(p.resolve())
-
-#     # Last resort: infer from yt-dlp filename hint
-#     fname = info.get("_filename")
-#     if fname:
-#         p = Path(fname).with_suffix(".mp3")
-#         if p.exists() and p.stat().st_size > 0:
-#             return str(p.resolve())
-
-#     raise RuntimeError("Audio file was not produced")
-
-def download_audio_with_ytdlp(video_id: str, quality: str, output_dir: str) -> str:
-    """
-    Extracts audio as MP3 using FFmpegExtractAudio (the robust, standard PP).
-    """
-    abr_map = {"low": "64", "medium": "128", "high": "192"}
-    abr = abr_map.get(quality.lower(), "128")
-    base_opts = _common_ydl_opts(tmp_dir=output_dir)
-
-    ydl_opts = {
-        **base_opts,
-        "format": "bestaudio/best",
-        "outtmpl": os.path.join(output_dir, f"{video_id}_audio_%(abr)sk.%(ext)s"),
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": abr,
-            }
-        ],
-        # Better container probing
-        "postprocessor_args": ["-vn"],
-    }
-
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        # yt-dlp returns output paths in info when postprocessors run
-        # We normalize to our deterministic file name:
-        path = os.path.join(output_dir, f"{video_id}_audio_{abr}k.mp3")
-        if not os.path.exists(path):
-            # fallback: find the first created file
-            candidates = [f for f in os.listdir(output_dir) if f.startswith(f"{video_id}_audio_") and f.endswith(".mp3")]
-            if candidates:
-                path = os.path.join(output_dir, candidates[0])
-        return path
+#     url = f"https://www.youtube.com/watch?v={video_id}"
+#     with YoutubeDL(ydl_opts) as ydl:
+#         info = ydl.extract_info(url, download=True)
+#         # yt-dlp returns output paths in info when postprocessors run
+#         # We normalize to our deterministic file name:
+#         path = os.path.join(output_dir, f"{video_id}_audio_{abr}k.mp3")
+#         if not os.path.exists(path):
+#             # fallback: find the first created file
+#             candidates = [f for f in os.listdir(output_dir) if f.startswith(f"{video_id}_audio_") and f.endswith(".mp3")]
+#             if candidates:
+#                 path = os.path.join(output_dir, candidates[0])
+#         return path
 
 
-# def download_video_with_ytdlp(video_id: str, quality: str = "720p", output_dir: str = ".") -> str:
+# def download_video_with_ytdlp(video_id: str, quality: str, output_dir: str) -> str:
 #     """
-#     Download video merged with audio to MP4 with height <= requested.
-#     Strongly prefers non-HLS to avoid empty-file + 403 fragment issues.
-#     Falls back through safer formats if the first choice is blocked.
+#     Downloads MP4 video at the requested quality (1080p/720p/480p/360p).
 #     """
-#     if not validate_video_id(video_id):
-#         raise ValueError("Invalid YouTube video ID")
-#     if not check_ytdlp_availability():
-#         raise RuntimeError("yt-dlp is not available")
-
-#     yt_dlp = _yt_dlp()
-#     height = _video_quality_to_height(quality)
-
-#     # Prefer AVC MP4 video + M4A audio, explicitly avoid HLS when possible.
-#     # Fallbacks: best MP4, then non-HLS best, then anything that works.
-#     fmt = (
-#         f"(bestvideo[ext=mp4][vcodec^=avc1][protocol!=m3u8][height<={height}]"
-#         f"/bestvideo[ext=mp4][protocol!=m3u8][height<={height}]"
-#         f"/bestvideo[protocol!=m3u8][height<={height}])"
-#         f"+(bestaudio[ext=m4a]/bestaudio)"
-#         f"/best[ext=mp4][protocol!=m3u8][height<={height}]"
-#         f"/best[protocol!=m3u8][height<={height}]"
-#         f"/best[height<={height}]"
-#     )
-
-#     out_tmpl = _finalize_path(output_dir, f"{video_id}_video_{quality}.%(ext)s")
-
-#     # Optional cookies from env (one of these; both are optional)
-#     cookies_from_browser = os.getenv("COOKIES_FROM_BROWSER")  # e.g., "chrome"
-#     cookies_file = os.getenv("COOKIES_FILE")  # e.g., "cookies.txt"
-
-#     # Desktop UA + robust retries/backoff
-#     http_headers = {
-#         "User-Agent": (
-#             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-#             "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-#         )
+#     fmt_map = {
+#         "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+#         "720p":  "bestvideo[height<=720]+bestaudio/best[height<=720]",
+#         "480p":  "bestvideo[height<=480]+bestaudio/best[height<=480]",
+#         "360p":  "bestvideo[height<=360]+bestaudio/best[height<=360]",
 #     }
+#     fmt = fmt_map.get(quality.lower(), fmt_map["720p"])
 
-#     base_opts = {
-#         "quiet": True,
-#         "no_warnings": True,
-#         "noprogress": True,
-#         "outtmpl": str(out_tmpl),
-#         "noplaylist": True,
+#     base_opts = _common_ydl_opts(tmp_dir=output_dir)
+#     ydl_opts = {
+#         **base_opts,
 #         "format": fmt,
 #         "merge_output_format": "mp4",
-#         "prefer_ffmpeg": True,
-#         "http_headers": http_headers,
-#         "retries": 10,
-#         "fragment_retries": 10,
-#         "retry_sleep_functions": {
-#             "http": "exponential_backoff",
-#             "fragment": "exponential_backoff",
-#         },
-#         "concurrent_fragment_downloads": 1,  # prevents Windows file handle issues
-#         "skip_unavailable_fragments": True,
-#         "geo_bypass": True,
-#         "geo_bypass_country": "US",
-#         # Force a stable YouTube client to reduce 403s due to odd signatures:
-#         "extractor_args": {
-#             "youtube": {
-#                 "player_client": ["web"],
-#                 # Keep DASH manifest; we already exclude HLS by format filter.
-#                 "include_hls_manifest": ["no"],
-#             }
-#         },
-#         **_ffmpeg_location_opts(),
+#         "outtmpl": os.path.join(output_dir, f"{video_id}_video_{quality.lower()}.%(ext)s"),
+#         "postprocessors": [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}],
 #     }
 
-#     if cookies_from_browser:
-#         base_opts["cookiesfrombrowser"] = (cookies_from_browser,)
-#     if cookies_file and Path(cookies_file).exists():
-#         base_opts["cookiefile"] = cookies_file
-
-#     # Try primary attempt; if it fails with 403, fallback to a very safe format.
-#     try:
-#         with yt_dlp.YoutubeDL(base_opts) as ydl:
-#             info = ydl.extract_info(_youtube_url(video_id), download=True)
-#     except Exception as e:
-#         # Fallback to progressive MP4 only (no mux), excluding HLS entirely.
-#         fallback_fmt = (
-#             f"best[ext=mp4][protocol!=m3u8][protocol!=dash][height<={height}]"
-#             f"/best[ext=mp4][protocol!=m3u8][height<={height}]"
-#             f"/best[ext=mp4][height<={height}]"
-#         )
-#         fb_opts = dict(base_opts)
-#         fb_opts["format"] = fallback_fmt
-#         fb_opts["postprocessors"] = [
-#             {"key": "FFmpegVideoConvertor", "preferedformat": "mp4"},
-#             {"key": "FFmpegMetadata"},
-#         ]
-#         with yt_dlp.YoutubeDL(fb_opts) as ydl:
-#             info = ydl.extract_info(_youtube_url(video_id), download=True)
-
-#     final_path = _finalize_path(output_dir, f"{video_id}_video_{quality}.mp4")
-#     if final_path.exists() and final_path.stat().st_size > 0:
-#         return str(final_path)
-
-#     # Resolve alternative names produced by yt-dlp
-#     for p in Path(output_dir).glob(f"{video_id}_video_{quality}*.mp4"):
-#         if p.is_file() and p.stat().st_size > 0:
-#             return str(p.resolve())
-
-#     fname = info.get("_filename")
-#     if fname:
-#         p = Path(fname)
-#         if p.suffix.lower() != ".mp4":
-#             p = p.with_suffix(".mp4")
-#         if p.exists() and p.stat().st_size > 0:
-#             return str(p.resolve())
-
-#     raise RuntimeError("Video file was not produced")
-
-
-def download_video_with_ytdlp(video_id: str, quality: str, output_dir: str) -> str:
-    """
-    Downloads MP4 video at the requested quality (1080p/720p/480p/360p).
-    """
-    fmt_map = {
-        "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
-        "720p":  "bestvideo[height<=720]+bestaudio/best[height<=720]",
-        "480p":  "bestvideo[height<=480]+bestaudio/best[height<=480]",
-        "360p":  "bestvideo[height<=360]+bestaudio/best[height<=360]",
-    }
-    fmt = fmt_map.get(quality.lower(), fmt_map["720p"])
-
-    base_opts = _common_ydl_opts(tmp_dir=output_dir)
-    ydl_opts = {
-        **base_opts,
-        "format": fmt,
-        "merge_output_format": "mp4",
-        "outtmpl": os.path.join(output_dir, f"{video_id}_video_{quality.lower()}.%(ext)s"),
-        "postprocessors": [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}],
-    }
-
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        path = os.path.join(output_dir, f"{video_id}_video_{quality.lower()}.mp4")
-        return path
+#     url = f"https://www.youtube.com/watch?v={video_id}"
+#     with YoutubeDL(ydl_opts) as ydl:
+#         info = ydl.extract_info(url, download=True)
+#         path = os.path.join(output_dir, f"{video_id}_video_{quality.lower()}.mp4")
+#         return path
 
