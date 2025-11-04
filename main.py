@@ -192,11 +192,12 @@ DEV_CSP = None
 # PROD_CSP = (
 #     "default-src 'self'; "
 #     "img-src 'self' data: blob:; "
-#     "media-src 'self' data: blob; "
+#     "media-src 'self' data: blob:; "
 #     "font-src 'self' data:; "
 #     "style-src 'self' 'unsafe-inline'; "
 #     "script-src 'self'; "
-#     "connect-src 'self' https://api.stripe.com https://youtube-trans-downloader-api.onrender.com; "
+#     # allow both your Cloudflare fronted API AND the Render URL (for testing/fallback)
+#     "connect-src 'self' https://api.onetechly.com https://youtube-trans-downloader-api.onrender.com https://api.stripe.com; "
 #     "frame-ancestors 'none'; "
 #     "base-uri 'none'; "
 # )
@@ -204,12 +205,11 @@ DEV_CSP = None
 PROD_CSP = (
     "default-src 'self'; "
     "img-src 'self' data: blob:; "
-    "media-src 'self' data: blob:; "
+    "media-src 'self' data: blob; "
     "font-src 'self' data:; "
     "style-src 'self' 'unsafe-inline'; "
     "script-src 'self'; "
-    # allow both your Cloudflare fronted API AND the Render URL (for testing/fallback)
-    "connect-src 'self' https://api.onetechly.com https://youtube-trans-downloader-api.onrender.com https://api.stripe.com; "
+    "connect-src 'self' https://api.onetechly.com https://api.stripe.com; "
     "frame-ancestors 'none'; "
     "base-uri 'none'; "
 )
@@ -279,6 +279,9 @@ PUBLIC_ORIGINS = [
     "https://www.onetechly.com",
     "https://api.onetechly.com",   # add this
 ]
+
+# PUBLIC_ORIGINS = ["https://onetechly.com", "https://www.onetechly.com"]
+
 
 DEV_ORIGINS = [
     "http://localhost:3000",
@@ -1669,7 +1672,17 @@ def health():
         },
         "downloads_path": str(DOWNLOADS_DIR),
     }
+    
+#------------------
+@app.get("/health")
+def health_get():
+    return {"status": "ok"}
 
+@app.head("/health")
+def health_head():
+    # return 200 with no body
+    return Response(status_code=200)
+#------ Newly added------------------
 @app.get("/debug/users")
 def debug_users(db: Session = Depends(get_db)):
     if os.getenv("ENVIRONMENT", "development") != "development":
