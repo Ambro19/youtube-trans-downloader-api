@@ -18,6 +18,30 @@ logger = logging.getLogger("youtube_trans_downloader")
 
 #------------------- Newly Added functions ------------
 
+def _mp4_merge_fmt() -> str:
+    # Prefer mp4 video + m4a audio; fall back to best single file.
+    return "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b"
+
+
+def _safe_outtmpl(output_dir: str, stem: str, ext_placeholder: str = "%(ext)s"):
+    # Windows-safe filenames + keep proper title
+    return {
+        "default": os.path.join(
+            output_dir,
+            f"%(title).200B [%(id)s].{ext_placeholder}"
+        )
+    }
+# def _outtmpl(output_dir: str) -> Dict[str, str]:
+#     # Title + ID + height; Windows-safe; keeps original ext after remux
+#     # .200B caps long titles safely
+#     return {
+#         'default': os.path.join(
+#             output_dir, '%(title).200B [%(id)s]_%(height)sp.%(ext)s'
+#         )
+#     }    
+
+
+
 def _norm_youtube_url(video_id_or_url: str) -> str:
     # Accept ID or any YT URL (watch/shorts/youtu.be)
     s = video_id_or_url.strip()
@@ -30,14 +54,6 @@ def _ensure_ffmpeg_location() -> Optional[str]:
     # Otherwise return None and make sure FFmpeg is on PATH
     return None
 
-def _outtmpl(output_dir: str) -> Dict[str, str]:
-    # Title + ID + height; Windows-safe; keeps original ext after remux
-    # .200B caps long titles safely
-    return {
-        'default': os.path.join(
-            output_dir, '%(title).200B [%(id)s]_%(height)sp.%(ext)s'
-        )
-    }
 
 def _common_ydl_opts(output_dir: str) -> Dict:
     return {
@@ -77,38 +93,6 @@ def _common_ydl_opts(output_dir: str) -> Dict:
         **({'ffmpeg_location': _ensure_ffmpeg_location()} if _ensure_ffmpeg_location() else {})
     }
 #-------------------- End of - Newly Added functions -------------
-
-# def _common_ydl_opts(tmp_dir: str | None = None) -> dict:
-#     """Base yt-dlp options shared by audio/video flows."""
-#     prefer_ipv4 = str(os.getenv("YTDLP_BIND_IPV4", "1")).lower() in ("1", "true", "yes")
-#     headers = {
-#         # Keep a modern UA; some CDNs 403 on unknown agents
-#         "User-Agent": (
-#             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-#             "AppleWebKit/537.36 (KHTML, like Gecko) "
-#             "Chrome/119.0 Safari/537.36"
-#         ),
-#         "Accept-Language": "en-US,en;q=0.9",
-#     }
-#     opts = {
-#         "quiet": True,
-#         "noprogress": True,
-#         "concurrent_fragment_downloads": 4,
-#         "retries": 3,
-#         "fragment_retries": 10,
-#         "retry_sleep": "1,2,4,8",
-#         "http_headers": headers,
-#         "nocheckcertificate": True,
-#         # IPv4 preference to dodge some ISP/IPv6 routing/CDN blocks
-#         "prefer_ipv6": False if prefer_ipv4 else None,
-#         "source_address": "0.0.0.0" if prefer_ipv4 else None,
-#         # Temp/work dir
-#         "paths": {"home": tmp_dir} if tmp_dir else None,
-#     }
-#     # Remove None values to keep yt-dlp happy
-#     return {k: v for k, v in opts.items() if v is not None}
-
-
 
 # -----------------------
 # ID / validation helpers
@@ -324,121 +308,124 @@ def _finalize_path(output_dir: str, filename: str) -> Path:
     _ensure_dir(base)
     return base / filename
 
-def download_video_with_ytdlp(video_id_or_url: str, quality: str, output_dir: str) -> str:
+
+def download_audio_with_ytdlp(video_id_or_url: str, *, output_dir: str) -> str:
     """
-    quality: '1080p' | '720p' | '480p' | '360p'
-    Returns final absolute file path.
-    """
-    url = _norm_youtube_url(video_id_or_url)
-    q = re.sub(r'[^0-9]', '', quality or '')
-    height = int(q) if q.isdigit() else None
-
-    fmt = _common_ydl_opts(output_dir)
-    if height:
-        # prefer requested height, then nearest lower, still merging with audio
-        fmt['format'] = (
-            f"bv*[height={height}][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
-            f"bv*[height<={height}][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
-            "bv*+ba/best"
-        )
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    with YoutubeDL(fmt) as ydl:
-        info = ydl.extract_info(url, download=True)
-        # yt-dlp returns final filename here (after remux/merge)
-        fname = ydl.prepare_filename(info)
-        # after remux it might have changed extension to mp4
-        base, _ = os.path.splitext(fname)
-        mp4 = base + '.mp4'
-        return mp4 if os.path.exists(mp4) else fname
-
-def download_audio_with_ytdlp(video_id_or_url: str, output_dir: str) -> str:
-    """
-    Extracts audio to MP3 (with correct title in filename).
+    Extract audio to MP3 with proper title and embedded thumbnail/metadata.
+    `output_dir` is keyword-only to avoid double-binding errors.
     """
     url = _norm_youtube_url(video_id_or_url)
+
     opts = _common_ydl_opts(output_dir)
     opts.update({
-        'format': 'bestaudio/best',
-        'postprocessors': [
-            {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'},
-            {'key': 'FFmpegMetadata'},
-            {'key': 'EmbedThumbnail', 'already_have_thumbnail': False},
+        "format": "bestaudio/best",
+        "prefer_ffmpeg": True,
+        "postprocessors": [
+            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"},
+            {"key": "FFmpegMetadata"},
+            {"key": "EmbedThumbnail", "already_have_thumbnail": False},
         ],
-        'outtmpl': {
-            'default': os.path.join(output_dir, '%(title).200B [%(id)s].%(ext)s')
-        }
+        # write thumbnail so EmbedThumbnail has something to embed
+        "writethumbnail": True,
+        "embedthumbnail": True,
+        "addmetadata": True,
+        "windowsfilenames": True,
+        "outtmpl": _safe_outtmpl(output_dir, "%(title)s", ext_placeholder="mp3"),
     })
 
     os.makedirs(output_dir, exist_ok=True)
     with YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        # yt-dlp tells us the actual filename after audio extraction
-        return ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
-#----------------------
+        # yt-dlp returns source name; but postprocessor changes ext to .mp3
+        base = ydl.prepare_filename(info)
+        if base.lower().endswith(".webm") or base.lower().endswith(".m4a"):
+            base = base.rsplit(".", 1)[0]
+        return base.rsplit(".", 1)[0] + ".mp3"
 
-# def download_audio_with_ytdlp(video_id: str, quality: str, output_dir: str) -> str:
-#     """
-#     Extracts audio as MP3 using FFmpegExtractAudio (the robust, standard PP).
-#     """
-#     abr_map = {"low": "64", "medium": "128", "high": "192"}
-#     abr = abr_map.get(quality.lower(), "128")
-#     base_opts = _common_ydl_opts(tmp_dir=output_dir)
 
-#     ydl_opts = {
-#         **base_opts,
-#         "format": "bestaudio/best",
-#         "outtmpl": os.path.join(output_dir, f"{video_id}_audio_%(abr)sk.%(ext)s"),
-#         "postprocessors": [
-#             {
-#                 "key": "FFmpegExtractAudio",
-#                 "preferredcodec": "mp3",
-#                 "preferredquality": abr,
-#             }
+def download_video_with_ytdlp(video_id_or_url: str, *, output_dir: str, quality: str = "1080p") -> str:
+    """
+    Download MP4 with audio merged, correct title in filename.
+    """
+    url = _norm_youtube_url(video_id_or_url)
+
+    # quality hint: we’ll let yt-dlp pick best <= target height
+    height = {"1080p": 1080, "720p": 720, "480p": 480, "360p": 360}.get(quality, 1080)
+    fmt = f"bv*[height<={height}][ext=mp4]+ba[ext=m4a]/b[ext=mp4]/{_mp4_merge_fmt()}"
+
+    opts = _common_ydl_opts(output_dir)
+    opts.update({
+        "format": fmt,
+        "merge_output_format": "mp4",   # <-- ensure final is MP4 with audio
+        "prefer_ffmpeg": True,
+        "windowsfilenames": True,
+        "outtmpl": _safe_outtmpl(output_dir, "%(title)s"),
+    })
+
+    os.makedirs(output_dir, exist_ok=True)
+    with YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        return ydl.prepare_filename(info)  # will be .mp4
+
+#-------------------------------------------------------------
+# IMPORTANT: DO NOT DELETE. IT WORKED FINE
+# -----------------------------------------
+
+# def download_video_with_ytdlp(video_id_or_url: str, quality: str, output_dir: str) -> str:
+#     """
+#     quality: '1080p' | '720p' | '480p' | '360p'
+#     Returns final absolute file path.
+#     """
+#     url = _norm_youtube_url(video_id_or_url)
+#     q = re.sub(r'[^0-9]', '', quality or '')
+#     height = int(q) if q.isdigit() else None
+
+#     fmt = _common_ydl_opts(output_dir)
+#     if height:
+#         # prefer requested height, then nearest lower, still merging with audio
+#         fmt['format'] = (
+#             f"bv*[height={height}][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
+#             f"bv*[height<={height}][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/"
+#             "bv*+ba/best"
+#         )
+
+#     os.makedirs(output_dir, exist_ok=True)
+
+#     with YoutubeDL(fmt) as ydl:
+#         info = ydl.extract_info(url, download=True)
+#         # yt-dlp returns final filename here (after remux/merge)
+#         fname = ydl.prepare_filename(info)
+#         # after remux it might have changed extension to mp4
+#         base, _ = os.path.splitext(fname)
+#         mp4 = base + '.mp4'
+#         return mp4 if os.path.exists(mp4) else fname
+#---------------------------------------------------------------
+
+# IMPORTANT: DO NOT DELETE. IT WORKED FINE
+# -----------------------------------------
+
+# def download_audio_with_ytdlp(video_id_or_url: str, output_dir: str) -> str:
+#     """
+#     Extracts audio to MP3 (with correct title in filename).
+#     """
+#     url = _norm_youtube_url(video_id_or_url)
+#     opts = _common_ydl_opts(output_dir)
+#     opts.update({
+#         'format': 'bestaudio/best',
+#         'postprocessors': [
+#             {'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'},
+#             {'key': 'FFmpegMetadata'},
+#             {'key': 'EmbedThumbnail', 'already_have_thumbnail': False},
 #         ],
-#         # Better container probing
-#         "postprocessor_args": ["-vn"],
-#     }
+#         'outtmpl': {
+#             'default': os.path.join(output_dir, '%(title).200B [%(id)s].%(ext)s')
+#         }
+#     })
 
-#     url = f"https://www.youtube.com/watch?v={video_id}"
-#     with YoutubeDL(ydl_opts) as ydl:
+#     os.makedirs(output_dir, exist_ok=True)
+#     with YoutubeDL(opts) as ydl:
 #         info = ydl.extract_info(url, download=True)
-#         # yt-dlp returns output paths in info when postprocessors run
-#         # We normalize to our deterministic file name:
-#         path = os.path.join(output_dir, f"{video_id}_audio_{abr}k.mp3")
-#         if not os.path.exists(path):
-#             # fallback: find the first created file
-#             candidates = [f for f in os.listdir(output_dir) if f.startswith(f"{video_id}_audio_") and f.endswith(".mp3")]
-#             if candidates:
-#                 path = os.path.join(output_dir, candidates[0])
-#         return path
-
-
-# def download_video_with_ytdlp(video_id: str, quality: str, output_dir: str) -> str:
-#     """
-#     Downloads MP4 video at the requested quality (1080p/720p/480p/360p).
-#     """
-#     fmt_map = {
-#         "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
-#         "720p":  "bestvideo[height<=720]+bestaudio/best[height<=720]",
-#         "480p":  "bestvideo[height<=480]+bestaudio/best[height<=480]",
-#         "360p":  "bestvideo[height<=360]+bestaudio/best[height<=360]",
-#     }
-#     fmt = fmt_map.get(quality.lower(), fmt_map["720p"])
-
-#     base_opts = _common_ydl_opts(tmp_dir=output_dir)
-#     ydl_opts = {
-#         **base_opts,
-#         "format": fmt,
-#         "merge_output_format": "mp4",
-#         "outtmpl": os.path.join(output_dir, f"{video_id}_video_{quality.lower()}.%(ext)s"),
-#         "postprocessors": [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}],
-#     }
-
-#     url = f"https://www.youtube.com/watch?v={video_id}"
-#     with YoutubeDL(ydl_opts) as ydl:
-#         info = ydl.extract_info(url, download=True)
-#         path = os.path.join(output_dir, f"{video_id}_video_{quality.lower()}.mp4")
-#         return path
+#         # yt-dlp tells us the actual filename after audio extraction
+#         return ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
+# #----------------------
 

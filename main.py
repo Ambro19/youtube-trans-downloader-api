@@ -95,6 +95,7 @@ except Exception:
 
 from subscription_sync import sync_user_subscription_from_stripe
 from youtube_transcript_api import YouTubeTranscriptApi
+
 from transcript_utils import (
     get_transcript_with_ytdlp,
     download_audio_with_ytdlp,
@@ -187,17 +188,33 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 DEV_CSP = None
+
+# PROD_CSP = (
+#     "default-src 'self'; "
+#     "img-src 'self' data: blob:; "
+#     "media-src 'self' data: blob; "
+#     "font-src 'self' data:; "
+#     "style-src 'self' 'unsafe-inline'; "
+#     "script-src 'self'; "
+#     "connect-src 'self' https://api.stripe.com https://youtube-trans-downloader-api.onrender.com; "
+#     "frame-ancestors 'none'; "
+#     "base-uri 'none'; "
+# )
+
 PROD_CSP = (
     "default-src 'self'; "
     "img-src 'self' data: blob:; "
-    "media-src 'self' data: blob; "
+    "media-src 'self' data: blob:; "
     "font-src 'self' data:; "
     "style-src 'self' 'unsafe-inline'; "
     "script-src 'self'; "
-    "connect-src 'self' https://api.stripe.com https://youtube-trans-downloader-api.onrender.com; "
+    # allow both your Cloudflare fronted API AND the Render URL (for testing/fallback)
+    "connect-src 'self' https://api.onetechly.com https://youtube-trans-downloader-api.onrender.com https://api.stripe.com; "
     "frame-ancestors 'none'; "
     "base-uri 'none'; "
 )
+
+
 app.add_middleware(
     SecurityHeadersMiddleware,
     csp=(PROD_CSP if IS_PROD else DEV_CSP),
@@ -260,6 +277,7 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 PUBLIC_ORIGINS = [
     "https://onetechly.com",
     "https://www.onetechly.com",
+    "https://api.onetechly.com",   # add this
 ]
 
 DEV_ORIGINS = [
