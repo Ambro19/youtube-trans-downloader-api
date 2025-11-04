@@ -192,12 +192,11 @@ DEV_CSP = None
 # PROD_CSP = (
 #     "default-src 'self'; "
 #     "img-src 'self' data: blob:; "
-#     "media-src 'self' data: blob:; "
+#     "media-src 'self' data: blob; "
 #     "font-src 'self' data:; "
 #     "style-src 'self' 'unsafe-inline'; "
 #     "script-src 'self'; "
-#     # allow both your Cloudflare fronted API AND the Render URL (for testing/fallback)
-#     "connect-src 'self' https://api.onetechly.com https://youtube-trans-downloader-api.onrender.com https://api.stripe.com; "
+#     "connect-src 'self' https://api.onetechly.com https://api.stripe.com; "
 #     "frame-ancestors 'none'; "
 #     "base-uri 'none'; "
 # )
@@ -205,16 +204,17 @@ DEV_CSP = None
 PROD_CSP = (
     "default-src 'self'; "
     "img-src 'self' data: blob:; "
-    "media-src 'self' data: blob; "
+    "media-src 'self' data: blob:; "
     "font-src 'self' data:; "
     "style-src 'self' 'unsafe-inline'; "
-    "script-src 'self'; "
-    "connect-src 'self' https://api.onetechly.com https://api.stripe.com; "
+    # ✅ allow both Render subdomain and your custom API domain
+    "connect-src 'self' https://api.onetechly.com https://youtube-trans-downloader-api.onrender.com https://api.stripe.com; "
+    # (optional, if Stripe Elements/Checkout script is used)
+    "script-src 'self' https://js.stripe.com; "
+    "frame-src https://js.stripe.com; "
     "frame-ancestors 'none'; "
     "base-uri 'none'; "
 )
-
-
 app.add_middleware(
     SecurityHeadersMiddleware,
     csp=(PROD_CSP if IS_PROD else DEV_CSP),
@@ -226,6 +226,18 @@ app.add_middleware(
     server_header="YCD",
     apply_csp_to_api_only=True,
 )
+
+# app.add_middleware(
+#     SecurityHeadersMiddleware,
+#     csp=(PROD_CSP if IS_PROD else DEV_CSP),
+#     hsts=IS_PROD,
+#     hsts_max_age=63072000,
+#     referrer_policy="no-referrer",
+#     x_frame_options="DENY",
+#     permissions_policy="geolocation=(), microphone=(), camera=()",
+#     server_header="YCD",
+#     apply_csp_to_api_only=True,
+# )
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: ASGIApp) -> None:
