@@ -35,7 +35,7 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from pydantic import BaseModel, EmailStr
 
 from email_utils import send_password_reset_email
-from auth_utils import get_password_hash, verify_password #Newly added
+from auth_utils import get_password_hash, verify_password, validate_password_strength
 
 try:
     from youtube_transcript_api import (
@@ -348,9 +348,6 @@ ALGORITHM = os.getenv("ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-def verify_password(plain: str, hashed: str) -> bool: return pwd_context.verify(plain, hashed)
-def get_password_hash(pw: str) -> str: return pwd_context.hash(pw)
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = dict(data)
