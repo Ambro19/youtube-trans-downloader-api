@@ -35,6 +35,7 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from pydantic import BaseModel, EmailStr
 
 from email_utils import send_password_reset_email
+from auth_utils import get_password_hash, verify_password #Newly added
 
 try:
     from youtube_transcript_api import (
