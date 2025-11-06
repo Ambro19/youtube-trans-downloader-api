@@ -1,92 +1,55 @@
-# =================================================================================================
-# auth_utils.py - Production-Ready Password Hashing Module
-# Fixes bcrypt 72-byte limit issue for production deployment
-# =================================================================================================
-
 import hashlib
-from passlib.context import CryptContext
-
-# Initialize password context with bcrypt
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+import bcrypt
 
 
 def get_password_hash(password: str) -> str:
-    """
-    Hash password with bcrypt, respecting 72-byte limit.
-    
-    bcrypt has a hard limit of 72 bytes for password length. This function
-    handles passwords of any length by pre-hashing long passwords with SHA-256.
-    
-    Args:
-        password (str): Plain text password to hash
-        
-    Returns:
-        str: Bcrypt hashed password
-    """
+    """Hash password with bcrypt, respecting 72-byte limit."""
     if not password:
         raise ValueError("Password cannot be empty")
     
-    # Convert to bytes for length checking
     password_bytes = password.encode('utf-8')
     
-    # If password exceeds bcrypt's 72-byte limit, pre-hash it
+    # Pre-hash if > 72 bytes
     if len(password_bytes) > 72:
-        # SHA-256 produces a consistent 64-character hex string
-        password_digest = hashlib.sha256(password_bytes).hexdigest()
-        return pwd_context.hash(password_digest)
+        password_to_hash = hashlib.sha256(password_bytes).hexdigest()
     else:
-        # Standard bcrypt for passwords within limit
-        return pwd_context.hash(password)
+        password_to_hash = password
+    
+    # Use bcrypt directly (not passlib)
+    hashed = bcrypt.hashpw(password_to_hash.encode('utf-8'), bcrypt.gensalt(rounds=12))
+    return hashed.decode('utf-8')
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """
-    Verify a password against its bcrypt hash.
-    
-    Args:
-        plain_password (str): Plain text password to verify
-        hashed_password (str): Bcrypt hash to verify against
-        
-    Returns:
-        bool: True if password matches hash, False otherwise
-    """
+    """Verify password against hash."""
     if not plain_password or not hashed_password:
         return False
     
     try:
         password_bytes = plain_password.encode('utf-8')
         
-        # Apply same pre-hash logic if password is too long
         if len(password_bytes) > 72:
-            password_digest = hashlib.sha256(password_bytes).hexdigest()
-            return pwd_context.verify(password_digest, hashed_password)
+            password_to_check = hashlib.sha256(password_bytes).hexdigest()
         else:
-            return pwd_context.verify(plain_password, hashed_password)
-            
+            password_to_check = plain_password
+        
+        return bcrypt.checkpw(
+            password_to_check.encode('utf-8'),
+            hashed_password.encode('utf-8')
+        )
     except Exception as e:
         print(f"Password verification error: {e}")
         return False
 
 
 def validate_password_strength(password: str) -> tuple:
-    """
-    Validate password meets security requirements.
-    
-    Args:
-        password (str): Password to validate
-        
-    Returns:
-        tuple: (is_valid, error_message)
-    """
+    """Validate password strength."""
     if not password:
         return False, "Password cannot be empty"
-    
     if len(password) < 8:
         return False, "Password must be at least 8 characters long"
-    
     if len(password) > 128:
         return False, "Password is too long (maximum 128 characters)"
-    
     return True, ""
 
 
