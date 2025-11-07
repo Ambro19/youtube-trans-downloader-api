@@ -292,11 +292,7 @@ def get_transcript_smart(
             texts = [_get_segment_value(s, "text", "").replace("\n", " ") for s in segments]
             return _clean_plain_blocks(texts)
         return _format_timestamped(segments)
-    # Strategy 2: Try yt-dlp fallback (now supports SRT/VTT!)
-logger.info(f"Trying yt-dlp fallback for {video_id} (format: {fmt})")
-ytdlp_result = try_ytdlp_fallback(video_id, clean=clean, fmt=fmt)  # ← Pass fmt!
 
-    
     # Strategy 2: Try yt-dlp fallback (more reliable on cloud providers)
     # Note: Try yt-dlp fallback (now supports SRT/VTT!)
     if fmt not in ("srt", "vtt"):
