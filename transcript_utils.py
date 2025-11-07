@@ -188,87 +188,142 @@ def _get_segment_value(seg: Any, key: str, default: Any = None) -> Any:
         return seg.get(key, default)
     return getattr(seg, key, default)
 
-
-def get_transcript_with_ytdlp(video_id: str, clean: bool = True) -> Optional[str]:
+def get_transcript_with_ytdlp(video_id: str, clean: bool = True, fmt: str = None) -> str:
     """
-    Best-effort transcript retrieval returning **plain text**.
-    Uses youtube_transcript_api; kept here so main can call a single place.
+    Get transcript using yt-dlp as fallback.
+    Now supports SRT and VTT format extraction!
     """
     try:
-        from youtube_transcript_api import (
-            YouTubeTranscriptApi,
-            NoTranscriptFound,
-            TranscriptsDisabled,
-        )
+        import yt_dlp
+        import tempfile
+        import os
+        from pathlib import Path
+        import logging
+        
+        logger = logging.getLogger("youtube_trans_downloader")
+        
+        # If SRT or VTT format requested, extract subtitles directly
+        if fmt in ('srt', 'vtt'):
+            with tempfile.TemporaryDirectory() as temp_dir:
+                output_template = os.path.join(temp_dir, '%(id)s.%(ext)s')
+                
+                ydl_opts = {
+                    'skip_download': True,
+                    'writesubtitles': True,
+                    'writeautomaticsub': True,
+                    'subtitlesformat': fmt,  # Request SRT or VTT
+                    'subtitleslangs': ['en', 'en-US', 'en-GB', 'en-CA'],
+                    'outtmpl': output_template,
+                    'quiet': True,
+                    'no_warnings': True,
+                }
+                
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        ydl.download([f'https://www.youtube.com/watch?v={video_id}'])
+                    
+                    # Find the subtitle file (try multiple patterns)
+                    subtitle_files = list(Path(temp_dir).glob(f'{video_id}*.{fmt}'))
+                    
+                    if subtitle_files:
+                        with open(subtitle_files[0], 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        logger.info(f"✅ yt-dlp extracted {fmt.upper()} subtitles for {video_id}")
+                        return content
+                    else:
+                        logger.warning(f"yt-dlp: No {fmt} subtitles found for {video_id}")
+                        return None
+                        
+                except Exception as e:
+                    logger.debug(f"yt-dlp subtitle extraction failed: {e}")
+                    return None
+        
+        # ... keep the rest of your existing plain text extraction code ...
+        
     except Exception as e:
-        logger.warning("youtube_transcript_api not installed: %s", e)
+        logger.error(f"yt-dlp fallback failed for {video_id}: {e}")
         return None
+        
+# def get_transcript_with_ytdlp(video_id: str, clean: bool = True) -> Optional[str]:
+#     """
+#     Best-effort transcript retrieval returning **plain text**.
+#     Uses youtube_transcript_api; kept here so main can call a single place.
+#     """
+#     try:
+#         from youtube_transcript_api import (
+#             YouTubeTranscriptApi,
+#             NoTranscriptFound,
+#             TranscriptsDisabled,
+#         )
+#     except Exception as e:
+#         logger.warning("youtube_transcript_api not installed: %s", e)
+#         return None
 
-    try:
-        listing = YouTubeTranscriptApi.list_transcripts(video_id)
+#     try:
+#         listing = YouTubeTranscriptApi.list_transcripts(video_id)
 
-        # 1) Authored English variants
-        for code in _EN_PRIORITY:
-            try:
-                t = listing.find_transcript([code])
-                segs = t.fetch()
-                texts = [
-                    _get_segment_value(s, "text", "").replace("\n", " ")
-                    for s in segs
-                    if _get_segment_value(s, "text", "")
-                ]
-                return _clean_plain_blocks(texts) if clean else "\n".join(texts)
-            except NoTranscriptFound:
-                continue
-            except Exception:
-                continue
+#         # 1) Authored English variants
+#         for code in _EN_PRIORITY:
+#             try:
+#                 t = listing.find_transcript([code])
+#                 segs = t.fetch()
+#                 texts = [
+#                     _get_segment_value(s, "text", "").replace("\n", " ")
+#                     for s in segs
+#                     if _get_segment_value(s, "text", "")
+#                 ]
+#                 return _clean_plain_blocks(texts) if clean else "\n".join(texts)
+#             except NoTranscriptFound:
+#                 continue
+#             except Exception:
+#                 continue
 
-        # 2) Generated English
-        try:
-            t = listing.find_generated_transcript(_EN_PRIORITY)
-            segs = t.fetch()
-            texts = [
-                _get_segment_value(s, "text", "").replace("\n", " ")
-                for s in segs
-                if _get_segment_value(s, "text", "")
-            ]
-            return _clean_plain_blocks(texts) if clean else "\n".join(texts)
-        except NoTranscriptFound:
-            pass
-        except Exception:
-            pass
+#         # 2) Generated English
+#         try:
+#             t = listing.find_generated_transcript(_EN_PRIORITY)
+#             segs = t.fetch()
+#             texts = [
+#                 _get_segment_value(s, "text", "").replace("\n", " ")
+#                 for s in segs
+#                 if _get_segment_value(s, "text", "")
+#             ]
+#             return _clean_plain_blocks(texts) if clean else "\n".join(texts)
+#         except NoTranscriptFound:
+#             pass
+#         except Exception:
+#             pass
 
-        # 3) Translate to en
-        for t in listing:
-            try:
-                segs = t.translate("en").fetch()
-                texts = [
-                    _get_segment_value(s, "text", "").replace("\n", " ")
-                    for s in segs
-                    if _get_segment_value(s, "text", "")
-                ]
-                return _clean_plain_blocks(texts) if clean else "\n".join(texts)
-            except Exception:
-                continue
+#         # 3) Translate to en
+#         for t in listing:
+#             try:
+#                 segs = t.translate("en").fetch()
+#                 texts = [
+#                     _get_segment_value(s, "text", "").replace("\n", " ")
+#                     for s in segs
+#                     if _get_segment_value(s, "text", "")
+#                 ]
+#                 return _clean_plain_blocks(texts) if clean else "\n".join(texts)
+#             except Exception:
+#                 continue
 
-        # 4) Direct fallback
-        try:
-            segs = YouTubeTranscriptApi.get_transcript(video_id, languages=_EN_PRIORITY)
-            texts = [
-                _get_segment_value(s, "text", "").replace("\n", " ")
-                for s in segs
-                if _get_segment_value(s, "text", "")
-            ]
-            return _clean_plain_blocks(texts) if clean else "\n".join(texts)
-        except Exception:
-            return None
+#         # 4) Direct fallback
+#         try:
+#             segs = YouTubeTranscriptApi.get_transcript(video_id, languages=_EN_PRIORITY)
+#             texts = [
+#                 _get_segment_value(s, "text", "").replace("\n", " ")
+#                 for s in segs
+#                 if _get_segment_value(s, "text", "")
+#             ]
+#             return _clean_plain_blocks(texts) if clean else "\n".join(texts)
+#         except Exception:
+#             return None
 
-    except TranscriptsDisabled:
-        logger.info("Transcripts disabled for %s", video_id)
-        return None
-    except Exception as e:
-        logger.debug("Transcript retrieval failed for %s: %s", video_id, e)
-        return None
+#     except TranscriptsDisabled:
+#         logger.info("Transcripts disabled for %s", video_id)
+#         return None
+#     except Exception as e:
+#         logger.debug("Transcript retrieval failed for %s: %s", video_id, e)
+#         return None
 
 
 # -----------------------

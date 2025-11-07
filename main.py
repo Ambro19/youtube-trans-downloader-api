@@ -188,17 +188,6 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 DEV_CSP = None
 
-# PROD_CSP = (
-#     "default-src 'self'; "
-#     "img-src 'self' data: blob:; "
-#     "media-src 'self' data: blob; "
-#     "font-src 'self' data:; "
-#     "style-src 'self' 'unsafe-inline'; "
-#     "script-src 'self'; "
-#     "connect-src 'self' https://api.onetechly.com https://api.stripe.com; "
-#     "frame-ancestors 'none'; "
-#     "base-uri 'none'; "
-# )
 
 PROD_CSP = (
     "default-src 'self'; "
@@ -279,9 +268,6 @@ PUBLIC_ORIGINS = [
     "https://www.onetechly.com",
     "https://api.onetechly.com",   # add this
 ]
-
-# PUBLIC_ORIGINS = ["https://onetechly.com", "https://www.onetechly.com"]
-
 
 DEV_ORIGINS = [
     "http://localhost:3000",
@@ -1314,6 +1300,66 @@ def _touch_now(p: Path):
     except Exception as e:
         logger.warning("Could not set mtime: %s", e)
 
+# @app.post("/download_transcript")
+# @app.post("/download_transcript/")
+# def download_transcript(req: TranscriptRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+#     """
+#     Download transcript with fixed error handling.
+#     Now properly handles FetchedTranscriptSnippet objects.
+#     """
+#     ensure_monthly_reset_and_tier(db, user)
+#     start = time.time()
+#     vid = extract_youtube_video_id(req.youtube_id)
+#     if not vid or len(vid) != 11: 
+#         raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+#     if not check_internet(): 
+#         raise HTTPException(status_code=503, detail="No internet connection available.")
+
+#     if req.format in ['srt', 'vtt']:
+#         usage_key = "unclean_transcripts"
+#         file_format = req.format
+#     elif req.clean_transcript:
+#         usage_key = "clean_transcripts"
+#         file_format = "txt"
+#     else:
+#         usage_key = "unclean_transcripts"
+#         file_format = "txt"
+        
+#     ok, used, limit = check_usage_limit(user, usage_key)
+#     if not ok:
+#         type_name = "SRT transcript" if req.format == 'srt' else "VTT transcript" if req.format == 'vtt' else "clean transcript" if req.clean_transcript else "timestamped transcript"
+#         raise HTTPException(status_code=403, detail=f"Monthly limit reached for {type_name} ({used}/{limit}).")
+
+#     # Get transcript using fixed function
+#     text = get_transcript_youtube_api(vid, clean=req.clean_transcript, fmt=req.format)
+#     if not text:
+#         raise HTTPException(status_code=404, detail="No transcript found for this video.")
+
+#     new_usage = increment_user_usage(db, user, usage_key)
+#     proc = time.time() - start
+#     rec = create_download_record(
+#         db=db, 
+#         user=user, 
+#         kind=usage_key, 
+#         youtube_id=vid, 
+#         file_format=file_format, 
+#         file_size=len(text), 
+#         processing_time=proc
+#     )
+    
+#     return {
+#         "transcript": text, 
+#         "youtube_id": vid, 
+#         "clean_transcript": req.clean_transcript, 
+#         "format": req.format,
+#         "processing_time": round(proc, 2), 
+#         "success": True, 
+#         "usage_updated": new_usage, 
+#         "usage_type": usage_key,
+#         "download_record_id": rec.id if rec else None, 
+#         "account": canonical_account(user)
+#     }
+
 @app.post("/download_transcript")
 @app.post("/download_transcript/")
 def download_transcript(req: TranscriptRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1344,8 +1390,33 @@ def download_transcript(req: TranscriptRequest, user: User = Depends(get_current
         type_name = "SRT transcript" if req.format == 'srt' else "VTT transcript" if req.format == 'vtt' else "clean transcript" if req.clean_transcript else "timestamped transcript"
         raise HTTPException(status_code=403, detail=f"Monthly limit reached for {type_name} ({used}/{limit}).")
 
-    # Get transcript using fixed function
-    text = get_transcript_youtube_api(vid, clean=req.clean_transcript, fmt=req.format)
+    # Get transcript with proper error handling
+    try:
+        text = get_transcript_youtube_api(vid, clean=req.clean_transcript, fmt=req.format)
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Transcript fetch failed for {vid}: {error_msg}")
+        
+        # Check if it's a cloud provider IP block
+        if "blocking" in error_msg.lower() or "cloud provider" in error_msg.lower():
+            raise HTTPException(
+                status_code=503,
+                detail="YouTube is temporarily blocking transcript access from our servers. This video may not have captions available, or please try again in a few minutes. Note: Some videos work better than others depending on YouTube's restrictions."
+            )
+        
+        # Check if no captions available
+        if "no captions" in error_msg.lower() or "not have captions" in error_msg.lower():
+            raise HTTPException(
+                status_code=404,
+                detail="This video does not have captions/transcripts available. Please try a different video."
+            )
+        
+        # Generic error
+        raise HTTPException(
+            status_code=404,
+            detail=f"Could not retrieve transcript for this video. The video may not have captions available, or YouTube may be blocking access."
+        )
+    
     if not text:
         raise HTTPException(status_code=404, detail="No transcript found for this video.")
 
@@ -1373,6 +1444,7 @@ def download_transcript(req: TranscriptRequest, user: User = Depends(get_current
         "download_record_id": rec.id if rec else None, 
         "account": canonical_account(user)
     }
+
 
 @app.post("/download_audio/")
 def download_audio(req: AudioRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):

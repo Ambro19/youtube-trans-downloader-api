@@ -207,22 +207,15 @@ def try_youtube_api_direct(video_id: str, proxies: Optional[Dict] = None) -> Opt
     
     return None
 
-
-def try_ytdlp_fallback(video_id: str, clean: bool = True) -> Optional[str]:
+def try_ytdlp_fallback(video_id: str, clean: bool = True, fmt: str = None) -> Optional[str]:
     """
     Try getting transcript using yt-dlp fallback.
-    
-    Args:
-        video_id: YouTube video ID
-        clean: Whether to return clean text
-        
-    Returns:
-        Transcript text or None if failed
+    Now supports SRT/VTT formats!
     """
     try:
         from transcript_utils import get_transcript_with_ytdlp
         
-        result = get_transcript_with_ytdlp(video_id, clean=clean)
+        result = get_transcript_with_ytdlp(video_id, clean=clean, fmt=fmt)  # ← Pass fmt!
         if result:
             logger.info(f"✅ yt-dlp fallback success for {video_id}")
             return result
@@ -230,6 +223,29 @@ def try_ytdlp_fallback(video_id: str, clean: bool = True) -> Optional[str]:
         logger.debug(f"yt-dlp fallback failed for {video_id}: {e}")
     
     return None
+
+# def try_ytdlp_fallback(video_id: str, clean: bool = True) -> Optional[str]:
+#     """
+#     Try getting transcript using yt-dlp fallback.
+    
+#     Args:
+#         video_id: YouTube video ID
+#         clean: Whether to return clean text
+        
+#     Returns:
+#         Transcript text or None if failed
+#     """
+#     try:
+#         from transcript_utils import get_transcript_with_ytdlp
+        
+#         result = get_transcript_with_ytdlp(video_id, clean=clean)
+#         if result:
+#             logger.info(f"✅ yt-dlp fallback success for {video_id}")
+#             return result
+#     except Exception as e:
+#         logger.debug(f"yt-dlp fallback failed for {video_id}: {e}")
+    
+#     return None
 
 
 def get_transcript_smart(
@@ -276,16 +292,22 @@ def get_transcript_smart(
             texts = [_get_segment_value(s, "text", "").replace("\n", " ") for s in segments]
             return _clean_plain_blocks(texts)
         return _format_timestamped(segments)
+    # Strategy 2: Try yt-dlp fallback (now supports SRT/VTT!)
+logger.info(f"Trying yt-dlp fallback for {video_id} (format: {fmt})")
+ytdlp_result = try_ytdlp_fallback(video_id, clean=clean, fmt=fmt)  # ← Pass fmt!
+
     
     # Strategy 2: Try yt-dlp fallback (more reliable on cloud providers)
-    logger.info(f"Trying yt-dlp fallback for {video_id}")
-    ytdlp_result = try_ytdlp_fallback(video_id, clean=clean)
-    
-    if ytdlp_result:
-        # yt-dlp returns plain text, so we can only return txt format
-        if fmt in ("srt", "vtt"):
-            logger.warning(f"yt-dlp doesn't support {fmt}, returning plain text")
-        return ytdlp_result
+    # Note: Try yt-dlp fallback (now supports SRT/VTT!)
+    if fmt not in ("srt", "vtt"):
+        logger.info(f"Trying yt-dlp fallback for {video_id} (format: {fmt})")
+        ytdlp_result = try_ytdlp_fallback(video_id, clean=clean, fmt=fmt)  # ← Pass fmt!
+        
+        if ytdlp_result:
+            logger.info(f"✅ yt-dlp fallback successful for {video_id}")
+            return ytdlp_result
+    else:
+    logger.debug(f"Skipping yt-dlp for {video_id} - format {fmt} not supported by yt-dlp")
     
     # Strategy 3: Try with proxies (if configured)
     if use_proxies and PROXY_LIST:
