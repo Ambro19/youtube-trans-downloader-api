@@ -303,7 +303,7 @@ def get_transcript_smart(
             logger.info(f"✅ yt-dlp fallback successful for {video_id}")
             return ytdlp_result
     else:
-    logger.debug(f"Skipping yt-dlp for {video_id} - format {fmt} not supported by yt-dlp")
+        logger.debug(f"Skipping yt-dlp for {video_id} - format {fmt} not supported by yt-dlp")
     
     # Strategy 3: Try with proxies (if configured)
     if use_proxies and PROXY_LIST:
