@@ -24,18 +24,19 @@ from fastapi.staticfiles import StaticFiles
 from passlib.context import CryptContext
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
-
 from sqlalchemy.orm import Session
 from sqlalchemy import delete as sqla_delete
 from sqlalchemy.exc import OperationalError, IntegrityError
 import smtplib, ssl
 from email.message import EmailMessage
-
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from pydantic import BaseModel, EmailStr
-
 from email_utils import send_password_reset_email
 from auth_utils import get_password_hash, verify_password, validate_password_strength
+from subscription_sync import sync_user_subscription_from_stripe
+from youtube_transcript_api import YouTubeTranscriptApi
+from transcript_fetcher import get_transcript_smart as get_transcript_youtube_api
+
 
 try:
     from youtube_transcript_api import (
@@ -93,9 +94,6 @@ try:
     from batch import router as batch_router
 except Exception:
     batch_router = None
-
-from subscription_sync import sync_user_subscription_from_stripe
-from youtube_transcript_api import YouTubeTranscriptApi
 
 from transcript_utils import (
     get_transcript_with_ytdlp,
@@ -228,17 +226,6 @@ app.add_middleware(
     apply_csp_to_api_only=True,
 )
 
-# app.add_middleware(
-#     SecurityHeadersMiddleware,
-#     csp=(PROD_CSP if IS_PROD else DEV_CSP),
-#     hsts=IS_PROD,
-#     hsts_max_age=63072000,
-#     referrer_policy="no-referrer",
-#     x_frame_options="DENY",
-#     permissions_policy="geolocation=(), microphone=(), camera=()",
-#     server_header="YCD",
-#     apply_csp_to_api_only=True,
-# )
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: ASGIApp) -> None:
@@ -548,120 +535,120 @@ def _format_timestamped(segments):
         raise
 
 
-def get_transcript_youtube_api(video_id: str, clean: bool = True, fmt: Optional[str] = None) -> str:
-    """
-    Get transcript using multiple strategies with proper fallbacks.
+# def get_transcript_youtube_api(video_id: str, clean: bool = True, fmt: Optional[str] = None) -> str:
+#     """
+#     Get transcript using multiple strategies with proper fallbacks.
     
-    Strategies (in order):
-    1. YouTube Transcript API (with multiple language attempts)
-    2. yt-dlp fallback
+#     Strategies (in order):
+#     1. YouTube Transcript API (with multiple language attempts)
+#     2. yt-dlp fallback
     
-    Returns:
-        Transcript text in requested format
+#     Returns:
+#         Transcript text in requested format
         
-    Raises:
-        HTTPException: If no transcript can be obtained
-    """
-    logger.info("Transcript for %s (clean=%s, fmt=%s)", video_id, clean, fmt)
+#     Raises:
+#         HTTPException: If no transcript can be obtained
+#     """
+#     logger.info("Transcript for %s (clean=%s, fmt=%s)", video_id, clean, fmt)
     
-    # Strategy 1: Try YouTube Transcript API
-    try:
-        listing = YouTubeTranscriptApi.list_transcripts(video_id)
+#     # Strategy 1: Try YouTube Transcript API
+#     try:
+#         listing = YouTubeTranscriptApi.list_transcripts(video_id)
         
-        # Try priority English variants
-        for code in _EN_PRIORITY:
-            try:
-                t = listing.find_transcript([code])
-                segments = t.fetch()
+#         # Try priority English variants
+#         for code in _EN_PRIORITY:
+#             try:
+#                 t = listing.find_transcript([code])
+#                 segments = t.fetch()
                 
-                if fmt == "srt":
-                    return segments_to_srt(segments)
-                if fmt == "vtt":
-                    return segments_to_vtt(segments)
-                if clean:
-                    # Extract text safely
-                    texts = [_get_segment_value(s, "text", "").replace("\n", " ") for s in segments]
-                    return _clean_plain_blocks(texts)
-                return _format_timestamped(segments)
+#                 if fmt == "srt":
+#                     return segments_to_srt(segments)
+#                 if fmt == "vtt":
+#                     return segments_to_vtt(segments)
+#                 if clean:
+#                     # Extract text safely
+#                     texts = [_get_segment_value(s, "text", "").replace("\n", " ") for s in segments]
+#                     return _clean_plain_blocks(texts)
+#                 return _format_timestamped(segments)
                 
-            except NoTranscriptFound:
-                continue
-            except Exception as e:
-                logger.debug(f"Failed to process transcript for {code}: {e}")
-                continue
+#             except NoTranscriptFound:
+#                 continue
+#             except Exception as e:
+#                 logger.debug(f"Failed to process transcript for {code}: {e}")
+#                 continue
         
-        # Try generated/auto-captions
-        try:
-            t = listing.find_generated_transcript(_EN_PRIORITY)
-            segments = t.fetch()
+#         # Try generated/auto-captions
+#         try:
+#             t = listing.find_generated_transcript(_EN_PRIORITY)
+#             segments = t.fetch()
             
-            if fmt == "srt":
-                return segments_to_srt(segments)
-            if fmt == "vtt":
-                return segments_to_vtt(segments)
-            if clean:
-                texts = [_get_segment_value(s, "text", "").replace("\n", " ") for s in segments]
-                return _clean_plain_blocks(texts)
-            return _format_timestamped(segments)
+#             if fmt == "srt":
+#                 return segments_to_srt(segments)
+#             if fmt == "vtt":
+#                 return segments_to_vtt(segments)
+#             if clean:
+#                 texts = [_get_segment_value(s, "text", "").replace("\n", " ") for s in segments]
+#                 return _clean_plain_blocks(texts)
+#             return _format_timestamped(segments)
             
-        except NoTranscriptFound:
-            pass
-        except Exception as e:
-            logger.debug(f"Generated transcript failed: {e}")
+#         except NoTranscriptFound:
+#             pass
+#         except Exception as e:
+#             logger.debug(f"Generated transcript failed: {e}")
         
-        # Try translation
-        for t in listing:
-            try:
-                translated = t.translate("en")
-                segments = translated.fetch()
+#         # Try translation
+#         for t in listing:
+#             try:
+#                 translated = t.translate("en")
+#                 segments = translated.fetch()
                 
-                if fmt == "srt":
-                    return segments_to_srt(segments)
-                if fmt == "vtt":
-                    return segments_to_vtt(segments)
-                if clean:
-                    texts = [_get_segment_value(s, "text", "").replace("\n", " ") for s in segments]
-                    return _clean_plain_blocks(texts)
-                return _format_timestamped(segments)
+#                 if fmt == "srt":
+#                     return segments_to_srt(segments)
+#                 if fmt == "vtt":
+#                     return segments_to_vtt(segments)
+#                 if clean:
+#                     texts = [_get_segment_value(s, "text", "").replace("\n", " ") for s in segments]
+#                     return _clean_plain_blocks(texts)
+#                 return _format_timestamped(segments)
                 
-            except Exception:
-                continue
+#             except Exception:
+#                 continue
                 
-    except TranscriptsDisabled:
-        logger.warning("Transcripts disabled by uploader for %s", video_id)
-    except Exception as e:
-        logger.warning("YouTube Transcript API failed for %s: %s", video_id, e)
+#     except TranscriptsDisabled:
+#         logger.warning("Transcripts disabled by uploader for %s", video_id)
+#     except Exception as e:
+#         logger.warning("YouTube Transcript API failed for %s: %s", video_id, e)
     
-    # Strategy 2: Try direct get_transcript
-    try:
-        segments = YouTubeTranscriptApi.get_transcript(video_id, languages=_EN_PRIORITY)
+#     # Strategy 2: Try direct get_transcript
+#     try:
+#         segments = YouTubeTranscriptApi.get_transcript(video_id, languages=_EN_PRIORITY)
         
-        if fmt == "srt":
-            return segments_to_srt(segments)
-        if fmt == "vtt":
-            return segments_to_vtt(segments)
-        if clean:
-            texts = [_get_segment_value(s, "text", "").replace("\n", " ") for s in segments]
-            return _clean_plain_blocks(texts)
-        return _format_timestamped(segments)
+#         if fmt == "srt":
+#             return segments_to_srt(segments)
+#         if fmt == "vtt":
+#             return segments_to_vtt(segments)
+#         if clean:
+#             texts = [_get_segment_value(s, "text", "").replace("\n", " ") for s in segments]
+#             return _clean_plain_blocks(texts)
+#         return _format_timestamped(segments)
         
-    except Exception as e:
-        logger.debug(f"Direct get_transcript failed: {e}")
+#     except Exception as e:
+#         logger.debug(f"Direct get_transcript failed: {e}")
     
-    # Strategy 3: Fallback to yt-dlp
-    try:
-        logger.info("Trying yt-dlp fallback for %s", video_id)
-        fb = get_transcript_with_ytdlp(video_id, clean=clean)
-        if fb:
-            return fb
-    except Exception as e:
-        logger.warning("yt-dlp fallback failed for %s: %s", video_id, e)
+#     # Strategy 3: Fallback to yt-dlp
+#     try:
+#         logger.info("Trying yt-dlp fallback for %s", video_id)
+#         fb = get_transcript_with_ytdlp(video_id, clean=clean)
+#         if fb:
+#             return fb
+#     except Exception as e:
+#         logger.warning("yt-dlp fallback failed for %s: %s", video_id, e)
     
-    # All strategies failed
-    raise HTTPException(
-        status_code=404, 
-        detail="No transcript/captions found for this video. The video may not have captions available."
-    )
+#     # All strategies failed
+#     raise HTTPException(
+#         status_code=404, 
+#         detail="No transcript/captions found for this video. The video may not have captions available."
+#     )
 
 # ============================================================================
 # End of Fixed Transcript Functions
