@@ -7,9 +7,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple
-import logging, os, re, tempfile, json
-
 from yt_dlp import YoutubeDL
+from datetime import timedelta
+
+import logging, os, re, tempfile, io, json
+
+
 
 logger = logging.getLogger("youtube_trans_downloader")
 
@@ -44,41 +47,97 @@ def _mmss(seconds: float) -> str:
     s = int(seconds)
     return f"{s//60:02d}:{s%60:02d}"
 
-def _parse_vtt_to_segments(vtt_text: str) -> List[Tuple[float, float, str]]:
+def _parse_vtt_to_segments(vtt_text: str) -> List[Dict[str, Any]]:
     """
-    Very small VTT parser: returns list of (start, end, text).
-    Expects '00:00:01.000 --> 00:00:02.000' lines; joins following text lines.
+    Parse a WebVTT string into segments: [{'start': float, 'duration': float, 'text': str}, ...]
+    Robust enough for yt-dlp auto captions.
     """
-    lines = [ln.strip("\ufeff").strip() for ln in (vtt_text or "").splitlines()]
-    segments: List[Tuple[float, float, str]] = []
-    i = 0
-    time_re = re.compile(r"^(\d\d:\d\d:\d\d\.\d{3})\s*-->\s*(\d\d:\d\d:\d\d\.\d{3})")
-    def _to_sec(ts: str) -> float:
-        h, m, rest = ts.split(":")
-        s, ms = rest.split(".")
-        return int(h)*3600 + int(m)*60 + int(s) + int(ms)/1000.0
+    ts_re = re.compile(r"(?P<s>\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(?P<e>\d{2}:\d{2}:\d{2}\.\d{3})")
+    def _to_seconds(hhmmss_ms: str) -> float:
+        hh, mm, ss_ms = hhmmss_ms.split(":")
+        ss, ms = ss_ms.split(".")
+        return int(hh)*3600 + int(mm)*60 + int(ss) + int(ms)/1000.0
 
-    while i < len(lines):
-        m = time_re.match(lines[i])
-        if not m:
-            i += 1
+    segs: List[Dict[str, Any]] = []
+    buf: List[str] = []
+    start = end = None
+
+    for raw in io.StringIO(vtt_text):
+        line = raw.strip("\n")
+        m = ts_re.search(line)
+        if m:
+            # If we were collecting a previous cue, flush it
+            if start is not None and buf:
+                text = " ".join(b for b in buf if b).strip()
+                if text:
+                    s = _to_seconds(start); e = _to_seconds(end)
+                    segs.append({"start": s, "duration": max(0.0, e - s), "text": text})
+            # start a new cue
+            start, end = m.group("s"), m.group("e")
+            buf = []
             continue
-        start, end = _to_sec(m.group(1)), _to_sec(m.group(2))
-        i += 1
-        text_lines = []
-        while i < len(lines) and lines[i] and not time_re.match(lines[i]):
-            # Skip cue settings like "align:start position:0%" etc
-            if "-->" in lines[i]:
-                break
-            text_lines.append(lines[i])
-            i += 1
-        text = " ".join(t for t in text_lines).strip()
+
+        if not line.strip():
+            # blank line → flush current cue
+            if start is not None and buf:
+                text = " ".join(b for b in buf if b).strip()
+                if text:
+                    s = _to_seconds(start); e = _to_seconds(end)
+                    segs.append({"start": s, "duration": max(0.0, e - s), "text": text})
+            start = end = None
+            buf = []
+            continue
+
+        # ordinary cue text
+        if start is not None:
+            buf.append(line)
+
+    # flush tail
+    if start is not None and buf:
+        text = " ".join(b for b in buf if b).strip()
         if text:
-            segments.append((start, end, text))
-        # skip blank separation if present
-        while i < len(lines) and not lines[i]:
-            i += 1
-    return segments
+            s = _to_seconds(start); e = _to_seconds(end)
+            segs.append({"start": s, "duration": max(0.0, e - s), "text": text})
+
+    return segs
+
+
+
+# def _parse_vtt_to_segments(vtt_text: str) -> List[Tuple[float, float, str]]:
+#     """
+#     Very small VTT parser: returns list of (start, end, text).
+#     Expects '00:00:01.000 --> 00:00:02.000' lines; joins following text lines.
+#     """
+#     lines = [ln.strip("\ufeff").strip() for ln in (vtt_text or "").splitlines()]
+#     segments: List[Tuple[float, float, str]] = []
+#     i = 0
+#     time_re = re.compile(r"^(\d\d:\d\d:\d\d\.\d{3})\s*-->\s*(\d\d:\d\d:\d\d\.\d{3})")
+#     def _to_sec(ts: str) -> float:
+#         h, m, rest = ts.split(":")
+#         s, ms = rest.split(".")
+#         return int(h)*3600 + int(m)*60 + int(s) + int(ms)/1000.0
+
+#     while i < len(lines):
+#         m = time_re.match(lines[i])
+#         if not m:
+#             i += 1
+#             continue
+#         start, end = _to_sec(m.group(1)), _to_sec(m.group(2))
+#         i += 1
+#         text_lines = []
+#         while i < len(lines) and lines[i] and not time_re.match(lines[i]):
+#             # Skip cue settings like "align:start position:0%" etc
+#             if "-->" in lines[i]:
+#                 break
+#             text_lines.append(lines[i])
+#             i += 1
+#         text = " ".join(t for t in text_lines).strip()
+#         if text:
+#             segments.append((start, end, text))
+#         # skip blank separation if present
+#         while i < len(lines) and not lines[i]:
+#             i += 1
+#     return segments
 
 def _clean_plain_blocks(blocks: List[str]) -> str:
     out, cur, chars = [], [], 0
@@ -93,77 +152,143 @@ def _clean_plain_blocks(blocks: List[str]) -> str:
 # -----------------------
 # Transcript (via yt-dlp)
 # -----------------------
-def get_transcript_with_ytdlp(video_id: str, clean: bool = True, fmt: Optional[str] = None) -> Optional[str]:
+def get_transcript_with_ytdlp(video_id: str, clean: bool = True, fmt: str | None = None) -> str | None:
     """
-    Fetch subtitles with yt-dlp.
-    - fmt in {"srt","vtt"} => return file content in that format.
-    - fmt None and clean==True => return plain paragraphs (no timestamps).
-    - fmt None and clean==False => return [mm:ss] timestamped lines.
+    Extract subtitles using yt-dlp (auto captions allowed) and return:
+      - SRT or VTT content if fmt is 'srt' / 'vtt'
+      - Otherwise, produce Clean TXT (paragraphs) or Timestamped TXT from VTT.
+    Works for IDs or any YT URL; uses auto-captions when authored captions are absent.
     """
-    url = _norm_youtube_url(video_id)
-    if not check_ytdlp_availability():
-        return None
+    import yt_dlp
 
-    ffmpeg_loc = _ensure_ffmpeg_location()
+    # We will always fetch **subtitles**; if TXT requested, we’ll fetch VTT and convert.
+    want_fmt = ("srt" if fmt == "srt" else "vtt")
+    lang_priority = ['en', 'en-US', 'en-GB', 'en-CA']
 
-    # We’ll always try to *write* subs (auto or authored). Prefer English variants.
-    sub_langs = ["en", "en-US", "en-GB", "en-CA", "en-AU", "en-IE", "en-NZ"]
-
-    with tempfile.TemporaryDirectory() as td:
-        # If a concrete subtitle format was requested, ask yt-dlp for that directly.
-        want_fmt = (fmt or "").lower()
-        sub_fmt = want_fmt if want_fmt in {"srt", "vtt"} else "vtt"
-
-        ydl_opts: Dict[str, Any] = {
+    with tempfile.TemporaryDirectory() as tmp:
+        ydl_opts = {
             "skip_download": True,
             "writesubtitles": True,
-            "writeautomaticsub": True,
-            "subtitlesformat": sub_fmt,
-            "subtitleslangs": sub_langs,
-            "outtmpl": os.path.join(td, "%(id)s.%(ext)s"),
+            "writeautomaticsub": True,            # ← important for videos with only auto-captions
+            "subtitlesformat": want_fmt,
+            "subtitleslangs": lang_priority,
+            "outtmpl": os.path.join(tmp, "%(id)s.%(ext)s"),
             "quiet": True,
             "no_warnings": True,
         }
-        if ffmpeg_loc:
-            ydl_opts["ffmpeg_location"] = ffmpeg_loc
-
-        # Download captions
         try:
+            url = _norm_youtube_url(video_id)
             with YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
         except Exception as e:
-            logger.debug("yt-dlp subtitle download failed: %s", e)
+            logger.debug(f"yt-dlp subtitles download failed for {video_id}: {e}")
             return None
 
-        # Find resulting file(s). yt-dlp may emit e.g. <id>.<lang>.<ext> or just <id>.<ext>
-        p = Path(td)
-        candidates = sorted(list(p.glob(f"{video_id}*.{sub_fmt}")))
-        if not candidates:
-            # Fallback: any VTT/SRT for this temp dir (some extractors name with title-id)
-            candidates = sorted(list(p.glob(f"*.{sub_fmt}")))
-
-        if not candidates:
-            logger.debug("yt-dlp: no subtitle files found for %s", video_id)
+        # find the produced subtitle file
+        sub_files = list(Path(tmp).glob(f"{video_id}*.{want_fmt}"))
+        if not sub_files:
+            # some uploads title the file without id; fallback to any.{fmt}
+            sub_files = list(Path(tmp).glob(f"*.{want_fmt}"))
+        if not sub_files:
             return None
 
-        text = candidates[0].read_text(encoding="utf-8", errors="replace")
+        content = sub_files[0].read_text(encoding="utf-8", errors="ignore")
 
-        # If user explicitly requested SRT/VTT, return verbatim content
-        if want_fmt in {"srt", "vtt"}:
-            return text
+        # If caller explicitly wants SRT/VTT, return as-is.
+        if fmt in ("srt", "vtt"):
+            return content
 
-        # Otherwise we return TXT (clean or timestamped) by parsing VTT
-        segs = _parse_vtt_to_segments(text)
-        if not segs:
+        # Otherwise we convert VTT -> TXT styles
+        segments = _parse_vtt_to_segments(content)
+        if not segments:
             return None
 
         if clean:
-            # Plain paragraphs
-            return _clean_plain_blocks([t for _, _, t in segs])
+            texts = [(s.get("text") or "").replace("\n", " ").strip() for s in segments]
+            return _clean_plain_blocks(texts)
 
-        # Timestamped [mm:ss] text
-        lines = [f"[{_mmss(start)}] {t.replace(chr(10), ' ')}" for start, _, t in segs if t]
+        # timestamped TXT
+        lines: List[str] = []
+        for s in segments:
+            t = int(float(s.get("start", 0)))
+            txt = (s.get("text") or "").replace("\n", " ")
+            if not txt:
+                continue
+            lines.append(f"[{t//60:02d}:{t%60:02d}] {txt}")
         return "\n".join(lines)
+
+
+# def get_transcript_with_ytdlp(video_id: str, clean: bool = True, fmt: Optional[str] = None) -> Optional[str]:
+#     """
+#     Fetch subtitles with yt-dlp.
+#     - fmt in {"srt","vtt"} => return file content in that format.
+#     - fmt None and clean==True => return plain paragraphs (no timestamps).
+#     - fmt None and clean==False => return [mm:ss] timestamped lines.
+#     """
+#     url = _norm_youtube_url(video_id)
+#     if not check_ytdlp_availability():
+#         return None
+
+#     ffmpeg_loc = _ensure_ffmpeg_location()
+
+#     # We’ll always try to *write* subs (auto or authored). Prefer English variants.
+#     sub_langs = ["en", "en-US", "en-GB", "en-CA", "en-AU", "en-IE", "en-NZ"]
+
+#     with tempfile.TemporaryDirectory() as td:
+#         # If a concrete subtitle format was requested, ask yt-dlp for that directly.
+#         want_fmt = (fmt or "").lower()
+#         sub_fmt = want_fmt if want_fmt in {"srt", "vtt"} else "vtt"
+
+#         ydl_opts: Dict[str, Any] = {
+#             "skip_download": True,
+#             "writesubtitles": True,
+#             "writeautomaticsub": True,
+#             "subtitlesformat": sub_fmt,
+#             "subtitleslangs": sub_langs,
+#             "outtmpl": os.path.join(td, "%(id)s.%(ext)s"),
+#             "quiet": True,
+#             "no_warnings": True,
+#         }
+#         if ffmpeg_loc:
+#             ydl_opts["ffmpeg_location"] = ffmpeg_loc
+
+#         # Download captions
+#         try:
+#             with YoutubeDL(ydl_opts) as ydl:
+#                 ydl.download([url])
+#         except Exception as e:
+#             logger.debug("yt-dlp subtitle download failed: %s", e)
+#             return None
+
+#         # Find resulting file(s). yt-dlp may emit e.g. <id>.<lang>.<ext> or just <id>.<ext>
+#         p = Path(td)
+#         candidates = sorted(list(p.glob(f"{video_id}*.{sub_fmt}")))
+#         if not candidates:
+#             # Fallback: any VTT/SRT for this temp dir (some extractors name with title-id)
+#             candidates = sorted(list(p.glob(f"*.{sub_fmt}")))
+
+#         if not candidates:
+#             logger.debug("yt-dlp: no subtitle files found for %s", video_id)
+#             return None
+
+#         text = candidates[0].read_text(encoding="utf-8", errors="replace")
+
+#         # If user explicitly requested SRT/VTT, return verbatim content
+#         if want_fmt in {"srt", "vtt"}:
+#             return text
+
+#         # Otherwise we return TXT (clean or timestamped) by parsing VTT
+#         segs = _parse_vtt_to_segments(text)
+#         if not segs:
+#             return None
+
+#         if clean:
+#             # Plain paragraphs
+#             return _clean_plain_blocks([t for _, _, t in segs])
+
+#         # Timestamped [mm:ss] text
+#         lines = [f"[{_mmss(start)}] {t.replace(chr(10), ' ')}" for start, _, t in segs if t]
+#         return "\n".join(lines)
 
 # -----------------------
 # Video / Audio (unchanged)
