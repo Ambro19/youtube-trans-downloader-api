@@ -49,11 +49,18 @@ def _clean_plain_blocks(blocks: List[str]) -> str:
     return "\n\n".join(out)
 
 def _format_timestamped(segments) -> str:
+    """Format segments as [mm:ss] text, avoiding backslashes inside f-string expressions."""
     lines = []
     for seg in segments:
-        t = int(_get(seg, "start", 0.0)); text = _get(seg, "text", "")
-        if text: lines.append(f"[{t//60:02d}:{t%60:02d}] {text.replace('\n', ' ')}")
+        start = _get(seg, "start", 0.0)
+        raw = _get(seg, "text", "") or ""
+        if not raw:
+            continue
+        t = int(start)
+        text_clean = raw.replace("\n", " ")
+        lines.append(f"[{t//60:02d}:{t%60:02d}] {text_clean}")
     return "\n".join(lines)
+
 
 def try_youtube_api_direct(video_id: str, proxies: Optional[Dict] = None):
     try:
