@@ -131,4 +131,86 @@ def get_transcript_smart(video_id: str, clean: bool = True, fmt: Optional[str] =
 
     raise Exception("Could not retrieve transcript (no captions or YouTube blocked our requests).")
 
+from typing import Iterable, Any
+
+def fallback_auto_subs_with_ytdlp(video_id: str, lang: str = "en") -> list[dict]:
+    import subprocess, json, tempfile, os
+    # Ask yt_dlp for automatic subtitles (no download)
+    cmd = [
+        "yt-dlp",
+        f"https://www.youtube.com/watch?v={video_id}",
+        "--skip-download",
+        "--write-auto-sub",
+        "--sub-langs", lang,
+        "--sub-format", "json3",
+        "-J"  # dump metadata as JSON (contains subtitles)
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:  # no auto subs available
+        return []
+    data = json.loads(proc.stdout)
+    tracks = (data.get("subtitles") or {}) or (data.get("automatic_captions") or {})
+    track = (tracks.get(lang) or tracks.get(f"{lang}-orig") or [])
+    # Pick first JSON3 track and parse events -> [{'text': ..., 'start': ...}]
+    url = next((t.get("url") for t in track if "json3" in (t.get("ext") or "")), None)
+    if not url:
+        return []
+    # Fetch JSON3
+    import urllib.request
+    with urllib.request.urlopen(url) as r:
+        j3 = r.read().decode("utf-8")
+    j3 = json.loads(j3)
+    out = []
+    for ev in j3.get("events", []):
+        segs = ev.get("segs") or []
+        text = "".join(s.get("utf8","") for s in segs).strip()
+        if not text:
+            continue
+        t = ev.get("tStartMs", 0) // 1000
+        out.append({"text": text, "start": t})
+    return out
+
+def segments_to_text_timestamped(segments: Iterable[Any]) -> str:
+    """
+    Convert a sequence of transcript segments into timestamped lines.
+
+    Each segment may be a dict (e.g., {"text": "...", "start": 12.3})
+    or an object with .text / .start (or .start_time) attributes.
+
+    Returns a single '\n'-joined string like:
+    [00:12] Hello world
+    [00:15] Another line
+    """
+    lines: list[str] = []
+
+    for seg in segments or []:
+        # Extract text
+        if isinstance(seg, dict):
+            text = seg.get("text") or seg.get("utf8") or ""
+            start = seg.get("start", seg.get("start_time", seg.get("tStartMs")))
+        else:
+            text = getattr(seg, "text", "") or getattr(seg, "utf8", "")
+            start = getattr(seg, "start", getattr(seg, "start_time", getattr(seg, "tStartMs", None)))
+
+        # Normalize start -> seconds (int)
+        if start is None:
+            t_seconds = 0
+        else:
+            try:
+                # Handle ms fields (tStartMs) and numeric seconds
+                val = float(start)
+                # If very large, treat as milliseconds
+                t_seconds = int(round(val / 1000.0)) if val > 10_000 else int(round(val))
+            except Exception:
+                t_seconds = 0
+
+        # Clean text (NO backslashes in f-string expression)
+        safe = (text or "").replace("\n", " ").strip()
+        if not safe:
+            continue
+
+        # Append formatted line
+        lines.append(f"[{t_seconds // 60:02d}:{t_seconds % 60:02d}] {safe}")
+
+    return "\n".join(lines)
 
