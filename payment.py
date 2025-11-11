@@ -18,9 +18,13 @@ logger = logging.getLogger("payment")
 stripe = None
 try:
     import stripe as _stripe  # type: ignore
-    if os.getenv("STRIPE_SECRET_KEY"):
-        _stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+    raw_key = os.getenv("STRIPE_SECRET_KEY") or ""
+    clean_key = raw_key.strip()  # remove \n, spaces from secret managers
+    if clean_key:
+        _stripe.api_key = clean_key
         stripe = _stripe
+    else:
+        stripe = None
 except Exception:
     stripe = None
 

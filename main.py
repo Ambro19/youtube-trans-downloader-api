@@ -8,7 +8,7 @@
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, Tuple
-import re, time, socket, mimetypes, logging, jwt, threading, os
+import re, time, socket, mimetypes, logging, jwt, threading, os, stripe
 from collections import defaultdict, deque
 
 from dotenv import load_dotenv, find_dotenv
@@ -38,6 +38,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from transcript_fetcher import get_transcript_smart as get_transcript_youtube_api
 
 
+
 try:
     from youtube_transcript_api import (
         YouTubeTranscriptApi,
@@ -54,11 +55,12 @@ try:
 except Exception:
     class CouldNotRetrieveTranscript(Exception): pass
 
+# --- JWT secret (keep this) ---
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
     raise RuntimeError(
         "SECRET_KEY env var is required. "
-        "Generate one with:  python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+        'Generate one with:  python -c "import secrets; print(secrets.token_urlsafe(64))"'
     )
 
 RESET_TOKEN_TTL_SECONDS = int(os.getenv("RESET_TOKEN_TTL_SECONDS", "3600"))

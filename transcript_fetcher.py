@@ -3,8 +3,13 @@
 Smart transcript fetching with multiple strategies to work around cloud IP blocks.
 """
 import logging, os
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Iterable
 from youtube_transcript_api import YouTubeTranscriptApi
+
+# --- transcript_fetcher.py (add near top) ---
+import base64, tempfile, subprocess, json, re
+from typing import Optional, List, Dict, Any
+
 
 logger = logging.getLogger("youtube_trans_downloader")
 
@@ -100,6 +105,216 @@ def try_ytdlp_fallback(video_id: str, clean: bool, fmt: Optional[str]) -> Option
         logger.debug("yt-dlp fallback exception: %s", e)
         return None
 
+
+#------------------ Begin of Newly Added Functions to support ----------------
+
+def _normalize_video_id_or_url(s: str) -> str:
+    """Return a canonical URL for yt-dlp; accept bare IDs, watch URLs, shorts URLs."""
+    s = s.strip()
+    if re.fullmatch(r"[A-Za-z0-9_-]{10,}", s):
+        return f"https://www.youtube.com/watch?v={s}"
+    return s
+
+def _write_cookies_tmp() -> Optional[str]:
+    """
+    Provide a path to a cookies file for yt-dlp if available.
+    Priority:
+      - YT_COOKIES_B64 (base64 of a Netscape/Chrome-exported cookies.txt)
+      - YT_COOKIES_FILE (path already on disk)
+    Returns the path or None.
+    """
+    b64 = os.getenv("YT_COOKIES_B64", "").strip()
+    if b64:
+        try:
+            raw = base64.b64decode(b64)
+            f = tempfile.NamedTemporaryFile(prefix="yt_cookies_", suffix=".txt", delete=False)
+            f.write(raw)
+            f.flush()
+            f.close()
+            return f.name
+        except Exception as e:
+            logger.warning("Failed to decode YT_COOKIES_B64: %s", e)
+
+    fpath = os.getenv("YT_COOKIES_FILE", "").strip()
+    if fpath and os.path.exists(fpath):
+        return fpath
+
+    return None
+
+def _format_segments_clean(segments: List[Dict[str, Any]]) -> str:
+    """Flatten segments into a single clean text blob (no timestamps)."""
+    parts = []
+    for seg in segments:
+        text = seg.get("text", "") if isinstance(seg, dict) else getattr(seg, "text", "")
+        cleaned = text.replace("\n", " ").strip()
+        if cleaned:
+            parts.append(cleaned)
+    return "\n".join(parts)
+
+def _format_segments_srt(segments: List[Dict[str, Any]]) -> str:
+    """Minimal SRT output from a list of {start, duration, text} dicts."""
+    def srt_time(t: float) -> str:
+        # HH:MM:SS,mmm
+        ms = int(round((t - int(t)) * 1000))
+        t = int(t)
+        h, t = divmod(t, 3600)
+        m, s = divmod(t, 60)
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+    out = []
+    for i, seg in enumerate(segments, start=1):
+        start = float(seg.get("start", 0.0))
+        dur = float(seg.get("duration", 0.0))
+        end = start + dur
+        text = seg.get("text", "")
+        cleaned = text.replace("\n", " ").strip()
+        if not cleaned:
+            continue
+        out.append(str(i))
+        out.append(f"{srt_time(start)} --> {srt_time(end)}")
+        out.append(cleaned)
+        out.append("")  # blank line between cues
+    return "\n".join(out).strip()
+
+def _yt_dlp_transcript(video: str, want_format: Optional[str]) -> Optional[str]:
+    """
+    Use yt-dlp to fetch subtitles. want_format in {None, 'srt', 'vtt'}.
+    Returns text content or None if unavailable.
+    """
+    url = _normalize_video_id_or_url(video)
+    cookies_path = _write_cookies_tmp()
+
+    # Decide sub-format flags for yt-dlp
+    sub_fmt = "srt" if want_format == "srt" else "vtt" if want_format == "vtt" else "vtt"
+
+    with tempfile.TemporaryDirectory(prefix="ytdlp_subs_") as tmpdir:
+        base = os.path.join(tmpdir, "out")
+        # yt-dlp arguments: auto subs if manual not present; convert to desired format
+        args = [
+            "yt-dlp",
+            "--skip-download",
+            "--no-warnings",
+            "--quiet",
+            "--no-call-home",
+            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+            "--write-auto-subs",
+            "--sub-langs", "en.*,en",
+            "--sub-format", sub_fmt,
+            "--convert-subs", sub_fmt,
+            "-o", f"{base}.%(ext)s",
+            url,
+        ]
+        if cookies_path:
+            args.extend(["--cookies", cookies_path])
+
+        logger.info("Trying yt-dlp fallback for %s (format: %s)", video, want_format)
+        try:
+            proc = subprocess.run(args, capture_output=True, text=True, timeout=120)
+        except Exception as e:
+            logger.error("yt-dlp failed to run: %s", e)
+            return None
+
+        if proc.returncode != 0:
+            # Helpful for debugging rate limit or bot checks
+            if proc.stderr:
+                logger.error("yt-dlp stderr: %s", proc.stderr.strip())
+            return None
+
+        # Look for produced file
+        for ext in [sub_fmt, sub_fmt.upper()]:
+            candidate = f"{base}.{ext}"
+            if os.path.exists(candidate):
+                with open(candidate, "r", encoding="utf-8", errors="ignore") as f:
+                    return f.read()
+
+    return None
+
+# --- PUBLIC ENTRYPOINT: call this from main.py ---
+def get_transcript_smart(video_id_or_url: str, clean: bool = True, fmt: Optional[str] = None) -> Optional[str]:
+    """
+    1) Try youtube_transcript_api (fast, no cookies) → returns clean text or SRT
+    2) If blocked/missing, try yt-dlp with cookies (handles bot checks, Shorts, etc.)
+    clean=True returns plain text (no timestamps). If fmt in {'srt','vtt'}, returns that format.
+    """
+    from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound, CouldNotRetrieveTranscript
+
+    vid = video_id_or_url.strip()
+    logger.info("Smart fetch %s (clean=%s, fmt=%s)", vid, clean, fmt)
+
+    # 1) API path (best case)
+    try:
+        # Bare ID only for the API
+        m = re.search(r"[A-Za-z0-9_-]{10,}", vid)
+        bare_id = m.group(0) if m else vid
+
+        transcript_list = YouTubeTranscriptApi.list_transcripts(bare_id)
+        # Prefer English (manual or auto)
+        try:
+            transcript = transcript_list.find_manually_created_transcript(['en', 'en-US'])
+        except:
+            transcript = transcript_list.find_transcript(['en', 'en-US'])
+        segments = transcript.fetch()  # list of dicts: start, duration, text
+
+        if clean and fmt is None:
+            return _format_segments_clean(segments)
+        if fmt == "srt":
+            return _format_segments_srt(segments)
+        if fmt == "vtt":
+            # simple VTT (we can transform SRT to VTT if needed; here we output minimal VTT)
+            srt_like = _format_segments_srt(segments).splitlines()
+            # Convert SRT to VTT quickly
+            vtt = ["WEBVTT", ""]
+            i = 0
+            while i < len(srt_like):
+                line = srt_like[i].strip()
+                if re.fullmatch(r"\d+", line):
+                    i += 1
+                    if i >= len(srt_like): break
+                    times = srt_like[i].replace(",", ".")
+                    vtt.append(times)
+                    i += 1
+                    # collect text lines until blank
+                    while i < len(srt_like) and srt_like[i].strip():
+                        vtt.append(srt_like[i])
+                        i += 1
+                    vtt.append("")
+                else:
+                    i += 1
+            return "\n".join(vtt).strip()
+        # default to clean
+        return _format_segments_clean(segments)
+
+    except (TranscriptsDisabled, NoTranscriptFound, CouldNotRetrieveTranscript) as e:
+        logger.info("API transcript not available: %s", e)
+    except Exception as e:
+        logger.warning("API path failed unexpectedly: %s", e)
+
+    # 2) yt-dlp fallback (needs cookies for bot checks)
+    text = _yt_dlp_transcript(vid, fmt if fmt in ("srt", "vtt") else "vtt")
+    if not text:
+        logger.error("Transcript fetch failed for %s: Could not retrieve transcript (no captions or YouTube blocked our requests).", vid)
+        return None
+
+    if clean and fmt is None:
+        # Very lightweight VTT/SRT → clean text conversion
+        # remove cue headers and timestamps
+        cleaned_lines = []
+        for line in text.splitlines():
+            if re.match(r"^\d+$", line.strip()):
+                continue
+            if re.search(r"-->\s", line):
+                continue
+            if line.strip().upper() in ("WEBVTT",):
+                continue
+            line = line.strip()
+            if line:
+                cleaned_lines.append(line)
+        return "\n".join(cleaned_lines).strip()
+
+    return text
+    
+#------------------ End of Newly Added Functions to support ----------------
+
 def get_transcript_smart(video_id: str, clean: bool = True, fmt: Optional[str] = None, use_proxies: bool = USE_PROXIES) -> str:
     logger.info("Smart fetch %s (clean=%s, fmt=%s)", video_id, clean, fmt)
 
@@ -130,8 +345,6 @@ def get_transcript_smart(video_id: str, clean: bool = True, fmt: Optional[str] =
                 return _format_timestamped(seg)
 
     raise Exception("Could not retrieve transcript (no captions or YouTube blocked our requests).")
-
-from typing import Iterable, Any
 
 def fallback_auto_subs_with_ytdlp(video_id: str, lang: str = "en") -> list[dict]:
     import subprocess, json, tempfile, os
