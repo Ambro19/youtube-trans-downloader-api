@@ -15,16 +15,14 @@ router = APIRouter(prefix="/billing")
 logger = logging.getLogger("payment")
 
 # ---- Stripe init (robust / optional) ---------------------------------------
+#-----To fix Stripe everywhere ------
 stripe = None
 try:
     import stripe as _stripe  # type: ignore
-    raw_key = os.getenv("STRIPE_SECRET_KEY") or ""
-    clean_key = raw_key.strip()  # remove \n, spaces from secret managers
-    if clean_key:
-        _stripe.api_key = clean_key
+    key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()   # ← strip here
+    if key:
+        _stripe.api_key = key
         stripe = _stripe
-    else:
-        stripe = None
 except Exception:
     stripe = None
 
