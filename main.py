@@ -134,6 +134,85 @@ app = FastAPI(
     default_response_class=ORJSONResponse,
 )
 
+def ensure_stripe_customer_for_user(user: "User", db: Session) -> None:
+    """
+    Ensure this app user has a Stripe customer id.
+
+    - If one already exists, do nothing.
+    - Otherwise, try to find a Stripe customer by email.
+    - If not found, create one.
+    """
+    if not stripe or not os.getenv("STRIPE_SECRET_KEY"):
+        return
+
+    if getattr(user, "stripe_customer_id", None):
+        # Already linked
+        return
+
+    email = (user.email or "").strip().lower()
+    username = (user.username or "").strip() or None
+
+    if not email:
+        return  # nothing we can do
+
+    try:
+        customer = None
+
+        # 1) Try Customer.search (newer API)
+        try:
+            found = stripe.Customer.search(
+                query=f"email:'{email}' AND -deleted:'true'",
+                limit=1,
+            )
+            if getattr(found, "data", []):
+                customer = found.data[0]
+        except Exception as e:
+            logger.debug("ensure_stripe_customer_for_user: customer.search failed: %s", e)
+
+        # 2) Fallback to Customer.list
+        if not customer:
+            try:
+                listed = stripe.Customer.list(email=email, limit=1)
+                if getattr(listed, "data", []):
+                    customer = listed.data[0]
+            except Exception as e:
+                logger.debug("ensure_stripe_customer_for_user: customer.list failed: %s", e)
+
+        if customer:
+            # Backfill existing Stripe customer
+            user.stripe_customer_id = customer["id"]
+            try:
+                stripe.Customer.modify(
+                    customer["id"],
+                    name=username or customer.get("name"),
+                    metadata={
+                        **(customer.get("metadata") or {}),
+                        "app_user_id": str(user.id),
+                    },
+                )
+            except Exception:
+                pass
+            db.commit()
+            db.refresh(user)
+            logger.info("🔄 Linked existing Stripe customer %s to user %s", customer["id"], email)
+            return
+
+        # 3) No customer found → create a new one
+        created = stripe.Customer.create(
+            email=email,
+            name=username,
+            metadata={"app_user_id": str(user.id)},
+            idempotency_key=f"user_backfill_{user.id}",
+        )
+        user.stripe_customer_id = created["id"]
+        db.commit()
+        db.refresh(user)
+        logger.info("✅ Created Stripe customer %s for user %s", created["id"], email)
+
+    except Exception as e:
+        logger.warning("ensure_stripe_customer_for_user failed for %s: %s", email, e)
+        db.rollback()
+
 try:
     from timestamp_patch import EnsureUtcZMiddleware
     app.add_middleware(EnsureUtcZMiddleware)
@@ -482,6 +561,46 @@ def _format_timestamped(segments):
         logger.warning(f"_format_timestamped error: {e}")
         raise
 
+#Add this anywhere near your other helpers, (top-level).
+def _hydrate_youtube_cookies_to_tmp() -> None:
+    """
+    Normalize cookie env so yt-dlp always gets a writable, ephemeral file.
+    Priority:
+      - YT_COOKIES_B64 (preferred) -> decode to /tmp
+      - YT_COOKIES_FILE (fallback) -> copy to /tmp if it points to read-only locations
+    Also set cache dirs to /tmp.
+    """
+    import base64, tempfile, shutil
+
+    # keep yt-dlp caches ephemeral
+    os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
+    os.environ.setdefault("YTDLP_HOME", "/tmp/yt-dlp")
+    os.environ.setdefault("YT_DLP_DIR", "/tmp/yt-dlp")
+
+    b64 = (os.getenv("YT_COOKIES_B64") or "").strip()
+    if b64:
+        try:
+            raw = base64.b64decode(b64)
+            tf = tempfile.NamedTemporaryFile(prefix="yt_cookies_", suffix=".txt", delete=False)
+            tf.write(raw); tf.flush(); tf.close()
+            os.environ["YT_COOKIES_FILE"] = tf.name
+            return
+        except Exception as e:
+            logger.warning("Failed to decode YT_COOKIES_B64: %s", e)
+
+    fpath = (os.getenv("YT_COOKIES_FILE") or "").strip()
+    if fpath:
+        # if it points to a read-only mount (/etc/secrets) copy it to /tmp
+        try:
+            if fpath.startswith("/etc/") or fpath.startswith("/run/"):
+                tf = tempfile.NamedTemporaryFile(prefix="yt_cookies_", suffix=".txt", delete=False)
+                tf.close()
+                shutil.copyfile(fpath, tf.name)
+                os.environ["YT_COOKIES_FILE"] = tf.name
+        except Exception as e:
+            logger.warning("Could not copy YT_COOKIES_FILE to /tmp: %s", e)
+
+
 # ============================================================================
 # End of Fixed Transcript Functions
 # ============================================================================
@@ -593,19 +712,29 @@ def create_download_record(db: Session, user: User, kind: str, youtube_id: str, 
         db.rollback()
         return None
 
-def classify_activity_by_format(transcript_type: str, file_format: str) -> Tuple[str, str, str, str]:
-    t_type = (transcript_type or "").lower(); f_format = (file_format or "").lower()
-    if f_format == 'srt': return ("Generated SRT Transcript", "🕒", "SRT transcript", "transcript")
-    if f_format == 'vtt': return ("Generated VTT Transcript", "🕒", "VTT transcript", "transcript")
-    if f_format == 'txt':
-        if 'unclean' in t_type or 'timestamped' in t_type: return ("Generated Timestamped Transcript", "🕒", "Timestamped transcript", "transcript")
+
+def classify_activity_by_format(transcript_type: str, file_format: str) -> tuple[str, str, str, str]:
+    t_type = (transcript_type or "").lower()
+    f_format = (file_format or "").lower()
+
+    if f_format in ["mp3", "m4a", "aac", "wav"]:
+        return ("Downloaded Audio File", "🎵", f"{f_format.upper()} file", "audio")
+    if f_format in ["mp4", "mkv", "avi", "mov"]:
+        return ("Downloaded Video File", "🎬", f"{f_format.upper()} file", "video")
+
+    if "audio" in t_type:
+        return ("Downloaded Audio File", "🎵", "Audio file", "audio")
+    if "video" in t_type:
+        return ("Downloaded Video File", "🎬", "Video file", "video")
+    if f_format == "srt":
+        return ("Generated SRT Transcript", "🕒", "SRT transcript", "transcript")
+    if f_format == "vtt":
+        return ("Generated VTT Transcript", "🕒", "VTT transcript", "transcript")
+    if "clean" in t_type:
         return ("Generated Clean Transcript", "📄", "Clean text transcript", "transcript")
-    if f_format in ['mp3','m4a','aac','wav']: return ("Downloaded Audio File", "🎵", f"{f_format.UPPER()} file", "audio")
-    if f_format in ['mp4','mkv','avi','mov']: return ("Downloaded Video File", "🎬", f"{f_format.upper()} file", "video")
-    if 'audio' in t_type: return ("Downloaded Audio File", "🎵", "Audio file", "audio")
-    if 'video' in t_type: return ("Downloaded Video File", "🎬", "Video file", "video")
-    if 'clean' in t_type: return ("Generated Clean Transcript", "📄", "Clean transcript", "transcript")
-    if 'unclean' in t_type: return ("Generated Timestamped Transcript", "🕒", "Timestamped transcript", "transcript")
+    if "unclean" in t_type or "timestamped" in t_type:
+        return ("Generated Timestamped Transcript", "🕒", "Timestamped transcript", "transcript")
+
     return ("Downloaded Content", "📁", "Content", "general")
 
 def delete_user_subscription(db: Session, user: User) -> bool:
@@ -771,11 +900,14 @@ def _cleanup_stale_files_loop():
 
 @app.on_event("startup")
 async def on_startup():
+    _hydrate_youtube_cookies_to_tmp()  # <<< add this
     initialize_database()
     run_startup_migrations(engine)
     threading.Thread(target=_cleanup_stale_files_loop, daemon=True).start()
     logger.info("Environment: %s", ENVIRONMENT)
     logger.info("Backend started")
+
+
 
 @app.get("/")
 def root():
@@ -883,6 +1015,26 @@ def reset_password(payload: ResetPasswordIn):
     finally:
         db.close()
 
+# @app.post("/token")
+# def token_login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+#     username_input = (form.username or "").strip()
+#     password_input = form.password or ""
+
+#     user = db.query(User).filter(User.username == username_input).first()
+#     if not user or not verify_password(password_input, user.hashed_password):
+#         raise HTTPException(status_code=401, detail="Incorrect username or password")
+
+#     token = create_access_token(
+#         {"sub": user.username},
+#         timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+#     )
+#     return {
+#         "access_token": token,
+#         "token_type": "bearer",
+#         "user": canonical_account(user),
+#         "must_change_password": bool(getattr(user, "must_change_password", False)),
+#     }
+
 @app.post("/token")
 def token_login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     username_input = (form.username or "").strip()
@@ -891,6 +1043,9 @@ def token_login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depen
     user = db.query(User).filter(User.username == username_input).first()
     if not user or not verify_password(password_input, user.hashed_password):
         raise HTTPException(status_code=401, detail="Incorrect username or password")
+
+    # 🔹 Backfill Stripe customer id if missing
+    ensure_stripe_customer_for_user(user, db)
 
     token = create_access_token(
         {"sub": user.username},
@@ -903,6 +1058,27 @@ def token_login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depen
         "must_change_password": bool(getattr(user, "must_change_password", False)),
     }
 
+
+# @app.post("/token_json")
+# def token_login_json(req: LoginJSON, db: Session = Depends(get_db)):
+#     username_input = (req.username or "").strip()
+#     password_input = req.password or ""
+
+#     user = db.query(User).filter(User.username == username_input).first()
+#     if not user or not verify_password(password_input, user.hashed_password):
+#         raise HTTPException(status_code=401, detail="Incorrect username or password")
+
+#     token = create_access_token(
+#         {"sub": user.username},
+#         timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+#     )
+#     return {
+#         "access_token": token,
+#         "token_type": "bearer",
+#         "user": canonical_account(user),
+#         "must_change_password": bool(getattr(user, "must_change_password", False)),
+#     }
+
 @app.post("/token_json")
 def token_login_json(req: LoginJSON, db: Session = Depends(get_db)):
     username_input = (req.username or "").strip()
@@ -911,6 +1087,9 @@ def token_login_json(req: LoginJSON, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == username_input).first()
     if not user or not verify_password(password_input, user.hashed_password):
         raise HTTPException(status_code=401, detail="Incorrect username or password")
+
+    # 🔹 Backfill Stripe customer id if missing
+    ensure_stripe_customer_for_user(user, db)
 
     token = create_access_token(
         {"sub": user.username},
@@ -1483,6 +1662,7 @@ def subscription_status(request: Request, current_user: User = Depends(get_curre
     }
 
 @app.post("/contact")
+@app.post("/contact")
 def send_contact_message(req: ContactMessage, request: Request):
     name = (req.name or "").strip()[:200]
     email = (req.email or "").strip()[:255].lower()
@@ -1574,6 +1754,7 @@ if __name__ == "__main__":
     import uvicorn
     print(f"Starting server on 0.0.0.0:8000 — files: {DOWNLOADS_DIR}")
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
 #===============End main Module===================
 
 
