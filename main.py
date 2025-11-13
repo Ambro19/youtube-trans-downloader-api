@@ -213,6 +213,34 @@ def ensure_stripe_customer_for_user(user: "User", db: Session) -> None:
         logger.warning("ensure_stripe_customer_for_user failed for %s: %s", email, e)
         db.rollback()
 
+#============ TO BE TRIED =============
+
+# def ensure_stripe_customer_for_user(user: "User", db: "Session"):
+#     """
+#     Make sure this user has a stripe_customer_id, and that it exists in Stripe.
+#     If the DB is missing it, create a customer and save the ID.
+#     Safe to call on every request that has an authenticated user.
+#     """
+#     from .models import User  # if needed to avoid circular imports
+
+#     if not user:
+#         return
+
+#     if user.stripe_customer_id:
+#         # Optionally: we could verify it exists in Stripe here, but that
+#         # would be an extra API call on every request.
+#         return
+
+#     stripe_customer = stripe.Customer.create(
+#         email=user.email,
+#         metadata={"user_id": user.id},
+#     )
+#     user.stripe_customer_id = stripe_customer.id
+#     db.add(user)
+#     db.commit()
+#     db.refresh(user)
+
+
 try:
     from timestamp_patch import EnsureUtcZMiddleware
     app.add_middleware(EnsureUtcZMiddleware)
@@ -908,7 +936,6 @@ async def on_startup():
     logger.info("Backend started")
 
 
-
 @app.get("/")
 def root():
     return {"message": "YouTube Content Downloader API", "status": "running",
@@ -1015,25 +1042,6 @@ def reset_password(payload: ResetPasswordIn):
     finally:
         db.close()
 
-# @app.post("/token")
-# def token_login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-#     username_input = (form.username or "").strip()
-#     password_input = form.password or ""
-
-#     user = db.query(User).filter(User.username == username_input).first()
-#     if not user or not verify_password(password_input, user.hashed_password):
-#         raise HTTPException(status_code=401, detail="Incorrect username or password")
-
-#     token = create_access_token(
-#         {"sub": user.username},
-#         timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-#     )
-#     return {
-#         "access_token": token,
-#         "token_type": "bearer",
-#         "user": canonical_account(user),
-#         "must_change_password": bool(getattr(user, "must_change_password", False)),
-#     }
 
 @app.post("/token")
 def token_login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
@@ -1058,26 +1066,6 @@ def token_login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depen
         "must_change_password": bool(getattr(user, "must_change_password", False)),
     }
 
-
-# @app.post("/token_json")
-# def token_login_json(req: LoginJSON, db: Session = Depends(get_db)):
-#     username_input = (req.username or "").strip()
-#     password_input = req.password or ""
-
-#     user = db.query(User).filter(User.username == username_input).first()
-#     if not user or not verify_password(password_input, user.hashed_password):
-#         raise HTTPException(status_code=401, detail="Incorrect username or password")
-
-#     token = create_access_token(
-#         {"sub": user.username},
-#         timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-#     )
-#     return {
-#         "access_token": token,
-#         "token_type": "bearer",
-#         "user": canonical_account(user),
-#         "must_change_password": bool(getattr(user, "must_change_password", False)),
-#     }
 
 @app.post("/token_json")
 def token_login_json(req: LoginJSON, db: Session = Depends(get_db)):
