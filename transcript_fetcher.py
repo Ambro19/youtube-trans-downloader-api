@@ -397,5 +397,4 @@ def get_transcript_smart(
 
     raise Exception("Could not retrieve transcript (no captions or YouTube blocked our requests).")
 
-
 ## ---------------End transcript_utils Module-----------------
