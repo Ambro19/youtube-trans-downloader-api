@@ -141,6 +141,7 @@ def _resolve_cookies_path() -> Optional[str]:
     """
     return _get_cookies_file()
 
+
 def _apply_cookie_opts(opts: Dict[str, Any]) -> Dict[str, Any]:
     """
     Enhanced bot bypass with multiple strategies
@@ -148,10 +149,22 @@ def _apply_cookie_opts(opts: Dict[str, Any]) -> Dict[str, Any]:
     cp = _get_cookies_file()
     if cp:
         opts["cookiefile"] = cp
+        logger.info(f"Using cookies from: {cp}")
 
-    # Force IPv4 to avoid network issues
-    opts["force_ipv4"] = True
-    
+    # Multiple layers of YouTube bypass
+    opts.update({
+        "force_ipv4": True,
+        "ignoreerrors": True,
+        "no_check_certificate": True,
+        "extract_flat": False,
+        "sleep_interval": 2,
+        "max_sleep_interval": 5,
+        "retries": 10,
+        "fragment_retries": 10,
+        "skip_unavailable_fragments": True,
+        "throttledratelimit": 100000000,
+    })
+
     # Enhanced headers for mobile emulation
     opts.setdefault("http_headers", {})
     opts["http_headers"].update({
@@ -162,60 +175,61 @@ def _apply_cookie_opts(opts: Dict[str, Any]) -> Dict[str, Any]:
         "DNT": "1",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
     })
 
     # Multiple extractor strategies
     opts.setdefault("extractor_args", {})
     youtube_args = opts["extractor_args"].setdefault("youtube", {})
-    
-    # Try multiple client types in order
     youtube_args["player_client"] = ["android", "web", "ios"]
     
-    # Additional yt-dlp options for robustness
-    opts.update({
-        "ignoreerrors": True,
-        "no_check_certificate": True,
-        "prefer_insecure": False,
-        "sleep_interval": 1,
-        "max_sleep_interval": 5,
-        "retries": 10,
-        "fragment_retries": 10,
-        "skip_unavailable_fragments": True,
-        "extract_flat": False,
-    })
-    
     return opts
-
+    
 # def _apply_cookie_opts(opts: Dict[str, Any]) -> Dict[str, Any]:
 #     """
-#     Mutates and returns yt-dlp options to include cookies and a couple of
-#     pragmatic extractor hints that reduce YouTube consent/bot walls.
+#     Enhanced bot bypass with multiple strategies
 #     """
 #     cp = _get_cookies_file()
 #     if cp:
 #         opts["cookiefile"] = cp
 
-#     # Align with your env preference to avoid IPv6 issues
-#     if os.getenv("YTDLP_BIND_IPV4", "1").strip() == "1":
-#         # Python API flag for force ipv4
-#         opts["force_ipv4"] = True
-
-#     # These headers help for some consent/bot issues
+#     # Force IPv4 to avoid network issues
+#     opts["force_ipv4"] = True
+    
+#     # Enhanced headers for mobile emulation
 #     opts.setdefault("http_headers", {})
-#     opts["http_headers"].setdefault(
-#         "User-Agent",
-#         # A stable mobile UA tends to be more permissive
-#         "com.google.android.youtube/19.20.34 (Linux; U; Android 11)"
-#     )
-#     opts["http_headers"].setdefault("Accept-Language", "en-US,en;q=0.9")
+#     opts["http_headers"].update({
+#         "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36",
+#         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+#         "Accept-Language": "en-US,en;q=0.9",
+#         "Accept-Encoding": "gzip, deflate, br",
+#         "DNT": "1",
+#         "Connection": "keep-alive",
+#         "Upgrade-Insecure-Requests": "1",
+#     })
 
-#     # Prefer the Android player client path
-#     ea = opts.setdefault("extractor_args", {})
-#     youtube_args = ea.setdefault("youtube", {})
-#     existing = youtube_args.get("player_client", [])
-#     if not existing:
-#         youtube_args["player_client"] = ["android"]
-
+#     # Multiple extractor strategies
+#     opts.setdefault("extractor_args", {})
+#     youtube_args = opts["extractor_args"].setdefault("youtube", {})
+    
+#     # Try multiple client types in order
+#     youtube_args["player_client"] = ["android", "web", "ios"]
+    
+#     # Additional yt-dlp options for robustness
+#     opts.update({
+#         "ignoreerrors": True,
+#         "no_check_certificate": True,
+#         "prefer_insecure": False,
+#         "sleep_interval": 1,
+#         "max_sleep_interval": 5,
+#         "retries": 10,
+#         "fragment_retries": 10,
+#         "skip_unavailable_fragments": True,
+#         "extract_flat": False,
+#     })
+    
 #     return opts
 
 

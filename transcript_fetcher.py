@@ -82,9 +82,37 @@ def _format_timestamped(segments: List[Dict[str, Any]]) -> str:
         lines.append(f"[{t//60:02d}:{t%60:02d}] {raw}")
     return "\n".join(lines)
 
+#------------------
+def _try_ytdlp_with_cookies(video_id: str, clean: bool, fmt: Optional[str]) -> Optional[str]:
+    """Try yt-dlp with cookies first"""
+    if _resolve_cookies_path():
+        return get_transcript_with_ytdlp(video_id, clean=clean, fmt=fmt)
+    return None
 
 
-#--------------------------------*****Start of Newly Added Funclions*****************---------
+#---------------------
+def _try_direct_api(video_id: str, clean: bool, fmt: Optional[str]) -> Optional[str]:
+    """Try direct YouTube API"""
+    seg = _api_try(video_id)
+    if seg:
+        return _format_segments(seg, clean, fmt)
+    return None
+#--------------------
+def _try_api_with_proxies(video_id: str, clean: bool, fmt: Optional[str]) -> Optional[str]:
+    """Try API with proxy rotation"""
+    for proxy_url in PROXY_LIST:
+        proxies = {"http": proxy_url, "https": proxy_url}
+        seg = _api_try(video_id, proxies=proxies)
+        if seg:
+            return _format_segments(seg, clean, fmt)
+    return None
+
+#---------------
+def _try_ytdlp_without_cookies(video_id: str, clean: bool, fmt: Optional[str]) -> Optional[str]:
+    """Final fallback: yt-dlp without cookies"""
+    return get_transcript_with_ytdlp(video_id, clean=clean, fmt=fmt)
+#-----------------
+
 def try_youtube_api_direct(video_id: str, proxies: Optional[Dict] = None):
     try:
         kw = {"languages": _EN_PRIORITY}
@@ -114,6 +142,18 @@ def try_youtube_api_direct(video_id: str, proxies: Optional[Dict] = None):
     except Exception as e:
         logger.debug("list_transcripts failed: %s", e)
     return None
+#-------------
+def _try_ytdlp_with_cookies(video_id: str, clean: bool, fmt: Optional[str]) -> Optional[str]:
+    """Try yt-dlp with cookies first"""
+    if _resolve_cookies_path():
+        return get_transcript_with_ytdlp(video_id, clean=clean, fmt=fmt)
+    return None
+
+#------------------------
+def _try_ytdlp_without_cookies(video_id: str, clean: bool, fmt: Optional[str]) -> Optional[str]:
+    """Final fallback: yt-dlp without cookies"""
+    return get_transcript_with_ytdlp(video_id, clean=clean, fmt=fmt)
+#------------------------    
 
 def try_ytdlp_fallback(video_id: str, clean: bool, fmt: Optional[str]) -> Optional[str]:
     try:
@@ -156,6 +196,18 @@ def _write_cookies_tmp() -> Optional[str]:
 
     return None
 
+#------------------
+def _format_segments(segments: List[Dict[str, Any]], clean: bool, fmt: Optional[str]) -> str:
+    """Format segments based on requested format"""
+    if fmt == "srt":
+        return segments_to_srt(segments)
+    if fmt == "vtt":
+        return segments_to_vtt(segments)
+    if clean:
+        return _clean_plain_blocks([(_get(s, "text", "") or "").replace("\n", " ") for s in segments])
+    return _format_timestamped(segments) 
+
+#-------------------
 def _format_segments_clean(segments: List[Dict[str, Any]]) -> str:
     """Flatten segments into a single clean text blob (no timestamps)."""
     parts = []
@@ -338,6 +390,15 @@ def _api_try(video_id: str, proxies: Optional[Dict[str, str]] = None) -> Optiona
     except Exception as e:
         logger.debug("API path failed: %s", e)
         return None
+#---------------
+def _try_direct_api(video_id: str, clean: bool, fmt: Optional[str]) -> Optional[str]:
+    """Try direct YouTube API"""
+    seg = _api_try(video_id)
+    if seg:
+        return _format_segments(seg, clean, fmt)
+    return None
+#--------------
+
 
 # -----------------------
 # Public entrypoint
@@ -349,52 +410,87 @@ def get_transcript_smart(
     use_proxies: bool = USE_PROXIES
 ) -> str:
     """
-    Returns one of:
-      - Clean TXT (default, no timestamps)
-      - Timestamped TXT (when clean=False and fmt is None)
-      - SRT / VTT (when fmt == 'srt' or 'vtt')
-    Raises Exception if nothing could be fetched.
+    Enhanced with multiple fallback strategies
     """
     vid = (video_id_or_url or "").strip()
     logger.info("Smart fetch %s (clean=%s, fmt=%s)", vid, clean, fmt)
 
-    # 1) If cookies exist, **prefer yt-dlp** (handles consent/bot walls reliably)
-    if _resolve_cookies_path():
-        text = get_transcript_with_ytdlp(vid, clean=clean, fmt=fmt)
-        if text:
-            return text
-        # fall through to API if yt-dlp unexpectedly fails
+    strategies = [
+        ("yt-dlp with cookies", _try_ytdlp_with_cookies),
+        ("direct API", _try_direct_api),
+        ("yt-dlp without cookies", _try_ytdlp_without_cookies),
+    ]
 
-    # 2) Try API (works when public captions are available and IP isn't blocked)
-    seg = _api_try(vid)
-    if seg:
-        if fmt == "srt":
-            return segments_to_srt(seg)
-        if fmt == "vtt":
-            return segments_to_vtt(seg)
-        if clean:
-            return _clean_plain_blocks([(_get(s, "text", "") or "").replace("\n", " ") for s in seg])
-        return _format_timestamped(seg)
-
-    # 3) Optional: retry API via proxies
     if use_proxies and PROXY_LIST:
-        for proxy_url in PROXY_LIST:
-            proxies = {"http": proxy_url, "https": proxy_url}
-            seg = _api_try(vid, proxies=proxies)
-            if seg:
-                if fmt == "srt":
-                    return segments_to_srt(seg)
-                if fmt == "vtt":
-                    return segments_to_vtt(seg)
-                if clean:
-                    return _clean_plain_blocks([(_get(s, "text", "") or "").replace("\n", " ") for s in seg])
-                return _format_timestamped(seg)
+        strategies.insert(1, ("API with proxies", _try_api_with_proxies))
 
-    # 4) Final attempt: yt-dlp again (even without cookies), then fail
-    text = get_transcript_with_ytdlp(vid, clean=clean, fmt=fmt)
-    if text:
-        return text
+    for strategy_name, strategy_func in strategies:
+        try:
+            logger.info("Trying strategy: %s", strategy_name)
+            result = strategy_func(vid, clean, fmt)
+            if result:
+                logger.info("Strategy %s succeeded", strategy_name)
+                return result
+        except Exception as e:
+            logger.debug("Strategy %s failed: %s", strategy_name, e)
+            continue
 
-    raise Exception("Could not retrieve transcript (no captions or YouTube blocked our requests).")
+    raise Exception("All transcript fetch strategies failed")
 
-## ---------------End transcript_utils Module-----------------
+
+# def get_transcript_smart(
+#     video_id_or_url: str,
+#     clean: bool = True,
+#     fmt: Optional[str] = None,
+#     use_proxies: bool = USE_PROXIES
+# ) -> str:
+#     """
+#     Returns one of:
+#       - Clean TXT (default, no timestamps)
+#       - Timestamped TXT (when clean=False and fmt is None)
+#       - SRT / VTT (when fmt == 'srt' or 'vtt')
+#     Raises Exception if nothing could be fetched.
+#     """
+#     vid = (video_id_or_url or "").strip()
+#     logger.info("Smart fetch %s (clean=%s, fmt=%s)", vid, clean, fmt)
+
+#     # 1) If cookies exist, **prefer yt-dlp** (handles consent/bot walls reliably)
+#     if _resolve_cookies_path():
+#         text = get_transcript_with_ytdlp(vid, clean=clean, fmt=fmt)
+#         if text:
+#             return text
+#         # fall through to API if yt-dlp unexpectedly fails
+
+#     # 2) Try API (works when public captions are available and IP isn't blocked)
+#     seg = _api_try(vid)
+#     if seg:
+#         if fmt == "srt":
+#             return segments_to_srt(seg)
+#         if fmt == "vtt":
+#             return segments_to_vtt(seg)
+#         if clean:
+#             return _clean_plain_blocks([(_get(s, "text", "") or "").replace("\n", " ") for s in seg])
+#         return _format_timestamped(seg)
+
+#     # 3) Optional: retry API via proxies
+#     if use_proxies and PROXY_LIST:
+#         for proxy_url in PROXY_LIST:
+#             proxies = {"http": proxy_url, "https": proxy_url}
+#             seg = _api_try(vid, proxies=proxies)
+#             if seg:
+#                 if fmt == "srt":
+#                     return segments_to_srt(seg)
+#                 if fmt == "vtt":
+#                     return segments_to_vtt(seg)
+#                 if clean:
+#                     return _clean_plain_blocks([(_get(s, "text", "") or "").replace("\n", " ") for s in seg])
+#                 return _format_timestamped(seg)
+
+#     # 4) Final attempt: yt-dlp again (even without cookies), then fail
+#     text = get_transcript_with_ytdlp(vid, clean=clean, fmt=fmt)
+#     if text:
+#         return text
+
+#     raise Exception("Could not retrieve transcript (no captions or YouTube blocked our requests).")
+
+# ## ---------------End transcript_utils Module-----------------

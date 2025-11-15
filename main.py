@@ -942,60 +942,177 @@ def root():
             "version": "3.4.2", "features": ["transcripts","audio","video","mobile","history","payments"],
             "downloads_path": str(DOWNLOADS_DIR)}
 
+#------------------------New register endpoint with debbug (DeepSeek)-------------------------
 @app.post("/register")
 def register(user: UserCreate, db: Session = Depends(get_db)):
+    # Enhanced debug logging
+    logger.info(f"🔵 REGISTRATION STARTED - Username: {user.username}, Email: {user.email}")
+    
     username = (user.username or "").strip()
     email = (user.email or "").strip().lower()
 
-    if db.query(User).filter(User.username == username).first():
+    logger.info(f"🔵 Processing registration - Username: '{username}', Email: '{email}'")
+
+    # Check for existing username with debug
+    existing_user = db.query(User).filter(User.username == username).first()
+    if existing_user:
+        logger.warning(f"❌ REGISTRATION FAILED - Username already exists: {username}")
         raise HTTPException(status_code=400, detail="Username already exists.")
-    if db.query(User).filter(User.email == email).first():
+    
+    # Check for existing email with debug  
+    existing_email = db.query(User).filter(User.email == email).first()
+    if existing_email:
+        logger.warning(f"❌ REGISTRATION FAILED - Email already exists: {email}")
         raise HTTPException(status_code=400, detail="Email already exists.")
 
-    obj = User(
-        username=username,
-        email=email,
-        hashed_password=get_password_hash(user.password),
-        created_at=datetime.utcnow(),
-        subscription_tier="free",
-    )
-    db.add(obj); db.commit(); db.refresh(obj)
-    logger.info(f"✅ Registered new user: {username} ({email})")
+    logger.info(f"🔵 No existing user found - Creating new user account")
 
+    # Create user object
+    try:
+        obj = User(
+            username=username,
+            email=email,
+            hashed_password=get_password_hash(user.password),
+            created_at=datetime.utcnow(),
+            subscription_tier="free",
+        )
+        db.add(obj)
+        db.commit()
+        db.refresh(obj)
+        logger.info(f"✅ DATABASE SUCCESS - Registered new user: {username} ({email}) with ID: {obj.id}")
+    except Exception as e:
+        logger.error(f"❌ DATABASE ERROR - Failed to create user {username}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Database error during registration")
+
+    # Stripe integration with enhanced logging
     if stripe:
         try:
+            logger.info(f"🔵 Starting Stripe integration for user {obj.id}")
             customer = None
+            
+            # Search for existing Stripe customer
             try:
+                logger.info(f"🔵 Searching for existing Stripe customer with email: {email}")
                 found = stripe.Customer.search(query=f"email:'{email}' AND -deleted:'true'", limit=1)
-                if getattr(found, "data", []): customer = found.data[0]
+                if getattr(found, "data", []): 
+                    customer = found.data[0]
+                    logger.info(f"✅ Found existing Stripe customer: {customer['id']}")
             except Exception as e:
-                logger.debug("customer.search failed: %s", e)
+                logger.warning(f"⚠️ Stripe customer search failed for {email}: {str(e)}")
+
+            # Fallback: list customers
             if not customer:
                 try:
+                    logger.info(f"🔵 Fallback: listing customers with email: {email}")
                     listed = stripe.Customer.list(email=email, limit=1)
-                    if getattr(listed, "data", []): customer = listed.data[0]
+                    if getattr(listed, "data", []): 
+                        customer = listed.data[0]
+                        logger.info(f"✅ Found existing Stripe customer via list: {customer['id']}")
                 except Exception as e:
-                    logger.debug("customer.list failed: %s", e)
+                    logger.warning(f"⚠️ Stripe customer list failed for {email}: {str(e)}")
+
+            # Update existing customer or create new one
             if customer:
+                logger.info(f"🔵 Updating existing Stripe customer: {customer['id']}")
                 obj.stripe_customer_id = customer["id"]
                 try:
-                    stripe.Customer.modify(customer["id"], name=username or customer.get("name"),
-                                           metadata={**(customer.get("metadata") or {}), "app_user_id": str(obj.id)})
-                except Exception:
-                    pass
-                db.commit(); db.refresh(obj)
+                    stripe.Customer.modify(
+                        customer["id"], 
+                        name=username or customer.get("name"),
+                        metadata={**(customer.get("metadata") or {}), "app_user_id": str(obj.id)}
+                    )
+                    logger.info(f"✅ Successfully updated Stripe customer: {customer['id']}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to update Stripe customer {customer['id']}: {str(e)}")
+                
+                db.commit()
+                db.refresh(obj)
             else:
-                created = stripe.Customer.create(
-                    email=email, name=username, metadata={"app_user_id": str(obj.id)},
-                    idempotency_key=f"user_register_{obj.id}",
-                )
-                obj.stripe_customer_id = created["id"]
-                db.commit(); db.refresh(obj)
-        except Exception as e:
-            logger.warning("Stripe customer link/create failed for %s: %s", email, e)
+                logger.info(f"🔵 Creating new Stripe customer for user {obj.id}")
+                try:
+                    created = stripe.Customer.create(
+                        email=email, 
+                        name=username, 
+                        metadata={"app_user_id": str(obj.id)},
+                        idempotency_key=f"user_register_{obj.id}",
+                    )
+                    obj.stripe_customer_id = created["id"]
+                    db.commit()
+                    db.refresh(obj)
+                    logger.info(f"✅ Successfully created new Stripe customer: {created['id']}")
+                except Exception as e:
+                    logger.error(f"❌ Stripe customer creation failed for {email}: {str(e)}")
+                    # Don't fail registration if Stripe fails
+                    logger.info("🟡 Continuing registration without Stripe integration")
 
-    return {"message": "User registered successfully.", "account": canonical_account(obj),
-            "stripe_customer_id": getattr(obj, "stripe_customer_id", None)}
+        except Exception as e:
+            logger.error(f"❌ STRIPE INTEGRATION FAILED for {email}: {str(e)}")
+            # Continue without failing the registration
+            logger.info("🟡 Registration continuing despite Stripe failure")
+
+    logger.info(f"🎉 REGISTRATION COMPLETED SUCCESSFULLY - User: {username} ({email})")
+    
+    return {
+        "message": "User registered successfully.", 
+        "account": canonical_account(obj),
+        "stripe_customer_id": getattr(obj, "stripe_customer_id", None)
+    }
+
+#-----------------------------------------------
+# @app.post("/register")
+# def register(user: UserCreate, db: Session = Depends(get_db)):
+#     username = (user.username or "").strip()
+#     email = (user.email or "").strip().lower()
+
+#     if db.query(User).filter(User.username == username).first():
+#         raise HTTPException(status_code=400, detail="Username already exists.")
+#     if db.query(User).filter(User.email == email).first():
+#         raise HTTPException(status_code=400, detail="Email already exists.")
+
+#     obj = User(
+#         username=username,
+#         email=email,
+#         hashed_password=get_password_hash(user.password),
+#         created_at=datetime.utcnow(),
+#         subscription_tier="free",
+#     )
+#     db.add(obj); db.commit(); db.refresh(obj)
+#     logger.info(f"✅ Registered new user: {username} ({email})")
+
+#     if stripe:
+#         try:
+#             customer = None
+#             try:
+#                 found = stripe.Customer.search(query=f"email:'{email}' AND -deleted:'true'", limit=1)
+#                 if getattr(found, "data", []): customer = found.data[0]
+#             except Exception as e:
+#                 logger.debug("customer.search failed: %s", e)
+#             if not customer:
+#                 try:
+#                     listed = stripe.Customer.list(email=email, limit=1)
+#                     if getattr(listed, "data", []): customer = listed.data[0]
+#                 except Exception as e:
+#                     logger.debug("customer.list failed: %s", e)
+#             if customer:
+#                 obj.stripe_customer_id = customer["id"]
+#                 try:
+#                     stripe.Customer.modify(customer["id"], name=username or customer.get("name"),
+#                                            metadata={**(customer.get("metadata") or {}), "app_user_id": str(obj.id)})
+#                 except Exception:
+#                     pass
+#                 db.commit(); db.refresh(obj)
+#             else:
+#                 created = stripe.Customer.create(
+#                     email=email, name=username, metadata={"app_user_id": str(obj.id)},
+#                     idempotency_key=f"user_register_{obj.id}",
+#                 )
+#                 obj.stripe_customer_id = created["id"]
+#                 db.commit(); db.refresh(obj)
+#         except Exception as e:
+#             logger.warning("Stripe customer link/create failed for %s: %s", email, e)
+
+#     return {"message": "User registered successfully.", "account": canonical_account(obj),
+#             "stripe_customer_id": getattr(obj, "stripe_customer_id", None)}
 
 @app.post("/auth/forgot-password")
 def forgot_password(payload: ForgotPasswordIn):
