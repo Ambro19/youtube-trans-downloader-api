@@ -30,11 +30,7 @@ YTDLP_DIR_ENV = os.getenv("YT_DLP_DIR") or "/tmp/yt-dlp"
 
 _COOKIES_CACHE: Optional[str] = None
 
-
 def _get_cookies_file() -> Optional[str]:
-    """
-    Enhanced cookie management for Render environment
-    """
     global _COOKIES_CACHE
 
     if _COOKIES_CACHE is not None and os.path.exists(_COOKIES_CACHE):
@@ -42,116 +38,100 @@ def _get_cookies_file() -> Optional[str]:
 
     log = logger
     
-    # Strategy 1: Base64 encoded cookies (preferred for Render)
+    # Strategy 1: Base64 encoded cookies
     if COOKIES_B64_ENV:
         try:
             target_dir = Path(YTDLP_DIR_ENV)
             target_dir.mkdir(parents=True, exist_ok=True, mode=0o755)
             target = target_dir / "cookies.txt"
             
-            # Only decode if file doesn't exist or is empty
-            if not target.exists() or target.stat().st_size == 0:
+            # Only decode if file doesn't exist
+            if not target.exists():
                 decoded = base64.b64decode(COOKIES_B64_ENV)
                 decoded = decoded.replace(b"\r\n", b"\n").replace(b"\n\n", b"\n")
                 with open(target, "wb") as f:
                     f.write(decoded)
                 log.info("Decoded YT_COOKIES_B64 to %s (%d bytes)", target, len(decoded))
             
-            # Verify cookies are valid
-            if target.exists() and target.stat().st_size > 100:  # Reasonable minimum size
+            # REMOVE THE SIZE CHECK - accept any cookies file
+            if target.exists():
                 _COOKIES_CACHE = str(target)
-                log.info("Using base64 cookies from %s", _COOKIES_CACHE)
+                log.info("Using cookies from %s (size: %d bytes)", _COOKIES_CACHE, target.stat().st_size)
                 return _COOKIES_CACHE
-            else:
-                log.warning("Decoded cookies file is too small or invalid")
                 
         except Exception as e:
             log.error("Failed to decode YT_COOKIES_B64: %s", e)
 
-    # Strategy 2: File path (for local development)
-    if COOKIES_FILE_ENV and os.path.exists(COOKIES_FILE_ENV):
-        try:
-            # For Render secrets, we might need to copy to writable location
-            if not os.access(COOKIES_FILE_ENV, os.W_OK):
-                # Copy read-only secret to writable location
-                target_dir = Path(YTDLP_DIR_ENV)
-                target_dir.mkdir(parents=True, exist_ok=True, mode=0o755)
-                target = target_dir / "cookies_from_secret.txt"
-                
-                with open(COOKIES_FILE_ENV, 'rb') as src, open(target, 'wb') as dst:
-                    dst.write(src.read())
-                
-                _COOKIES_CACHE = str(target)
-                log.info("Copied read-only cookies to writable location: %s", _COOKIES_CACHE)
-            else:
-                _COOKIES_CACHE = COOKIES_FILE_ENV
-                log.info("Using cookies from YT_COOKIES_FILE=%s", COOKIES_FILE_ENV)
-                
-            return _COOKIES_CACHE
-            
-        except Exception as e:
-            log.error("Failed to handle YT_COOKIES_FILE: %s", e)
-
-    log.warning("No valid cookies configuration available")
+    log.warning("No cookies configuration available")
     _COOKIES_CACHE = None
     return None
 
 # def _get_cookies_file() -> Optional[str]:
 #     """
-#     Returns a readable cookies file path for yt-dlp, or None.
-
-#     Priority:
-#       1) Decode YT_COOKIES_B64 into <YT_DLP_DIR>/cookies.txt (writable)
-#       2) Use YT_COOKIES_FILE if it exists and is readable
-
-#     IMPORTANT: We never write into YT_COOKIES_FILE (e.g. /etc/secrets),
-#     because Render mounts that read-only.
+#     Enhanced cookie management for Render environment
 #     """
 #     global _COOKIES_CACHE
 
-#     if _COOKIES_CACHE is not None:
-#         # If the cached path no longer exists, drop it and re-resolve.
-#         if _COOKIES_CACHE and os.path.exists(_COOKIES_CACHE):
-#             return _COOKIES_CACHE
-#         _COOKIES_CACHE = None
+#     if _COOKIES_CACHE is not None and os.path.exists(_COOKIES_CACHE):
+#         return _COOKIES_CACHE
 
-#     log = logger  # shorthand
-
-#     # 1) Prefer base64 env var: decode once into /tmp/yt-dlp/cookies.txt
+#     log = logger
+    
+#     # Strategy 1: Base64 encoded cookies (preferred for Render)
 #     if COOKIES_B64_ENV:
 #         try:
 #             target_dir = Path(YTDLP_DIR_ENV)
-#             target_dir.mkdir(parents=True, exist_ok=True)
+#             target_dir.mkdir(parents=True, exist_ok=True, mode=0o755)
 #             target = target_dir / "cookies.txt"
-
-#             if not target.exists():
+            
+#             # Only decode if file doesn't exist or is empty
+#             if not target.exists() or target.stat().st_size == 0:
 #                 decoded = base64.b64decode(COOKIES_B64_ENV)
-#                 # normalize line endings for Netscape cookie file
-#                 decoded = decoded.replace(b"\r\n", b"\n")
+#                 decoded = decoded.replace(b"\r\n", b"\n").replace(b"\n\n", b"\n")
 #                 with open(target, "wb") as f:
 #                     f.write(decoded)
-#                 log.info("Decoded YT_COOKIES_B64 to %s", target)
-
-#             _COOKIES_CACHE = str(target)
-#             return _COOKIES_CACHE
+#                 log.info("Decoded YT_COOKIES_B64 to %s (%d bytes)", target, len(decoded))
+            
+#             # Verify cookies are valid
+#             if target.exists() and target.stat().st_size > 100:  # Reasonable minimum size
+#                 _COOKIES_CACHE = str(target)
+#                 log.info("Using base64 cookies from %s", _COOKIES_CACHE)
+#                 return _COOKIES_CACHE
+#             else:
+#                 log.warning("Decoded cookies file is too small or invalid")
+                
 #         except Exception as e:
-#             log.warning("Failed to decode YT_COOKIES_B64: %s", e)
+#             log.error("Failed to decode YT_COOKIES_B64: %s", e)
 
-#     # 2) Fallback: use a pre-mounted cookies file if it exists and is readable
-#     if COOKIES_FILE_ENV:
-#         if os.path.exists(COOKIES_FILE_ENV) and os.access(COOKIES_FILE_ENV, os.R_OK):
-#             _COOKIES_CACHE = COOKIES_FILE_ENV
-#             log.info("Using cookies from YT_COOKIES_FILE=%s", COOKIES_FILE_ENV)
+#     # Strategy 2: File path (for local development)
+#     if COOKIES_FILE_ENV and os.path.exists(COOKIES_FILE_ENV):
+#         try:
+#             # For Render secrets, we might need to copy to writable location
+#             if not os.access(COOKIES_FILE_ENV, os.W_OK):
+#                 # Copy read-only secret to writable location
+#                 target_dir = Path(YTDLP_DIR_ENV)
+#                 target_dir.mkdir(parents=True, exist_ok=True, mode=0o755)
+#                 target = target_dir / "cookies_from_secret.txt"
+                
+#                 with open(COOKIES_FILE_ENV, 'rb') as src, open(target, 'wb') as dst:
+#                     dst.write(src.read())
+                
+#                 _COOKIES_CACHE = str(target)
+#                 log.info("Copied read-only cookies to writable location: %s", _COOKIES_CACHE)
+#             else:
+#                 _COOKIES_CACHE = COOKIES_FILE_ENV
+#                 log.info("Using cookies from YT_COOKIES_FILE=%s", COOKIES_FILE_ENV)
+                
 #             return _COOKIES_CACHE
-#         else:
-#             log.warning(
-#                 "YT_COOKIES_FILE=%s not readable or missing",
-#                 COOKIES_FILE_ENV,
-#             )
+            
+#         except Exception as e:
+#             log.error("Failed to handle YT_COOKIES_FILE: %s", e)
 
-#     log.info("No cookies configured (YT_COOKIES_FILE / YT_COOKIES_B64).")
+#     log.warning("No valid cookies configuration available")
 #     _COOKIES_CACHE = None
 #     return None
+
+
 
 # keep for backwards compatibility with transcript_fetcher.py
 def _resolve_cookies_path() -> Optional[str]:
