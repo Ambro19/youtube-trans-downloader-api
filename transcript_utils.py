@@ -66,73 +66,6 @@ def _get_cookies_file() -> Optional[str]:
     _COOKIES_CACHE = None
     return None
 
-# def _get_cookies_file() -> Optional[str]:
-#     """
-#     Enhanced cookie management for Render environment
-#     """
-#     global _COOKIES_CACHE
-
-#     if _COOKIES_CACHE is not None and os.path.exists(_COOKIES_CACHE):
-#         return _COOKIES_CACHE
-
-#     log = logger
-    
-#     # Strategy 1: Base64 encoded cookies (preferred for Render)
-#     if COOKIES_B64_ENV:
-#         try:
-#             target_dir = Path(YTDLP_DIR_ENV)
-#             target_dir.mkdir(parents=True, exist_ok=True, mode=0o755)
-#             target = target_dir / "cookies.txt"
-            
-#             # Only decode if file doesn't exist or is empty
-#             if not target.exists() or target.stat().st_size == 0:
-#                 decoded = base64.b64decode(COOKIES_B64_ENV)
-#                 decoded = decoded.replace(b"\r\n", b"\n").replace(b"\n\n", b"\n")
-#                 with open(target, "wb") as f:
-#                     f.write(decoded)
-#                 log.info("Decoded YT_COOKIES_B64 to %s (%d bytes)", target, len(decoded))
-            
-#             # Verify cookies are valid
-#             if target.exists() and target.stat().st_size > 100:  # Reasonable minimum size
-#                 _COOKIES_CACHE = str(target)
-#                 log.info("Using base64 cookies from %s", _COOKIES_CACHE)
-#                 return _COOKIES_CACHE
-#             else:
-#                 log.warning("Decoded cookies file is too small or invalid")
-                
-#         except Exception as e:
-#             log.error("Failed to decode YT_COOKIES_B64: %s", e)
-
-#     # Strategy 2: File path (for local development)
-#     if COOKIES_FILE_ENV and os.path.exists(COOKIES_FILE_ENV):
-#         try:
-#             # For Render secrets, we might need to copy to writable location
-#             if not os.access(COOKIES_FILE_ENV, os.W_OK):
-#                 # Copy read-only secret to writable location
-#                 target_dir = Path(YTDLP_DIR_ENV)
-#                 target_dir.mkdir(parents=True, exist_ok=True, mode=0o755)
-#                 target = target_dir / "cookies_from_secret.txt"
-                
-#                 with open(COOKIES_FILE_ENV, 'rb') as src, open(target, 'wb') as dst:
-#                     dst.write(src.read())
-                
-#                 _COOKIES_CACHE = str(target)
-#                 log.info("Copied read-only cookies to writable location: %s", _COOKIES_CACHE)
-#             else:
-#                 _COOKIES_CACHE = COOKIES_FILE_ENV
-#                 log.info("Using cookies from YT_COOKIES_FILE=%s", COOKIES_FILE_ENV)
-                
-#             return _COOKIES_CACHE
-            
-#         except Exception as e:
-#             log.error("Failed to handle YT_COOKIES_FILE: %s", e)
-
-#     log.warning("No valid cookies configuration available")
-#     _COOKIES_CACHE = None
-#     return None
-
-
-
 # keep for backwards compatibility with transcript_fetcher.py
 def _resolve_cookies_path() -> Optional[str]:
     """
@@ -187,51 +120,6 @@ def _apply_cookie_opts(opts: Dict[str, Any]) -> Dict[str, Any]:
     
     return opts
     
-# def _apply_cookie_opts(opts: Dict[str, Any]) -> Dict[str, Any]:
-#     """
-#     Enhanced bot bypass with multiple strategies
-#     """
-#     cp = _get_cookies_file()
-#     if cp:
-#         opts["cookiefile"] = cp
-
-#     # Force IPv4 to avoid network issues
-#     opts["force_ipv4"] = True
-    
-#     # Enhanced headers for mobile emulation
-#     opts.setdefault("http_headers", {})
-#     opts["http_headers"].update({
-#         "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36",
-#         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-#         "Accept-Language": "en-US,en;q=0.9",
-#         "Accept-Encoding": "gzip, deflate, br",
-#         "DNT": "1",
-#         "Connection": "keep-alive",
-#         "Upgrade-Insecure-Requests": "1",
-#     })
-
-#     # Multiple extractor strategies
-#     opts.setdefault("extractor_args", {})
-#     youtube_args = opts["extractor_args"].setdefault("youtube", {})
-    
-#     # Try multiple client types in order
-#     youtube_args["player_client"] = ["android", "web", "ios"]
-    
-#     # Additional yt-dlp options for robustness
-#     opts.update({
-#         "ignoreerrors": True,
-#         "no_check_certificate": True,
-#         "prefer_insecure": False,
-#         "sleep_interval": 1,
-#         "max_sleep_interval": 5,
-#         "retries": 10,
-#         "fragment_retries": 10,
-#         "skip_unavailable_fragments": True,
-#         "extract_flat": False,
-#     })
-    
-#     return opts
-
 
 # ======================================================
 # Common helpers
@@ -491,42 +379,100 @@ def get_video_info(video_id_or_url: str) -> Dict[str, Any]:
         }
 
 
+# def download_audio_with_ytdlp(
+#     video_id_or_url: str,
+#     quality: str,
+#     output_dir: str,
+# ) -> str:
+#     q = (quality or "").lower()
+#     kbps = "96" if q in {"low", "l"} else "256" if q in {"high", "h"} else "160"
+
+#     opts: Dict[str, Any] = {
+#         "format": "bestaudio/best",
+#         "postprocessors": [
+#             {
+#                 "key": "FFmpegExtractAudio",
+#                 "preferredcodec": "mp3",
+#                 "preferredquality": kbps,
+#             },
+#             {"key": "FFmpegMetadata"},
+#             {"key": "EmbedThumbnail", "already_have_thumbnail": False},
+#         ],
+#         "outtmpl": _safe_outtmpl(output_dir),
+#         "noprogress": True,
+#         "quiet": True,
+#         "writethumbnail": True,
+#     }
+#     ffmpeg_loc = _ensure_ffmpeg_location()
+#     if ffmpeg_loc:
+#         opts["ffmpeg_location"] = ffmpeg_loc
+#     _apply_cookie_opts(opts)
+
+#     os.makedirs(output_dir, exist_ok=True)
+#     url = _norm_youtube_url(video_id_or_url)
+#     with YoutubeDL(opts) as ydl:
+#         info = ydl.extract_info(url, download=True)
+#         base = ydl.prepare_filename(info)
+#         return base.rsplit(".", 1)[0] + ".mp3"
+
+
 def download_audio_with_ytdlp(
     video_id_or_url: str,
     quality: str,
     output_dir: str,
 ) -> str:
-    q = (quality or "").lower()
-    kbps = "96" if q in {"low", "l"} else "256" if q in {"high", "h"} else "160"
+    try:
+        q = (quality or "").lower()
+        kbps = "96" if q in {"low", "l"} else "256" if q in {"high", "h"} else "160"
 
-    opts: Dict[str, Any] = {
-        "format": "bestaudio/best",
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": kbps,
-            },
-            {"key": "FFmpegMetadata"},
-            {"key": "EmbedThumbnail", "already_have_thumbnail": False},
-        ],
-        "outtmpl": _safe_outtmpl(output_dir),
-        "noprogress": True,
-        "quiet": True,
-        "writethumbnail": True,
-    }
-    ffmpeg_loc = _ensure_ffmpeg_location()
-    if ffmpeg_loc:
-        opts["ffmpeg_location"] = ffmpeg_loc
-    _apply_cookie_opts(opts)
+        opts: Dict[str, Any] = {
+            "format": "bestaudio/best",
+            "postprocessors": [
+                {
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": kbps,
+                },
+                {"key": "FFmpegMetadata"},
+                {"key": "EmbedThumbnail", "already_have_thumbnail": False},
+            ],
+            "outtmpl": _safe_outtmpl(output_dir),
+            "noprogress": True,
+            "quiet": False,  # Change to False for debugging
+            "writethumbnail": True,
+        }
+        
+        ffmpeg_loc = _ensure_ffmpeg_location()
+        if ffmpeg_loc:
+            opts["ffmpeg_location"] = ffmpeg_loc
+        
+        _apply_cookie_opts(opts)
 
-    os.makedirs(output_dir, exist_ok=True)
-    url = _norm_youtube_url(video_id_or_url)
-    with YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        base = ydl.prepare_filename(info)
-        return base.rsplit(".", 1)[0] + ".mp3"
-
+        os.makedirs(output_dir, exist_ok=True)
+        url = _norm_youtube_url(video_id_or_url)
+        
+        with YoutubeDL(opts) as ydl:
+            # Add error handling for info extraction
+            try:
+                info = ydl.extract_info(url, download=True)
+                if not info:
+                    raise Exception("Failed to extract video info")
+                    
+                base = ydl.prepare_filename(info)
+                mp3_path = base.rsplit(".", 1)[0] + ".mp3"
+                
+                if not os.path.exists(mp3_path):
+                    raise Exception(f"MP3 file not created: {mp3_path}")
+                    
+                return mp3_path
+                
+            except Exception as e:
+                logger.error(f"Audio download failed: {str(e)}")
+                raise
+                
+    except Exception as e:
+        logger.error(f"Audio download failed for {video_id_or_url}: {str(e)}")
+        raise Exception(f"Audio download failed: {str(e)}")
 
 def download_video_with_ytdlp(
     video_id_or_url: str,
