@@ -740,7 +740,6 @@ def create_download_record(db: Session, user: User, kind: str, youtube_id: str, 
         db.rollback()
         return None
 
-
 def classify_activity_by_format(transcript_type: str, file_format: str) -> tuple[str, str, str, str]:
     t_type = (transcript_type or "").lower()
     f_format = (file_format or "").lower()
@@ -926,14 +925,169 @@ def _cleanup_stale_files_loop():
             logger.warning(f"stale-files cleanup error: {e}")
         time.sleep(12 * 3600)
 
+# ==============================================================================
+# MAIN.PY UPDATES - ADD THESE TWO FUNCTIONS
+# ==============================================================================
+# Add these functions after your imports section, before @app.on_event("startup")
+
+def _sanitize_stripe_key():
+    """
+    Remove whitespace/newlines from Stripe key.
+    
+    FIXES: InvalidHeader error caused by newlines in STRIPE_SECRET_KEY
+    """
+    key = os.getenv("STRIPE_SECRET_KEY")
+    if key:
+        clean_key = key.strip()
+        if clean_key != key:
+            os.environ["STRIPE_SECRET_KEY"] = clean_key
+            logger.info("✅ Sanitized STRIPE_SECRET_KEY (removed %d whitespace chars)", 
+                       len(key) - len(clean_key))
+        
+        # Re-initialize Stripe with clean key
+        try:
+            import stripe as _stripe
+            _stripe.api_key = clean_key
+            global stripe
+            stripe = _stripe
+            logger.info("✅ Stripe configured with clean API key")
+        except Exception as e:
+            logger.warning("⚠️  Could not reinitialize Stripe: %s", e)
+
+
+def _hydrate_youtube_cookies_to_tmp() -> None:
+    """
+    Normalize cookie env so yt-dlp always gets a writable, ephemeral file.
+    
+    Priority:
+      1. YT_COOKIES_B64 (preferred) -> decode to /tmp/yt-dlp/cookies.txt
+      2. YT_COOKIES_FILE (fallback) -> copy to /tmp if in read-only mount
+    
+    Also sets cache dirs to /tmp to avoid permission issues.
+    
+    FIXES: Cookie file not accessible, YouTube bot detection
+    """
+    import base64
+    import tempfile
+    import shutil
+    
+    # Keep yt-dlp caches ephemeral (writable)
+    os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
+    os.environ.setdefault("YTDLP_HOME", "/tmp/yt-dlp")
+    os.environ.setdefault("YT_DLP_DIR", "/tmp/yt-dlp")
+    
+    # Strategy 1: Decode YT_COOKIES_B64 env var
+    b64 = (os.getenv("YT_COOKIES_B64") or "").strip()
+    if b64:
+        try:
+            # Decode base64
+            raw = base64.b64decode(b64)
+            
+            # Normalize line endings for Netscape cookie file format
+            raw = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            
+            # Write to /tmp (guaranteed writable)
+            target_dir = Path("/tmp/yt-dlp")
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / "cookies.txt"
+            
+            with open(target, "wb") as f:
+                f.write(raw)
+            
+            # Verify
+            if target.exists() and target.stat().st_size > 10:
+                os.environ["YT_COOKIES_FILE"] = str(target)
+                logger.info("✅ Decoded YT_COOKIES_B64 to %s (%d bytes)", 
+                           target, len(raw))
+                return
+            else:
+                logger.warning("⚠️  Decoded cookies file is empty or missing")
+                
+        except Exception as e:
+            logger.error("❌ Failed to decode YT_COOKIES_B64: %s", e, exc_info=True)
+    
+    # Strategy 2: Copy existing YT_COOKIES_FILE if in read-only location
+    fpath = (os.getenv("YT_COOKIES_FILE") or "").strip()
+    if fpath and os.path.exists(fpath):
+        try:
+            # If mounted in read-only location, copy to /tmp
+            if fpath.startswith(("/etc/", "/run/")):
+                target_dir = Path("/tmp/yt-dlp")
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target = target_dir / "cookies.txt"
+                
+                shutil.copyfile(fpath, target)
+                os.environ["YT_COOKIES_FILE"] = str(target)
+                logger.info("✅ Copied YT_COOKIES_FILE from %s to %s", fpath, target)
+            else:
+                # Already writable
+                logger.info("✅ Using YT_COOKIES_FILE: %s", fpath)
+        except Exception as e:
+            logger.warning("⚠️  Could not copy YT_COOKIES_FILE to /tmp: %s", e)
+    else:
+        if not b64 and not fpath:
+            logger.warning("⚠️  No YouTube cookies configured (YT_COOKIES_B64 or YT_COOKIES_FILE)")
+            logger.warning("⚠️  Transcript downloads may be blocked by YouTube")
+
+# @app.on_event("startup")
+# async def on_startup():
+#     _hydrate_youtube_cookies_to_tmp()  # <<< add this
+#     initialize_database()
+#     run_startup_migrations(engine)
+#     threading.Thread(target=_cleanup_stale_files_loop, daemon=True).start()
+#     logger.info("Environment: %s", ENVIRONMENT)
+#     logger.info("Backend started")
+
+# ==============================================================================
+# REPLACE YOUR EXISTING @app.on_event("startup") WITH THIS
+# ==============================================================================
+
 @app.on_event("startup")
 async def on_startup():
-    _hydrate_youtube_cookies_to_tmp()  # <<< add this
+    """
+    Application startup tasks.
+    
+    CRITICAL ORDER:
+    1. Fix environment variables (Stripe + cookies) FIRST
+    2. Initialize database
+    3. Start background tasks
+    4. Log startup info
+    """
+    # Step 1: Fix environment variables BEFORE anything else
+    _sanitize_stripe_key()          # Fix Stripe newline issue
+    _hydrate_youtube_cookies_to_tmp()  # Fix YouTube cookie access
+    
+    # Step 2: Initialize database
     initialize_database()
     run_startup_migrations(engine)
+    
+    # Step 3: Start background cleanup task
     threading.Thread(target=_cleanup_stale_files_loop, daemon=True).start()
-    logger.info("Environment: %s", ENVIRONMENT)
-    logger.info("Backend started")
+    
+    # Step 4: Log startup information
+    logger.info("=" * 60)
+    logger.info("🚀 YouTube Content Downloader API Starting")
+    logger.info("=" * 60)
+    logger.info("📝 Environment: %s", ENVIRONMENT)
+    logger.info("📁 Downloads directory: %s", DOWNLOADS_DIR)
+    logger.info("🗄️  Database: %s", "PostgreSQL" if "postgres" in DATABASE_URL else "SQLite")
+    
+    # Log service availability
+    cookie_file = os.getenv("YT_COOKIES_FILE")
+    logger.info("🍪 Cookies configured: %s", bool(cookie_file and os.path.exists(cookie_file)))
+    if cookie_file and os.path.exists(cookie_file):
+        logger.info("   └─ Path: %s", cookie_file)
+        logger.info("   └─ Size: %d bytes", os.path.getsize(cookie_file))
+    
+    logger.info("💳 Stripe configured: %s", bool(stripe and os.getenv("STRIPE_SECRET_KEY")))
+    logger.info("🎬 yt-dlp available: %s", check_ytdlp_availability())
+    logger.info("🌐 Internet: %s", check_internet())
+    
+    logger.info("=" * 60)
+    logger.info("✅ Backend started successfully")
+    logger.info("=" * 60)
+
+
 
 
 @app.get("/")
