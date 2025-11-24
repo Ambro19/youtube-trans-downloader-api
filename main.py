@@ -10,7 +10,7 @@
 
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, Literal
 import re, time, socket, mimetypes, logging, jwt, threading, os
 from collections import defaultdict, deque
 
@@ -836,6 +836,26 @@ class HelperUsageReport(BaseModel):
     quality: Optional[str] = "default"
     file_size: Optional[int] = 0
     processing_time: Optional[float] = 0.0
+
+# Minimal new API endpoints (drop-in FastAPI code)
+#from typing import Literal
+
+class ClientTranscriptUpload(BaseModel):
+    youtube_id: str
+    text: str
+    clean_transcript: bool = True
+    format: Optional[str] = None  # 'txt', 'srt', 'vtt', etc.
+    duration: Optional[float] = None  # seconds, if helper knows it
+    source: Optional[str] = "desktop_helper"
+
+class ClientMediaReport(BaseModel):
+    youtube_id: str
+    kind: Literal["audio", "video"]
+    quality: str = "default"
+    file_format: Optional[str] = None  # 'mp3', 'mp4', etc.
+    file_size: Optional[int] = None    # bytes (optional but nice)
+    duration: Optional[float] = None   # seconds
+    source: Optional[str] = "desktop_helper"
 
 #------------------End of (“YCD Desktop Helper”) --------------------------
 
@@ -2455,6 +2475,155 @@ def health():
         },
         "downloads_path": str(DOWNLOADS_DIR),
     }
+
+#--------------The Desktop Helper Endpoints------------
+@app.post("/client/upload-transcript")
+def client_upload_transcript(
+    payload: ClientTranscriptUpload,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Record a transcript that was fetched on the client (Desktop Helper).
+
+    The helper has already done all YouTube work and sends us the text.
+    We just:
+      - validate usage limits
+      - increment usage
+      - create a TranscriptDownload record
+    """
+    vid = extract_youtube_video_id(payload.youtube_id)
+    if not vid or len(vid) != 11:
+        raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+
+    ensure_monthly_reset_and_tier(db, user)
+
+    # Work out usage bucket & canonical format
+    if payload.format in ["srt", "vtt"]:
+        usage_key = "unclean_transcripts"
+        file_format = payload.format
+    elif payload.clean_transcript:
+        usage_key = "clean_transcripts"
+        file_format = "txt"
+    else:
+        usage_key = "unclean_transcripts"
+        file_format = "txt"
+
+    ok, used, limit = check_usage_limit(user, usage_key)
+    if not ok:
+        type_name = (
+            "SRT transcript" if payload.format == "srt"
+            else "VTT transcript" if payload.format == "vtt"
+            else "clean transcript" if payload.clean_transcript
+            else "timestamped transcript"
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=f"Monthly limit reached for {type_name} ({used}/{limit}).",
+        )
+
+    text = (payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Transcript text is empty.")
+
+    # Size accounting is purely informational
+    size = len(text.encode("utf-8"))
+
+    new_usage = increment_user_usage(db, user, usage_key)
+    rec = create_download_record(
+        db=db,
+        user=user,
+        kind=usage_key,
+        youtube_id=vid,
+        file_format=file_format,
+        file_size=size,
+        processing_time=0.0,
+    )
+
+    logger.info(
+        "📥 Client transcript uploaded for %s by %s (format=%s, size=%d, usage_key=%s)",
+        vid,
+        user.email,
+        file_format,
+        size,
+        usage_key,
+    )
+
+    return {
+        "ok": True,
+        "usage_updated": new_usage,
+        "usage_type": usage_key,
+        "download_record_id": rec.id if rec else None,
+        "account": canonical_account(user),
+    }
+
+
+@app.post("/client/report-media-download")
+def client_report_media_download(
+    payload: ClientMediaReport,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Record an audio/video download performed by the Desktop Helper.
+
+    We do NOT receive the media bytes here – only metadata.
+    This keeps your server light while preserving usage/accounting.
+    """
+    vid = extract_youtube_video_id(payload.youtube_id)
+    if not vid or len(vid) != 11:
+        raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+
+    ensure_monthly_reset_and_tier(db, user)
+
+    if payload.kind == "audio":
+        usage_key = "audio_downloads"
+        default_format = "mp3"
+    else:
+        usage_key = "video_downloads"
+        default_format = "mp4"
+
+    ok, used, limit = check_usage_limit(user, usage_key)
+    if not ok:
+        label = "audio downloads" if payload.kind == "audio" else "video downloads"
+        raise HTTPException(
+            status_code=403,
+            detail=f"Monthly limit reached for {label} ({used}/{limit}).",
+        )
+
+    file_format = (payload.file_format or default_format).lower()
+    file_size = int(payload.file_size or 0)
+
+    new_usage = increment_user_usage(db, user, usage_key)
+    rec = create_download_record(
+        db=db,
+        user=user,
+        kind=usage_key,
+        youtube_id=vid,
+        quality=payload.quality,
+        file_format=file_format,
+        file_size=file_size,
+        processing_time=0.0,
+    )
+
+    logger.info(
+        "📥 Client media reported for %s by %s (kind=%s, quality=%s, size=%d)",
+        vid,
+        user.email,
+        payload.kind,
+        payload.quality,
+        file_size,
+    )
+
+    return {
+        "ok": True,
+        "usage_updated": new_usage,
+        "usage_type": usage_key,
+        "download_record_id": rec.id if rec else None,
+        "account": canonical_account(user),
+    }
+
+#--------------- End of The Desktop Helper Endpoints-------
 
 @app.head("/health")
 def health_head():
