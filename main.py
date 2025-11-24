@@ -1631,13 +1631,14 @@ def download_transcript(
     db: Session = Depends(get_db),
 ):
     """
-    Download transcript with fixed error handling AND support for the
-    YCD Desktop Helper.
+    Download transcript with robust fallback:
 
-    Behaviour:
-      - Normal case: uses get_transcript_youtube_api and returns transcript
-      - If YouTube blocks our cloud IP: returns needs_local_helper + helper_task
-      - If video truly has no captions: returns 404
+    1. Try transcript_fetcher.get_transcript_smart (YouTubeTranscriptApi, etc.)
+    2. If that fails or returns empty -> try yt-dlp + cookies via get_transcript_with_ytdlp
+    3. Only return "no captions" 404 if BOTH strategies fail and the error really is "no captions".
+
+    This makes production behave much closer to local dev, where yt-dlp + cookies
+    is already known to succeed for videos like `_ExYGT7S3E4`.
     """
     ensure_monthly_reset_and_tier(db, user)
     start = time.time()
@@ -1645,10 +1646,14 @@ def download_transcript(
     vid = extract_youtube_video_id(req.youtube_id)
     if not vid or len(vid) != 11:
         raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
-    if not check_internet():
-        raise HTTPException(status_code=503, detail="No internet connection available.")
 
-    # Decide usage key & file format
+    if not check_internet():
+        raise HTTPException(
+            status_code=503,
+            detail="No internet connection available."
+        )
+
+    # Work out usage bucket + nominal file format
     if req.format in ["srt", "vtt"]:
         usage_key = "unclean_transcripts"
         file_format = req.format
@@ -1672,7 +1677,12 @@ def download_transcript(
             detail=f"Monthly limit reached for {type_name} ({used}/{limit}).",
         )
 
-    # Try normal transcript fetch
+    text: Optional[str] = None
+    primary_error: Optional[Exception] = None
+
+    # ------------------------------------------------------------------
+    # 1) Primary strategy: transcript_fetcher.get_transcript_smart
+    # ------------------------------------------------------------------
     try:
         text = get_transcript_youtube_api(
             vid,
@@ -1680,88 +1690,129 @@ def download_transcript(
             fmt=req.format,
         )
     except Exception as e:
-        error_msg = str(e)
-        logger.error("Transcript fetch failed for %s: %s", vid, error_msg)
-
-        lower = error_msg.lower()
-        blocked_hint = any(
-            s in lower
-            for s in [
-                "blocking transcript access",
-                "cloud servers",
-                "sign in to confirm you’re not a bot",
-                "sign in to confirm you're not a bot",
-                "bot detection",
-                "blocked our requests",
-            ]
-        )
-        no_captions_hint = any(
-            s in lower
-            for s in [
-                "does not have captions",
-                "no captions",
-                "no transcript",
-                "transcriptsdisabled",
-            ]
+        primary_error = e
+        logger.error(
+            "Primary transcript fetch failed for %s: %s",
+            vid,
+            str(e),
         )
 
-        # 👉 1) YT is blocking our cloud IP → hand off to local helper
-        if blocked_hint and not no_captions_hint:
-            logger.warning(
-                "YouTube appears to be blocking transcripts for %s from cloud IP; "
-                "returning helper_task for desktop helper.",
+    # If we got an empty string from primary, treat as failure too
+    if text is not None and isinstance(text, str) and not text.strip():
+        logger.warning(
+            "Primary transcript fetch for %s returned empty text; will try yt-dlp fallback",
+            vid,
+        )
+        text = None
+
+    # ------------------------------------------------------------------
+    # 2) Fallback strategy: yt-dlp + cookies (get_transcript_with_ytdlp)
+    # ------------------------------------------------------------------
+    used_fallback = False
+    fallback_error: Optional[Exception] = None
+
+    if text is None and check_ytdlp_availability():
+        cookie_file = os.getenv("YT_COOKIES_FILE")
+        logger.info(
+            "Attempting yt-dlp transcript fallback for %s (cookies=%s, clean=%s, fmt=%s)",
+            vid,
+            bool(cookie_file and os.path.exists(cookie_file or "")),
+            req.clean_transcript,
+            req.format,
+        )
+        try:
+            # Try with the most complete signature first
+            try:
+                text = get_transcript_with_ytdlp(
+                    vid,
+                    clean=req.clean_transcript,
+                    fmt=req.format,
+                )
+            except TypeError:
+                # Older helper that only accepts (video_id, clean)
+                text = get_transcript_with_ytdlp(
+                    vid,
+                    clean=req.clean_transcript,
+                )
+
+            used_fallback = True
+            if not text or (isinstance(text, str) and not text.strip()):
+                logger.warning(
+                    "yt-dlp fallback for %s returned empty text",
+                    vid,
+                )
+                text = None
+        except Exception as e:
+            fallback_error = e
+            logger.error(
+                "yt-dlp transcript fallback failed for %s: %s",
                 vid,
+                str(e),
             )
-            return {
-                "success": False,
-                "needs_local_helper": True,
-                "reason": (
-                    "YouTube is blocking transcript access from our servers. "
-                    "Please use the YCD Desktop Helper to fetch this transcript "
-                    "directly from your device."
-                ),
-                "helper_task": {
-                    "type": "transcript",
-                    "youtube_id": vid,
-                    "clean_transcript": req.clean_transcript,
-                    "format": req.format,
-                },
-                "usage_type": usage_key,
-            }
 
-        # 👉 2) Truly no captions available
-        if no_captions_hint:
+    # ------------------------------------------------------------------
+    # 3) If still no transcript, classify error and raise HTTPException
+    # ------------------------------------------------------------------
+    if not text:
+        # Prefer fallback error if it exists, otherwise the primary one
+        error_to_report = fallback_error or primary_error
+        error_msg = (str(error_to_report) if error_to_report else "").lower()
+
+        # Emit one consolidated log line so Render logs show the whole story
+        logger.error(
+            "Transcript completely failed for %s (used_fallback=%s, "
+            "primary_error=%r, fallback_error=%r)",
+            vid,
+            used_fallback,
+            primary_error,
+            fallback_error,
+        )
+
+        # Heuristic classification based on message text
+        if "blocking" in error_msg or "cloud provider" in error_msg:
+            # YouTube explicitly blocking data-center IPs
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "YouTube is temporarily blocking transcript access from our servers. "
+                    "This video may still be playable in your browser, but captions "
+                    "cannot be fetched right now. Please try again later or try a "
+                    "different video."
+                ),
+            )
+
+        if "no captions" in error_msg or "not have captions" in error_msg or "no transcript found" in error_msg:
+            # Only say "no captions" if ALL strategies failed
             raise HTTPException(
                 status_code=404,
-                detail="This video does not have captions/transcripts available. Please try a different video.",
+                detail=(
+                    "This video does not have captions/transcripts available from "
+                    "YouTube's APIs. Please try a different video."
+                ),
             )
 
-        # 👉 3) Generic failure
+        # Generic catch-all
         raise HTTPException(
-            status_code=404,
+            status_code=502,
             detail=(
-                "Could not retrieve transcript for this video. "
-                "The video may not have captions available, or YouTube may be blocking access."
+                "Could not retrieve transcript for this video. The video may not have "
+                "captions available, or YouTube may be blocking access from our servers."
             ),
         )
 
-    # No exception, but no text returned → treat as "no transcript"
-    if not text:
-        raise HTTPException(
-            status_code=404,
-            detail="No transcript found for this video.",
-        )
-
-    # Normal success path (cloud backend worked)
+    # ------------------------------------------------------------------
+    # 4) Success path: record usage + return transcript text
+    # ------------------------------------------------------------------
     new_usage = increment_user_usage(db, user, usage_key)
     proc = time.time() - start
+
     rec = create_download_record(
         db=db,
         user=user,
         kind=usage_key,
         youtube_id=vid,
         file_format=file_format,
-        file_size=len(text),
+        file_size=len(text or ""),
         processing_time=proc,
     )
 
@@ -1776,7 +1827,9 @@ def download_transcript(
         "usage_type": usage_key,
         "download_record_id": rec.id if rec else None,
         "account": canonical_account(user),
+        "fallback_used": used_fallback,
     }
+
 #------------------End of (“YCD Desktop Helper”) --------------------------
 
 # 4. Update /download_audio/ to offer helper task when YouTube blocks audio
