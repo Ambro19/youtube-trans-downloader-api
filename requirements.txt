@@ -38,7 +38,8 @@ defusedxml==0.7.1
 pytz==2023.3
 
 #Faster JSON with orjson
-#orjson==3.10.7
-orjson>=3.10.0,<4
+orjson==3.10.7
+#orjson>=3.10.0,<4
+
 
 
