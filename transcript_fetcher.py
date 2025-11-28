@@ -12,6 +12,7 @@ IMPROVEMENTS:
 - Better error differentiation between "no captions" vs "blocked"
 - More resilient fallback logic
 - Enhanced logging for debugging
+- FIXED: Import _get_cookies_file instead of _resolve_cookies_path
 """
 
 from __future__ import annotations
@@ -28,7 +29,8 @@ from youtube_transcript_api import (
 )
 
 # Utilities that handle cookies and extractor hints for yt-dlp:
-from transcript_utils import _resolve_cookies_path, get_transcript_with_ytdlp
+# FIXED: Use _get_cookies_file instead of _resolve_cookies_path
+from transcript_utils import _get_cookies_file, get_transcript_with_ytdlp
 
 logger = logging.getLogger("youtube_trans_downloader")
 
@@ -263,7 +265,8 @@ def get_transcript_smart(
     errors = []  # Track all errors for better debugging
     
     # Strategy 1: If cookies exist, prefer yt-dlp (handles bot walls best)
-    if _resolve_cookies_path():
+    # FIXED: Use _get_cookies_file() instead of _resolve_cookies_path()
+    if _get_cookies_file():
         logger.info("🍪 Cookies available - trying yt-dlp first")
         try:
             text = get_transcript_with_ytdlp(vid, clean=clean, fmt=fmt)
@@ -316,7 +319,8 @@ def get_transcript_smart(
         errors.append(f"API+proxies: tried {len(PROXY_LIST)} proxies, all failed")
     
     # Strategy 4: Final attempt with yt-dlp (even without cookies)
-    if not _resolve_cookies_path():
+    # FIXED: Use _get_cookies_file() instead of _resolve_cookies_path()
+    if not _get_cookies_file():
         logger.info("🔄 Final attempt: yt-dlp without cookies")
         try:
             text = get_transcript_with_ytdlp(vid, clean=clean, fmt=fmt)
@@ -348,5 +352,3 @@ def get_transcript_smart(
         raise Exception(
             "Could not retrieve transcript (no captions or YouTube blocked our requests)."
         )
-
-

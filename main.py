@@ -818,28 +818,6 @@ class VideoRequest(BaseModel): youtube_id: str; quality: str="720p"
 class CancelRequest(BaseModel): at_period_end: Optional[bool] = True
 class DeleteAccountResponse(BaseModel): message: str; deleted_at: str; user_email: str
 
-# 1. Add new helper models
-#----Architecture: client-side helper system (“YCD Desktop Helper”)---------
-#Add these just after your other Pydantic models (near CancelRequest, DeleteAccountResponse, etc.):
-
-class HelperTask(BaseModel):
-    type: str                 # "transcript" | "audio" | "video"
-    youtube_id: str
-    clean_transcript: Optional[bool] = None
-    format: Optional[str] = None       # "srt" | "vtt" | None
-    quality: Optional[str] = None      # "high"/"medium"/"low" or "1080p"/"720p"/...
-
-class HelperUsageReport(BaseModel):
-    youtube_id: str
-    usage_type: str                    # "clean_transcripts", "unclean_transcripts", "audio_downloads", "video_downloads"
-    file_format: Optional[str] = "txt" # "txt", "srt", "vtt", "mp3", "mp4", ...
-    quality: Optional[str] = "default"
-    file_size: Optional[int] = 0
-    processing_time: Optional[float] = 0.0
-
-# Minimal new API endpoints (drop-in FastAPI code)
-#from typing import Literal
-
 class ClientTranscriptUpload(BaseModel):
     youtube_id: str
     text: str
@@ -856,8 +834,6 @@ class ClientMediaReport(BaseModel):
     file_size: Optional[int] = None    # bytes (optional but nice)
     duration: Optional[float] = None   # seconds
     source: Optional[str] = "desktop_helper"
-
-#------------------End of (“YCD Desktop Helper”) --------------------------
 
 class ChangePasswordRequest(BaseModel):
     current_password: str
@@ -1487,194 +1463,24 @@ def _touch_now(p: Path):
     except Exception as e:
         logger.warning("Could not set mtime: %s", e)
 
-#2. Add a new endpoint for helper usage reporting
-#----Architecture: client-side helper system (“YCD Desktop Helper”)---------
-#Put this somewhere after those models (before your download endpoints is fine):
-
-@app.post("/helper/report_usage")
-def helper_report_usage(
-    report: HelperUsageReport,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """
-    Called by the frontend AFTER YCD Desktop Helper successfully finishes
-    a download on the user's device.
-
-    This keeps:
-      - usage counters
-      - download history
-    in sync with your subscription logic.
-    """
-    ensure_monthly_reset_and_tier(db, current_user)
-
-    usage_type = (report.usage_type or "").strip()
-    if usage_type not in {
-        "clean_transcripts",
-        "unclean_transcripts",
-        "audio_downloads",
-        "video_downloads",
-    }:
-        raise HTTPException(status_code=400, detail="Invalid usage_type")
-
-    ok, used, limit = check_usage_limit(current_user, usage_type)
-    if not ok:
-        label = (
-            "clean transcripts" if usage_type == "clean_transcripts"
-            else "timestamped transcripts" if usage_type == "unclean_transcripts"
-            else "audio downloads" if usage_type == "audio_downloads"
-            else "video downloads" if usage_type == "video_downloads"
-            else "usage"
-        )
-        raise HTTPException(
-            status_code=403,
-            detail=f"Monthly limit reached for {label} ({used}/{limit}).",
-        )
-
-    new_usage = increment_user_usage(db, current_user, usage_type)
-    rec = create_download_record(
-        db=db,
-        user=current_user,
-        kind=usage_type,
-        youtube_id=report.youtube_id,
-        quality=report.quality or "default",
-        file_format=report.file_format or "txt",
-        file_size=report.file_size or 0,
-        processing_time=report.processing_time or 0.0,
-    )
-
-    return {
-        "ok": True,
-        "usage_updated": new_usage,
-        "usage_type": usage_type,
-        "download_record_id": rec.id if rec else None,
-        "account": canonical_account(current_user),
-    }
-
-#------------------End of (“YCD Desktop Helper”) --------------------------
 
 # 👉 IMPORTANT: DO NOT DELETE THIS FUNCTION
-# @app.post("/download_transcript")
-# @app.post("/download_transcript/")
-# def download_transcript(req: TranscriptRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-#     """
-#     Download transcript with fixed error handling.
-#     Now properly handles FetchedTranscriptSnippet objects.
-#     """
-#     ensure_monthly_reset_and_tier(db, user)
-#     start = time.time()
-#     vid = extract_youtube_video_id(req.youtube_id)
-#     if not vid or len(vid) != 11: 
-#         raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
-#     if not check_internet(): 
-#         raise HTTPException(status_code=503, detail="No internet connection available.")
-
-#     if req.format in ['srt', 'vtt']:
-#         usage_key = "unclean_transcripts"
-#         file_format = req.format
-#     elif req.clean_transcript:
-#         usage_key = "clean_transcripts"
-#         file_format = "txt"
-#     else:
-#         usage_key = "unclean_transcripts"
-#         file_format = "txt"
-        
-#     ok, used, limit = check_usage_limit(user, usage_key)
-#     if not ok:
-#         type_name = "SRT transcript" if req.format == 'srt' else "VTT transcript" if req.format == 'vtt' else "clean transcript" if req.clean_transcript else "timestamped transcript"
-#         raise HTTPException(status_code=403, detail=f"Monthly limit reached for {type_name} ({used}/{limit}).")
-
-#     # Get transcript with proper error handling
-#     try:
-#         text = get_transcript_youtube_api(vid, clean=req.clean_transcript, fmt=req.format)
-#     except Exception as e:
-#         error_msg = str(e)
-#         logger.error(f"Transcript fetch failed for {vid}: {error_msg}")
-        
-#         # Check if it's a cloud provider IP block
-#         if "blocking" in error_msg.lower() or "cloud provider" in error_msg.lower():
-#             raise HTTPException(
-#                 status_code=503,
-#                 detail="YouTube is temporarily blocking transcript access from our servers. This video may not have captions available, or please try again in a few minutes. Note: Some videos work better than others depending on YouTube's restrictions."
-#             )
-        
-#         # Check if no captions available
-#         if "no captions" in error_msg.lower() or "not have captions" in error_msg.lower():
-#             raise HTTPException(
-#                 status_code=404,
-#                 detail="This video does not have captions/transcripts available. Please try a different video."
-#             )
-        
-#         # Generic error
-#         raise HTTPException(
-#             status_code=404,
-#             detail=f"Could not retrieve transcript for this video. The video may not have captions available, or YouTube may be blocking access."
-#         )
-    
-#     if not text:
-#         raise HTTPException(status_code=404, detail="No transcript found for this video.")
-
-#     new_usage = increment_user_usage(db, user, usage_key)
-#     proc = time.time() - start
-#     rec = create_download_record(
-#         db=db, 
-#         user=user, 
-#         kind=usage_key, 
-#         youtube_id=vid, 
-#         file_format=file_format, 
-#         file_size=len(text), 
-#         processing_time=proc
-#     )
-    
-#     return {
-#         "transcript": text, 
-#         "youtube_id": vid, 
-#         "clean_transcript": req.clean_transcript, 
-#         "format": req.format,
-#         "processing_time": round(proc, 2), 
-#         "success": True, 
-#         "usage_updated": new_usage, 
-#         "usage_type": usage_key,
-#         "download_record_id": rec.id if rec else None, 
-#         "account": canonical_account(user)
-#     }
-
-# 3. Update /download_transcript to return helper task when YouTube blocks cloud IPs
-#----Architecture: client-side helper system (“YCD Desktop Helper”)---------
-# Replace the existing download_transcript function with this version:
-
 @app.post("/download_transcript")
 @app.post("/download_transcript/")
-def download_transcript(
-    req: TranscriptRequest,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
+def download_transcript(req: TranscriptRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """
-    Download transcript with robust fallback:
-
-    1. Try transcript_fetcher.get_transcript_smart (YouTubeTranscriptApi, etc.)
-    2. If that fails or returns empty -> try yt-dlp + cookies via get_transcript_with_ytdlp
-    3. Only return "no captions" 404 if BOTH strategies fail and the error really is "no captions".
-
-    This makes production behave much closer to local dev, where yt-dlp + cookies
-    is already known to succeed for videos like `_ExYGT7S3E4`.
+    Download transcript with fixed error handling.
+    Now properly handles FetchedTranscriptSnippet objects.
     """
     ensure_monthly_reset_and_tier(db, user)
     start = time.time()
-
     vid = extract_youtube_video_id(req.youtube_id)
-    if not vid or len(vid) != 11:
+    if not vid or len(vid) != 11: 
         raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    if not check_internet(): 
+        raise HTTPException(status_code=503, detail="No internet connection available.")
 
-    if not check_internet():
-        raise HTTPException(
-            status_code=503,
-            detail="No internet connection available."
-        )
-
-    # Work out usage bucket + nominal file format
-    if req.format in ["srt", "vtt"]:
+    if req.format in ['srt', 'vtt']:
         usage_key = "unclean_transcripts"
         file_format = req.format
     elif req.clean_transcript:
@@ -1683,630 +1489,196 @@ def download_transcript(
     else:
         usage_key = "unclean_transcripts"
         file_format = "txt"
-
+        
     ok, used, limit = check_usage_limit(user, usage_key)
     if not ok:
-        type_name = (
-            "SRT transcript" if req.format == "srt"
-            else "VTT transcript" if req.format == "vtt"
-            else "clean transcript" if req.clean_transcript
-            else "timestamped transcript"
-        )
-        raise HTTPException(
-            status_code=403,
-            detail=f"Monthly limit reached for {type_name} ({used}/{limit}).",
-        )
+        type_name = "SRT transcript" if req.format == 'srt' else "VTT transcript" if req.format == 'vtt' else "clean transcript" if req.clean_transcript else "timestamped transcript"
+        raise HTTPException(status_code=403, detail=f"Monthly limit reached for {type_name} ({used}/{limit}).")
 
-    text: Optional[str] = None
-    primary_error: Optional[Exception] = None
-
-    # ------------------------------------------------------------------
-    # 1) Primary strategy: transcript_fetcher.get_transcript_smart
-    # ------------------------------------------------------------------
+    # Get transcript with proper error handling
     try:
-        text = get_transcript_youtube_api(
-            vid,
-            clean=req.clean_transcript,
-            fmt=req.format,
-        )
+        text = get_transcript_youtube_api(vid, clean=req.clean_transcript, fmt=req.format)
     except Exception as e:
-        primary_error = e
-        logger.error(
-            "Primary transcript fetch failed for %s: %s",
-            vid,
-            str(e),
-        )
-
-    # If we got an empty string from primary, treat as failure too
-    if text is not None and isinstance(text, str) and not text.strip():
-        logger.warning(
-            "Primary transcript fetch for %s returned empty text; will try yt-dlp fallback",
-            vid,
-        )
-        text = None
-
-    # ------------------------------------------------------------------
-    # 2) Fallback strategy: yt-dlp + cookies (get_transcript_with_ytdlp)
-    # ------------------------------------------------------------------
-    used_fallback = False
-    fallback_error: Optional[Exception] = None
-
-    if text is None and check_ytdlp_availability():
-        cookie_file = os.getenv("YT_COOKIES_FILE")
-        logger.info(
-            "Attempting yt-dlp transcript fallback for %s (cookies=%s, clean=%s, fmt=%s)",
-            vid,
-            bool(cookie_file and os.path.exists(cookie_file or "")),
-            req.clean_transcript,
-            req.format,
-        )
-        try:
-            # Try with the most complete signature first
-            try:
-                text = get_transcript_with_ytdlp(
-                    vid,
-                    clean=req.clean_transcript,
-                    fmt=req.format,
-                )
-            except TypeError:
-                # Older helper that only accepts (video_id, clean)
-                text = get_transcript_with_ytdlp(
-                    vid,
-                    clean=req.clean_transcript,
-                )
-
-            used_fallback = True
-            if not text or (isinstance(text, str) and not text.strip()):
-                logger.warning(
-                    "yt-dlp fallback for %s returned empty text",
-                    vid,
-                )
-                text = None
-        except Exception as e:
-            fallback_error = e
-            logger.error(
-                "yt-dlp transcript fallback failed for %s: %s",
-                vid,
-                str(e),
-            )
-
-    # ------------------------------------------------------------------
-    # 3) If still no transcript, classify error and raise HTTPException
-    # ------------------------------------------------------------------
-    if not text:
-        # Prefer fallback error if it exists, otherwise the primary one
-        error_to_report = fallback_error or primary_error
-        error_msg = (str(error_to_report) if error_to_report else "").lower()
-
-        # Emit one consolidated log line so Render logs show the whole story
-        logger.error(
-            "Transcript completely failed for %s (used_fallback=%s, "
-            "primary_error=%r, fallback_error=%r)",
-            vid,
-            used_fallback,
-            primary_error,
-            fallback_error,
-        )
-
-        # Heuristic classification based on message text
-        if "blocking" in error_msg or "cloud provider" in error_msg:
-            # YouTube explicitly blocking data-center IPs
+        error_msg = str(e)
+        logger.error(f"Transcript fetch failed for {vid}: {error_msg}")
+        
+        # Check if it's a cloud provider IP block
+        if "blocking" in error_msg.lower() or "cloud provider" in error_msg.lower():
             raise HTTPException(
                 status_code=503,
-                detail=(
-                    "YouTube is temporarily blocking transcript access from our servers. "
-                    "This video may still be playable in your browser, but captions "
-                    "cannot be fetched right now. Please try again later or try a "
-                    "different video."
-                ),
+                detail="YouTube is temporarily blocking transcript access from our servers. This video may not have captions available, or please try again in a few minutes. Note: Some videos work better than others depending on YouTube's restrictions."
             )
-
-        if "no captions" in error_msg or "not have captions" in error_msg or "no transcript found" in error_msg:
-            # Only say "no captions" if ALL strategies failed
+        
+        # Check if no captions available
+        if "no captions" in error_msg.lower() or "not have captions" in error_msg.lower():
             raise HTTPException(
                 status_code=404,
-                detail=(
-                    "This video does not have captions/transcripts available from "
-                    "YouTube's APIs. Please try a different video."
-                ),
+                detail="This video does not have captions/transcripts available. Please try a different video."
             )
-
-        # Generic catch-all
+        
+        # Generic error
         raise HTTPException(
-            status_code=502,
-            detail=(
-                "Could not retrieve transcript for this video. The video may not have "
-                "captions available, or YouTube may be blocking access from our servers."
-            ),
+            status_code=404,
+            detail=f"Could not retrieve transcript for this video. The video may not have captions available, or YouTube may be blocking access."
         )
+    
+    if not text:
+        raise HTTPException(status_code=404, detail="No transcript found for this video.")
 
-    # ------------------------------------------------------------------
-    # 4) Success path: record usage + return transcript text
-    # ------------------------------------------------------------------
     new_usage = increment_user_usage(db, user, usage_key)
     proc = time.time() - start
-
     rec = create_download_record(
-        db=db,
-        user=user,
-        kind=usage_key,
-        youtube_id=vid,
-        file_format=file_format,
-        file_size=len(text or ""),
-        processing_time=proc,
+        db=db, 
+        user=user, 
+        kind=usage_key, 
+        youtube_id=vid, 
+        file_format=file_format, 
+        file_size=len(text), 
+        processing_time=proc
     )
-
+    
     return {
-        "transcript": text,
-        "youtube_id": vid,
-        "clean_transcript": req.clean_transcript,
+        "transcript": text, 
+        "youtube_id": vid, 
+        "clean_transcript": req.clean_transcript, 
         "format": req.format,
-        "processing_time": round(proc, 2),
-        "success": True,
-        "usage_updated": new_usage,
+        "processing_time": round(proc, 2), 
+        "success": True, 
+        "usage_updated": new_usage, 
         "usage_type": usage_key,
-        "download_record_id": rec.id if rec else None,
-        "account": canonical_account(user),
-        "fallback_used": used_fallback,
+        "download_record_id": rec.id if rec else None, 
+        "account": canonical_account(user)
     }
 
-#------------------End of (“YCD Desktop Helper”) --------------------------
-
-# 4. Update /download_audio/ to offer helper task when YouTube blocks audio
-#----Architecture: client-side helper system (“YCD Desktop Helper”)---------
-# Replace your existing download_audio function with this version:
-
 @app.post("/download_audio/")
-def download_audio(
-    req: AudioRequest,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """
-    Download audio with yt-dlp when possible.
-
-    If YouTube returns 403 / bot-detection errors to our cloud IP,
-    we return a helper_task so the frontend can use YCD Desktop Helper
-    to download audio locally on the user's device.
-    """
+def download_audio(req: AudioRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     ensure_monthly_reset_and_tier(db, user)
     start = time.time()
-
     vid = extract_youtube_video_id(req.youtube_id)
-    if not vid or len(vid) != 11:
+    if not vid or len(vid) != 11: 
         raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
-    if not check_internet():
+    if not check_internet(): 
         raise HTTPException(status_code=503, detail="No internet connection available.")
-    if not check_ytdlp_availability():
+    if not check_ytdlp_availability(): 
         raise HTTPException(status_code=500, detail="Audio download service temporarily unavailable.")
 
     ok, used, limit = check_usage_limit(user, "audio_downloads")
-    if not ok:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Monthly limit reached for audio downloads ({used}/{limit}).",
-        )
+    if not ok: 
+        raise HTTPException(status_code=403, detail=f"Monthly limit reached for audio downloads ({used}/{limit}).")
 
-    info: Dict[str, Any] = {}
-    try:
+    info = {}
+    try: 
         info = get_video_info(vid) or {}
-    except Exception as e:
+    except Exception as e: 
         logger.warning("get_video_info failed: %s", e)
 
     final_name = f"{vid}_audio_{req.quality}.mp3"
     final_path = DOWNLOADS_DIR / final_name
 
     try:
-        path = download_audio_with_ytdlp(
-            vid,
-            req.quality,
-            output_dir=str(DOWNLOADS_DIR),
-        )
+        path = download_audio_with_ytdlp(vid, req.quality, output_dir=str(DOWNLOADS_DIR))
     except Exception as e:
         error_msg = str(e)
-        logger.error("Audio download failed for %s: %s", vid, error_msg)
-        lower = error_msg.lower()
-
-        # 👉 1) Cloud IP blocked / bot-detection / 403 → use helper
-        if (
-            "403" in lower
-            or "forbidden" in lower
-            or "sign in to confirm" in lower
-            or "bot" in lower
-        ):
-            logger.warning(
-                "YouTube appears to be blocking audio download for %s from cloud IP; "
-                "returning helper_task for desktop helper.",
-                vid,
+        logger.error(f"Audio download failed for {vid}: {error_msg}")
+        
+        if "403" in error_msg or "Forbidden" in error_msg:
+            raise HTTPException(
+                status_code=503, 
+                detail="YouTube is temporarily blocking audio downloads. This video may have restrictions. Please try again in a few minutes or try a different video."
             )
-            return {
-                "success": False,
-                "needs_local_helper": True,
-                "reason": (
-                    "YouTube is temporarily blocking audio downloads from our servers. "
-                    "Use the YCD Desktop Helper to complete this download directly "
-                    "from your device."
-                ),
-                "helper_task": {
-                    "type": "audio",
-                    "youtube_id": vid,
-                    "quality": req.quality,
-                },
-                "usage_type": "audio_downloads",
-            }
-
-        # 👉 2) No audio streams available
-        if "available" in lower or "formats" in lower:
+        elif "available" in error_msg.lower() or "formats" in error_msg.lower():
             raise HTTPException(
                 status_code=404,
-                detail="No audio streams available for this video. It may be restricted or unavailable in your region.",
+                detail="No audio streams available for this video. It may be restricted or unavailable in your region."
             )
-
-        # 👉 3) Timeout
-        if "timeout" in lower:
+        elif "timeout" in error_msg.lower():
             raise HTTPException(
                 status_code=504,
-                detail="Download timed out. Please try again.",
+                detail="Download timed out. Please try again."
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to download audio: {error_msg[:200]}"
             )
 
-        # 👉 4) Generic error
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to download audio: {error_msg[:200]}",
-        )
-
-    if not path or not os.path.exists(path):
+    if not path or not os.path.exists(path): 
         raise HTTPException(status_code=404, detail="Failed to download audio.")
-
+    
     downloaded = Path(path)
     fsize = downloaded.stat().st_size
-    if fsize < 1000:
+    if fsize < 1000: 
         raise HTTPException(status_code=500, detail="Downloaded audio appears corrupted.")
 
     if downloaded != final_path:
         try:
-            if final_path.exists():
-                final_path.unlink()
+            if final_path.exists(): final_path.unlink()
             downloaded.rename(final_path)
         except Exception as e:
             logger.warning("Rename failed, using original name: %s", e)
-            final_path = downloaded
-            final_name = downloaded.name
-            fsize = final_path.stat().st_size
+            final_path = downloaded; final_name = downloaded.name; fsize = final_path.stat().st_size
 
     _touch_now(final_path)
     new_usage = increment_user_usage(db, user, "audio_downloads")
     proc = time.time() - start
-    rec = create_download_record(
-        db=db,
-        user=user,
-        kind="audio_downloads",
-        youtube_id=vid,
-        quality=req.quality,
-        file_format="mp3",
-        file_size=fsize,
-        processing_time=proc,
-    )
-
+    rec = create_download_record(db=db, user=user, kind="audio_downloads", youtube_id=vid, quality=req.quality, file_format="mp3", file_size=fsize, processing_time=proc)
     token = create_access_token_for_mobile(user.username)
     direct_url = f"/download-file/audio/{final_name}?auth={token}"
-
-    return {
-        "download_url": f"/files/{final_name}",
-        "direct_download_url": direct_url,
-        "youtube_id": vid,
-        "quality": req.quality,
-        "file_size": fsize,
-        "file_size_mb": round(fsize / (1024 * 1024), 2),
-        "filename": final_name,
-        "local_path": str(final_path),
-        "processing_time": round(proc, 2),
-        "message": "Audio ready for download",
-        "success": True,
-        "title": info.get("title", "Unknown Title"),
-        "uploader": info.get("uploader", "Unknown"),
-        "duration": info.get("duration", 0),
-        "usage_updated": new_usage,
-        "usage_type": "audio_downloads",
-        "download_record_id": rec.id if rec else None,
-        "account": canonical_account(user),
-    }
-
-#------------------End of (“YCD Desktop Helper”) --------------------------
-
-# 👉 IMPORTANT: DO NOT DELETE THIS FUNCTION
-# @app.post("/download_audio/")
-# def download_audio(req: AudioRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-#     ensure_monthly_reset_and_tier(db, user)
-#     start = time.time()
-#     vid = extract_youtube_video_id(req.youtube_id)
-#     if not vid or len(vid) != 11: 
-#         raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
-#     if not check_internet(): 
-#         raise HTTPException(status_code=503, detail="No internet connection available.")
-#     if not check_ytdlp_availability(): 
-#         raise HTTPException(status_code=500, detail="Audio download service temporarily unavailable.")
-
-#     ok, used, limit = check_usage_limit(user, "audio_downloads")
-#     if not ok: 
-#         raise HTTPException(status_code=403, detail=f"Monthly limit reached for audio downloads ({used}/{limit}).")
-
-#     info = {}
-#     try: 
-#         info = get_video_info(vid) or {}
-#     except Exception as e: 
-#         logger.warning("get_video_info failed: %s", e)
-
-#     final_name = f"{vid}_audio_{req.quality}.mp3"
-#     final_path = DOWNLOADS_DIR / final_name
-
-#     try:
-#         path = download_audio_with_ytdlp(vid, req.quality, output_dir=str(DOWNLOADS_DIR))
-#     except Exception as e:
-#         error_msg = str(e)
-#         logger.error(f"Audio download failed for {vid}: {error_msg}")
-        
-#         if "403" in error_msg or "Forbidden" in error_msg:
-#             raise HTTPException(
-#                 status_code=503, 
-#                 detail="YouTube is temporarily blocking audio downloads. This video may have restrictions. Please try again in a few minutes or try a different video."
-#             )
-#         elif "available" in error_msg.lower() or "formats" in error_msg.lower():
-#             raise HTTPException(
-#                 status_code=404,
-#                 detail="No audio streams available for this video. It may be restricted or unavailable in your region."
-#             )
-#         elif "timeout" in error_msg.lower():
-#             raise HTTPException(
-#                 status_code=504,
-#                 detail="Download timed out. Please try again."
-#             )
-#         else:
-#             raise HTTPException(
-#                 status_code=500,
-#                 detail=f"Failed to download audio: {error_msg[:200]}"
-#             )
-
-#     if not path or not os.path.exists(path): 
-#         raise HTTPException(status_code=404, detail="Failed to download audio.")
     
-#     downloaded = Path(path)
-#     fsize = downloaded.stat().st_size
-#     if fsize < 1000: 
-#         raise HTTPException(status_code=500, detail="Downloaded audio appears corrupted.")
+    return {"download_url": f"/files/{final_name}", "direct_download_url": direct_url, "youtube_id": vid, "quality": req.quality,
+            "file_size": fsize, "file_size_mb": round(fsize / (1024 * 1024), 2), "filename": final_name, "local_path": str(final_path),
+            "processing_time": round(proc, 2), "message": "Audio ready for download", "success": True,
+            "title": info.get("title", "Unknown Title"), "uploader": info.get("uploader", "Unknown"), "duration": info.get("duration", 0),
+            "usage_updated": new_usage, "usage_type": "audio_downloads",
+            "download_record_id": rec.id if rec else None, "account": canonical_account(user)}
 
-#     if downloaded != final_path:
-#         try:
-#             if final_path.exists(): final_path.unlink()
-#             downloaded.rename(final_path)
-#         except Exception as e:
-#             logger.warning("Rename failed, using original name: %s", e)
-#             final_path = downloaded; final_name = downloaded.name; fsize = final_path.stat().st_size
+#----Download video endpoint-----
 
-#     _touch_now(final_path)
-#     new_usage = increment_user_usage(db, user, "audio_downloads")
-#     proc = time.time() - start
-#     rec = create_download_record(db=db, user=user, kind="audio_downloads", youtube_id=vid, quality=req.quality, file_format="mp3", file_size=fsize, processing_time=proc)
-#     token = create_access_token_for_mobile(user.username)
-#     direct_url = f"/download-file/audio/{final_name}?auth={token}"
-    
-#     return {"download_url": f"/files/{final_name}", "direct_download_url": direct_url, "youtube_id": vid, "quality": req.quality,
-#             "file_size": fsize, "file_size_mb": round(fsize / (1024 * 1024), 2), "filename": final_name, "local_path": str(final_path),
-#             "processing_time": round(proc, 2), "message": "Audio ready for download", "success": True,
-#             "title": info.get("title", "Unknown Title"), "uploader": info.get("uploader", "Unknown"), "duration": info.get("duration", 0),
-#             "usage_updated": new_usage, "usage_type": "audio_downloads",
-#             "download_record_id": rec.id if rec else None, "account": canonical_account(user)}
-#-------------------------------------------------------
-
-# 5. Update /download_video/ similarly
-#----Architecture: client-side helper system (“YCD Desktop Helper”)---------
-# Replace your existing download_video function with this:
 @app.post("/download_video/")
-def download_video(
-    req: VideoRequest,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """
-    Download video with yt-dlp when possible.
-
-    If YouTube returns 403 / bot-detection errors to our cloud IP,
-    we return a helper_task so the frontend can use YCD Desktop Helper
-    to download video locally on the user's device.
-    """
+def download_video(req: VideoRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     ensure_monthly_reset_and_tier(db, user)
     start = time.time()
-
     vid = extract_youtube_video_id(req.youtube_id)
-    if not vid or len(vid) != 11:
-        raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
-    if not check_internet():
-        raise HTTPException(status_code=503, detail="No internet connection available.")
-    if not check_ytdlp_availability():
-        raise HTTPException(status_code=500, detail="Video download service unavailable.")
+    if not vid or len(vid) != 11: raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
+    if not check_internet(): raise HTTPException(status_code=503, detail="No internet connection available.")
+    if not check_ytdlp_availability(): raise HTTPException(status_code=500, detail="Video download service unavailable.")
 
     ok, used, limit = check_usage_limit(user, "video_downloads")
-    if not ok:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Monthly limit reached for video downloads ({used}/{limit}).",
-        )
+    if not ok: raise HTTPException(status_code=403, detail=f"Monthly limit reached for video downloads ({used}/{limit}).")
 
-    info: Dict[str, Any] = {}
-    try:
-        info = get_video_info(vid) or {}
-    except Exception as e:
-        logger.warning("get_video_info failed: %s", e)
+    info = {}
+    try: info = get_video_info(vid) or {}
+    except Exception as e: logger.warning("get_video_info failed: %s", e)
 
     final_name = f"{vid}_video_{req.quality}.mp4"
     final_path = DOWNLOADS_DIR / final_name
 
-    try:
-        path = download_video_with_ytdlp(
-            vid,
-            req.quality,
-            output_dir=str(DOWNLOADS_DIR),
-        )
-    except Exception as e:
-        error_msg = str(e)
-        logger.error("Video download failed for %s: %s", vid, error_msg)
-        lower = error_msg.lower()
-
-        # 👉 1) Cloud IP blocked / bot-detection / 403 → use helper
-        if (
-            "403" in lower
-            or "forbidden" in lower
-            or "sign in to confirm" in lower
-            or "bot" in lower
-        ):
-            logger.warning(
-                "YouTube appears to be blocking video download for %s from cloud IP; "
-                "returning helper_task for desktop helper.",
-                vid,
-            )
-            return {
-                "success": False,
-                "needs_local_helper": True,
-                "reason": (
-                    "YouTube is temporarily blocking video downloads from our servers. "
-                    "Use the YCD Desktop Helper to complete this download directly "
-                    "from your device."
-                ),
-                "helper_task": {
-                    "type": "video",
-                    "youtube_id": vid,
-                    "quality": req.quality,
-                },
-                "usage_type": "video_downloads",
-            }
-
-        # 👉 2) No video formats available
-        if "available" in lower or "formats" in lower:
-            raise HTTPException(
-                status_code=404,
-                detail="No video streams available for this video. It may be restricted or unavailable in your region.",
-            )
-
-        # 👉 3) Timeout
-        if "timeout" in lower:
-            raise HTTPException(
-                status_code=504,
-                detail="Download timed out. Please try again.",
-            )
-
-        # 👉 4) Generic error
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to download video: {error_msg[:200]}",
-        )
-
-    if not path or not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Failed to download video.")
-
+    path = download_video_with_ytdlp(vid, req.quality, output_dir=str(DOWNLOADS_DIR))
+    if not path or not os.path.exists(path): raise HTTPException(status_code=404, detail="Failed to download video.")
     downloaded = Path(path)
     fsize = downloaded.stat().st_size
-    if fsize < 10_000:
-        raise HTTPException(status_code=500, detail="Downloaded video appears corrupted.")
+    if fsize < 10_000: raise HTTPException(status_code=500, detail="Downloaded video appears corrupted.")
 
     if downloaded != final_path:
         try:
-            if final_path.exists():
-                final_path.unlink()
+            if final_path.exists(): final_path.unlink()
             downloaded.rename(final_path)
         except Exception as e:
             logger.warning("Rename failed, using original name: %s", e)
-            final_path = downloaded
-            final_name = downloaded.name
-            fsize = final_path.stat().st_size
+            final_path = downloaded; final_name = downloaded.name; fsize = final_path.stat().st_size
 
     _touch_now(final_path)
     new_usage = increment_user_usage(db, user, "video_downloads")
     proc = time.time() - start
-    rec = create_download_record(
-        db=db,
-        user=user,
-        kind="video_downloads",
-        youtube_id=vid,
-        quality=req.quality,
-        file_format="mp4",
-        file_size=fsize,
-        processing_time=proc,
-    )
-
+    rec = create_download_record(db=db, user=user, kind="video_downloads", youtube_id=vid, quality=req.quality, file_format="mp4", file_size=fsize, processing_time=proc)
     token = create_access_token_for_mobile(user.username)
     direct_url = f"/download-file/video/{final_name}?auth={token}"
-
-    return {
-        "download_url": f"/files/{final_name}",
-        "direct_download_url": direct_url,
-        "youtube_id": vid,
-        "quality": req.quality,
-        "file_size": fsize,
-        "file_size_mb": round(fsize / (1024 * 1024), 2),
-        "filename": final_name,
-        "local_path": str(final_path),
-        "processing_time": round(proc, 2),
-        "message": "Video ready for download",
-        "success": True,
-        "title": info.get("title", "Unknown Title"),
-        "uploader": info.get("uploader", "Unknown"),
-        "duration": info.get("duration", 0),
-        "usage_updated": new_usage,
-        "usage_type": "video_downloads",
-        "download_record_id": rec.id if rec else None,
-        "account": canonical_account(user),
-    }
-
-#------------------End of (“YCD Desktop Helper”) --------------------------
-
-# #----Download video endpoint-----
-# # 👉 IMPORTANT: DO NOT DELETE THIS FUNCTION
-
-# @app.post("/download_video/")
-# def download_video(req: VideoRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-#     ensure_monthly_reset_and_tier(db, user)
-#     start = time.time()
-#     vid = extract_youtube_video_id(req.youtube_id)
-#     if not vid or len(vid) != 11: raise HTTPException(status_code=400, detail="Invalid YouTube video ID.")
-#     if not check_internet(): raise HTTPException(status_code=503, detail="No internet connection available.")
-#     if not check_ytdlp_availability(): raise HTTPException(status_code=500, detail="Video download service unavailable.")
-
-#     ok, used, limit = check_usage_limit(user, "video_downloads")
-#     if not ok: raise HTTPException(status_code=403, detail=f"Monthly limit reached for video downloads ({used}/{limit}).")
-
-#     info = {}
-#     try: info = get_video_info(vid) or {}
-#     except Exception as e: logger.warning("get_video_info failed: %s", e)
-
-#     final_name = f"{vid}_video_{req.quality}.mp4"
-#     final_path = DOWNLOADS_DIR / final_name
-
-#     path = download_video_with_ytdlp(vid, req.quality, output_dir=str(DOWNLOADS_DIR))
-#     if not path or not os.path.exists(path): raise HTTPException(status_code=404, detail="Failed to download video.")
-#     downloaded = Path(path)
-#     fsize = downloaded.stat().st_size
-#     if fsize < 10_000: raise HTTPException(status_code=500, detail="Downloaded video appears corrupted.")
-
-#     if downloaded != final_path:
-#         try:
-#             if final_path.exists(): final_path.unlink()
-#             downloaded.rename(final_path)
-#         except Exception as e:
-#             logger.warning("Rename failed, using original name: %s", e)
-#             final_path = downloaded; final_name = downloaded.name; fsize = final_path.stat().st_size
-
-#     _touch_now(final_path)
-#     new_usage = increment_user_usage(db, user, "video_downloads")
-#     proc = time.time() - start
-#     rec = create_download_record(db=db, user=user, kind="video_downloads", youtube_id=vid, quality=req.quality, file_format="mp4", file_size=fsize, processing_time=proc)
-#     token = create_access_token_for_mobile(user.username)
-#     direct_url = f"/download-file/video/{final_name}?auth={token}"
-#     return {"download_url": f"/files/{final_name}", "direct_download_url": direct_url, "youtube_id": vid, "quality": req.quality,
-#             "file_size": fsize, "file_size_mb": round(fsize / (1024 * 1024), 2), "filename": final_name, "local_path": str(final_path),
-#             "processing_time": round(proc, 2), "message": "Video ready for download", "success": True,
-#             "title": info.get("title", "Unknown Title"), "uploader": info.get("uploader", "Unknown"), "duration": info.get("duration", 0),
-#             "usage_updated": new_usage, "usage_type": "video_downloads",
-#             "download_record_id": rec.id if rec else None, "account": canonical_account(user)}
+    return {"download_url": f"/files/{final_name}", "direct_download_url": direct_url, "youtube_id": vid, "quality": req.quality,
+            "file_size": fsize, "file_size_mb": round(fsize / (1024 * 1024), 2), "filename": final_name, "local_path": str(final_path),
+            "processing_time": round(proc, 2), "message": "Video ready for download", "success": True,
+            "title": info.get("title", "Unknown Title"), "uploader": info.get("uploader", "Unknown"), "duration": info.get("duration", 0),
+            "usage_updated": new_usage, "usage_type": "video_downloads",
+            "download_record_id": rec.id if rec else None, "account": canonical_account(user)}
 
 @app.get("/download-file/{file_type}/{filename}")
 async def download_file(request: Request, file_type: str, filename: str, auth: Optional[str] = Query(None), db: Session = Depends(get_db)):

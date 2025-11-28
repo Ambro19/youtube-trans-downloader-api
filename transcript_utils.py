@@ -1,13 +1,6 @@
-# transcript_utils.py — PRODUCTION READY (FIXED)
+# transcript_utils.py — WITH PROXY SUPPORT
 """
-Utilities for transcripts and media downloads.
-Framework-free to avoid circular imports.
-
-FIXES:
-1. Improved cookie handling with better base64 decoding
-2. Enhanced yt-dlp options to bypass YouTube bot detection
-3. Better error messages distinguishing between "no captions" vs "blocked"
-4. Proper handling of read-only mounts
+Enhanced with residential proxy support to bypass YouTube IP blocking.
 """
 from __future__ import annotations
 
@@ -27,7 +20,7 @@ from yt_dlp import YoutubeDL
 logger = logging.getLogger("youtube_trans_downloader")
 
 # ======================================================
-# Cookies helpers (Render + local friendly) - FIXED
+# Cookies helpers (unchanged)
 # ======================================================
 
 COOKIES_FILE_ENV = (os.getenv("YT_COOKIES_FILE") or "").strip()
@@ -38,16 +31,7 @@ _COOKIES_CACHE: Optional[str] = None
 
 
 def _get_cookies_file() -> Optional[str]:
-    """
-    Returns a readable cookies file path for yt-dlp, or None.
-
-    Priority:
-      1) Decode YT_COOKIES_B64 into <YT_DLP_DIR>/cookies.txt (writable)
-      2) Use YT_COOKIES_FILE if it exists and is readable
-
-    IMPORTANT: We never write into YT_COOKIES_FILE (e.g. /etc/secrets),
-    because Render mounts that read-only.
-    """
+    """Returns a readable cookies file path for yt-dlp, or None."""
     global _COOKIES_CACHE
 
     if _COOKIES_CACHE is not None:
@@ -55,26 +39,22 @@ def _get_cookies_file() -> Optional[str]:
             return _COOKIES_CACHE
         _COOKIES_CACHE = None
 
-    # 1) Prefer base64 env var: decode once into /tmp/yt-dlp/cookies.txt
+    # 1) Prefer base64 env var
     if COOKIES_B64_ENV:
         try:
             target_dir = Path(YTDLP_DIR_ENV)
             target_dir.mkdir(parents=True, exist_ok=True)
             target = target_dir / "cookies.txt"
 
-            # Always recreate to ensure fresh cookies
             if target.exists():
                 target.unlink()
             
-            # Decode and normalize
             decoded = base64.b64decode(COOKIES_B64_ENV)
-            # Normalize line endings for Netscape cookie file
             decoded = decoded.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
             
             with open(target, "wb") as f:
                 f.write(decoded)
             
-            # Verify file was written
             if target.exists() and target.stat().st_size > 0:
                 _COOKIES_CACHE = str(target)
                 logger.info("✅ Decoded YT_COOKIES_B64 to %s (%d bytes)", target, target.stat().st_size)
@@ -85,10 +65,9 @@ def _get_cookies_file() -> Optional[str]:
         except Exception as e:
             logger.error("Failed to decode YT_COOKIES_B64: %s", e, exc_info=True)
 
-    # 2) Fallback: use a pre-mounted cookies file if it exists
+    # 2) Fallback to file
     if COOKIES_FILE_ENV:
         if os.path.exists(COOKIES_FILE_ENV) and os.access(COOKIES_FILE_ENV, os.R_OK):
-            # If it's in a read-only location, copy it to /tmp
             if COOKIES_FILE_ENV.startswith(("/etc/", "/run/")):
                 try:
                     target_dir = Path(YTDLP_DIR_ENV)
@@ -114,73 +93,107 @@ def _get_cookies_file() -> Optional[str]:
     return None
 
 
-def _resolve_cookies_path() -> Optional[str]:
-    """Backwards-compatible alias."""
-    return _get_cookies_file()
-
+# ======================================================
+# ENHANCED: Apply proxy + cookie options
+# ======================================================
 
 def _apply_cookie_opts(opts: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Mutates and returns yt-dlp options to include cookies and robust
-    extractor hints that reduce YouTube consent/bot walls.
+    Enhanced to include proxy support (residential or mobile).
     
-    ENHANCED with more aggressive bot-bypass settings.
+    CRITICAL: Proxies bypass YouTube's datacenter IP blocking.
+    Mobile proxies recommended for YouTube (higher success rate).
     """
     cp = _get_cookies_file()
     if cp:
         opts["cookiefile"] = cp
         logger.info("🍪 Using cookies file: %s", cp)
     else:
-        logger.warning("⚠️  No cookies available - YouTube may block requests")
+        logger.warning("⚠️  No cookies available")
 
-    # Force IPv4 to avoid IPv6 issues
+    # === PROXY CONFIGURATION (NEW) ===
+    proxy_enabled = os.getenv("PROXY_ENABLED", "false").lower() == "true"
+    if proxy_enabled:
+        proxy_host = os.getenv("PROXY_HOST")
+        proxy_port = os.getenv("PROXY_PORT")
+        proxy_user = os.getenv("PROXY_USERNAME")
+        proxy_pass = os.getenv("PROXY_PASSWORD")
+        
+        if all([proxy_host, proxy_port, proxy_user, proxy_pass]):
+            # Build proxy URL
+            proxy_url = f"http://{proxy_user}:{proxy_pass}@{proxy_host}:{proxy_port}"
+            opts["proxy"] = proxy_url
+            
+            # Mask password in logs
+            safe_user = proxy_user[:15] + "..." if len(proxy_user) > 15 else proxy_user
+            logger.info("🌐 Using proxy: %s:****@%s:%s", 
+                       safe_user, proxy_host, proxy_port)
+        else:
+            logger.warning("⚠️  PROXY_ENABLED=true but missing credentials")
+            logger.warning("    Required: PROXY_HOST, PROXY_PORT, PROXY_USERNAME, PROXY_PASSWORD")
+    else:
+        logger.info("ℹ️  Proxy disabled (PROXY_ENABLED=false)")
+    
+    # Force IPv4
     if os.getenv("YTDLP_BIND_IPV4", "1").strip() == "1":
         opts["force_ipv4"] = True
 
-    # Enhanced headers to mimic a real browser/mobile app
+    # Enhanced headers
     opts.setdefault("http_headers", {})
     opts["http_headers"].update({
-        "User-Agent": "com.google.android.youtube/19.20.34 (Linux; U; Android 11) gzip",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Encoding": "gzip, deflate",
+        "Accept-Encoding": "gzip, deflate, br",
         "DNT": "1",
+        "Upgrade-Insecure-Requests": "1",
     })
 
-    # Prefer Android player client (less restrictive)
+    # Player client selection
     ea = opts.setdefault("extractor_args", {})
     youtube_args = ea.setdefault("youtube", {})
     
-    # Use Android client with fallback to web
-    if not youtube_args.get("player_client"):
+    # Use web client with proxy (better compatibility)
+    if proxy_enabled:
+        youtube_args["player_client"] = ["web", "android"]
+    else:
         youtube_args["player_client"] = ["android", "web"]
     
-    # Skip DASH manifest to avoid additional requests
+    # PO Token support (optional)
+    po_token_android = os.getenv("YT_PO_TOKEN_ANDROID")
+    po_token_web = os.getenv("YT_PO_TOKEN_WEB")
+    
+    if po_token_android or po_token_web:
+        if po_token_android:
+            youtube_args["po_token"] = f"android.{po_token_android}"
+            logger.info("🔐 Using Android PO token")
+        elif po_token_web:
+            youtube_args["po_token"] = f"web.{po_token_web}"
+            logger.info("🔐 Using Web PO token")
+    
+    # Skip DASH
     youtube_args.setdefault("skip", ["dash", "hls"])
     
-    # Add more resilience options
+    # Resilience
     opts.setdefault("socket_timeout", 30)
     opts.setdefault("retries", 10)
     opts.setdefault("fragment_retries", 10)
     opts.setdefault("file_access_retries", 5)
     opts.setdefault("extractor_retries", 3)
     
-    # Reduce verbosity but keep errors
+    # Logging
     opts.setdefault("quiet", True)
-    opts.setdefault("no_warnings", False)  # Keep warnings for debugging
+    opts.setdefault("no_warnings", False)
     
-    logger.debug("Applied yt-dlp options: player_client=%s, cookies=%s", 
-                 youtube_args.get("player_client"), bool(cp))
-
     return opts
 
 
 # ======================================================
-# Common helpers
+# Rest of functions (unchanged)
 # ======================================================
 
 def _norm_youtube_url(video_id_or_url: str) -> str:
-    """Accept ID or any YT URL (watch/shorts/youtu.be)."""
+    """Accept ID or any YT URL."""
     s = (video_id_or_url or "").strip()
     m = re.search(r"(?:v=|/shorts/|youtu\.be/)([A-Za-z0-9_-]{11})", s)
     vid = m.group(1) if m else s
@@ -221,10 +234,7 @@ def _mmss(seconds: float) -> str:
 
 
 def _parse_vtt_to_segments(vtt_text: str) -> List[Dict[str, Any]]:
-    """
-    Parse a WebVTT string into segments.
-    Robust enough for yt-dlp auto captions.
-    """
+    """Parse WebVTT to segments."""
     ts_re = re.compile(
         r"(?P<s>\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*"
         r"(?P<e>\d{2}:\d{2}:\d{2}\.\d{3})"
@@ -243,7 +253,6 @@ def _parse_vtt_to_segments(vtt_text: str) -> List[Dict[str, Any]]:
         line = raw.strip("\n")
         m = ts_re.search(line)
         if m:
-            # Flush previous cue
             if start is not None and buf:
                 text = " ".join(b for b in buf if b).strip()
                 if text:
@@ -276,7 +285,6 @@ def _parse_vtt_to_segments(vtt_text: str) -> List[Dict[str, Any]]:
         if start is not None:
             buf.append(line)
 
-    # Flush last cue
     if start is not None and buf:
         text = " ".join(b for b in buf if b).strip()
         if text:
@@ -292,7 +300,7 @@ def _parse_vtt_to_segments(vtt_text: str) -> List[Dict[str, Any]]:
 
 
 def _clean_plain_blocks(blocks: List[str]) -> str:
-    """Format plain text into readable paragraphs."""
+    """Format plain text."""
     out: List[str] = []
     cur: List[str] = []
     chars = 0
@@ -308,7 +316,7 @@ def _clean_plain_blocks(blocks: List[str]) -> str:
 
 
 # ======================================================
-# Transcript (via yt-dlp) - ENHANCED
+# Transcript (enhanced with proxy)
 # ======================================================
 
 def get_transcript_with_ytdlp(
@@ -317,13 +325,7 @@ def get_transcript_with_ytdlp(
     fmt: Optional[str] = None,
 ) -> Optional[str]:
     """
-    Extract subtitles using yt-dlp (auto captions allowed).
-    
-    Returns:
-      - SRT or VTT content if fmt is 'srt' / 'vtt'
-      - Otherwise, produce Clean TXT (paragraphs) or Timestamped TXT from VTT.
-
-    ENHANCED: Better error handling and logging.
+    Extract subtitles using yt-dlp with proxy support.
     """
     want_fmt = "srt" if fmt == "srt" else "vtt"
     lang_priority = ["en", "en-US", "en-GB", "en-CA", "en-AU"]
@@ -332,15 +334,15 @@ def get_transcript_with_ytdlp(
         ydl_opts: Dict[str, Any] = {
             "skip_download": True,
             "writesubtitles": True,
-            "writeautomaticsub": True,  # Allow auto-captions
+            "writeautomaticsub": True,
             "subtitlesformat": want_fmt,
             "subtitleslangs": lang_priority,
             "outtmpl": os.path.join(tmp, "%(id)s.%(ext)s"),
-            "quiet": False,  # Show errors
+            "quiet": False,
             "no_warnings": False,
             "ignoreerrors": False,
         }
-        _apply_cookie_opts(ydl_opts)
+        _apply_cookie_opts(ydl_opts)  # Now includes proxy!
 
         url = _norm_youtube_url(video_id_or_url)
         vid = video_id_or_url.strip()
@@ -355,9 +357,8 @@ def get_transcript_with_ytdlp(
             error_msg = str(e).lower()
             logger.error("yt-dlp transcript fetch failed for %s: %s", vid, e)
             
-            # Provide specific error messages
             if "sign in to confirm" in error_msg or "bot" in error_msg:
-                logger.error("❌ YouTube bot detection triggered - cookies may be expired/invalid")
+                logger.error("❌ YouTube bot detection - proxy may be needed or blocked")
                 return None
             elif "no suitable formats" in error_msg or "no subtitles" in error_msg:
                 logger.warning("⚠️  No captions available for video %s", vid)
@@ -366,7 +367,6 @@ def get_transcript_with_ytdlp(
                 logger.error("❌ Unknown error: %s", e)
                 return None
 
-        # Locate produced subtitle file
         sub_files = list(Path(tmp).glob(f"*.{want_fmt}"))
         if not sub_files:
             logger.warning("⚠️  No subtitle files produced for %s", vid)
@@ -375,11 +375,9 @@ def get_transcript_with_ytdlp(
         content = sub_files[0].read_text(encoding="utf-8", errors="ignore")
         logger.info("✅ Retrieved transcript (%d chars) for %s", len(content), vid)
 
-        # Return raw format if requested
         if fmt in ("srt", "vtt"):
             return content
 
-        # Convert VTT to TXT styles
         segments = _parse_vtt_to_segments(content)
         if not segments:
             logger.warning("⚠️  No segments parsed from transcript")
@@ -392,7 +390,6 @@ def get_transcript_with_ytdlp(
             ]
             return _clean_plain_blocks(texts)
 
-        # Timestamped plain text
         lines: List[str] = []
         for s in segments:
             t = int(float(s.get("start", 0)))
@@ -404,11 +401,11 @@ def get_transcript_with_ytdlp(
 
 
 # ======================================================
-# Video / Audio - ENHANCED
+# Video / Audio (enhanced with proxy)
 # ======================================================
 
 def _common_ydl_opts(output_dir: str) -> Dict[str, Any]:
-    """Common yt-dlp options for video/audio downloads."""
+    """Common yt-dlp options with proxy support."""
     ffmpeg_loc = _ensure_ffmpeg_location()
     opts: Dict[str, Any] = {
         "format": (
@@ -424,7 +421,7 @@ def _common_ydl_opts(output_dir: str) -> Dict[str, Any]:
         "writethumbnail": True,
         "outtmpl": _safe_outtmpl(output_dir),
         "noprogress": True,
-        "quiet": False,  # Show errors
+        "quiet": False,
         "concurrent_fragment_downloads": 4,
         "retries": 10,
         "fragment_retries": 10,
@@ -432,18 +429,18 @@ def _common_ydl_opts(output_dir: str) -> Dict[str, Any]:
     }
     if ffmpeg_loc:
         opts["ffmpeg_location"] = ffmpeg_loc
-    _apply_cookie_opts(opts)
+    _apply_cookie_opts(opts)  # Now includes proxy!
     return opts
 
 
 def get_video_info(video_id_or_url: str) -> Dict[str, Any]:
-    """Get video metadata."""
+    """Get video metadata with proxy support."""
     ydl_opts: Dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
     }
-    _apply_cookie_opts(ydl_opts)
+    _apply_cookie_opts(ydl_opts)  # Now includes proxy!
     
     try:
         with YoutubeDL(ydl_opts) as ydl:
@@ -467,7 +464,7 @@ def download_audio_with_ytdlp(
     quality: str,
     output_dir: str,
 ) -> str:
-    """Download audio with yt-dlp."""
+    """Download audio with proxy support."""
     q = (quality or "").lower()
     kbps = "96" if q in {"low", "l"} else "256" if q in {"high", "h"} else "160"
 
@@ -491,7 +488,7 @@ def download_audio_with_ytdlp(
     ffmpeg_loc = _ensure_ffmpeg_location()
     if ffmpeg_loc:
         opts["ffmpeg_location"] = ffmpeg_loc
-    _apply_cookie_opts(opts)
+    _apply_cookie_opts(opts)  # Now includes proxy!
 
     os.makedirs(output_dir, exist_ok=True)
     url = _norm_youtube_url(video_id_or_url)
@@ -515,7 +512,7 @@ def download_video_with_ytdlp(
     quality: str,
     output_dir: str,
 ) -> str:
-    """Download video with yt-dlp."""
+    """Download video with proxy support."""
     q = re.sub(r"[^0-9]", "", quality or "")
     height = int(q) if q.isdigit() else None
     
@@ -543,5 +540,3 @@ def download_video_with_ytdlp(
     except Exception as e:
         logger.error("❌ Video download failed: %s", e)
         raise
-
-
