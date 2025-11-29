@@ -184,6 +184,19 @@ def _apply_cookie_opts(opts: Dict[str, Any]) -> Dict[str, Any]:
     # Logging
     opts.setdefault("quiet", True)
     opts.setdefault("no_warnings", False)
+
+    # NEW: Add PO token support
+    po_token = os.getenv("YT_PO_TOKEN")
+    visitor_data = os.getenv("YT_VISITOR_DATA")
+    
+    if po_token and visitor_data:
+        opts["extractor_args"] = {
+            "youtube": {
+                "po_token": [f"web+{po_token}"],
+                "visitor_data": [visitor_data]
+            }
+        }
+        logger.info("🔐 Using PO token for enhanced authentication")
     
     return opts
 

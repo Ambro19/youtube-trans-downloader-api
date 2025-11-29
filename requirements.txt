@@ -17,7 +17,7 @@ passlib[bcrypt]==1.7.4
 itsdangerous==2.2.0
 
 # YouTube & Media Processing
-yt-dlp==2025.10.22
+yt-dlp>=2025.11.12
 youtube-transcript-api==1.1.0
 
 # Payment Processing
@@ -41,5 +41,6 @@ pytz==2023.3
 orjson==3.10.7
 #orjson>=3.10.0,<4
 
-
+# Install PO Token Provider
+bgutil-ytdlp-pot-provider>=2024.11.0
 

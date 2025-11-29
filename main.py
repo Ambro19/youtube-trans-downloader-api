@@ -1464,7 +1464,6 @@ def _touch_now(p: Path):
         logger.warning("Could not set mtime: %s", e)
 
 
-# 👉 IMPORTANT: DO NOT DELETE THIS FUNCTION
 @app.post("/download_transcript")
 @app.post("/download_transcript/")
 def download_transcript(req: TranscriptRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
