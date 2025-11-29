@@ -42,5 +42,5 @@ orjson==3.10.7
 #orjson>=3.10.0,<4
 
 # Install PO Token Provider
-bgutil-ytdlp-pot-provider>=2024.11.0
+#bgutil-ytdlp-pot-provider>=2024.11.0
 
