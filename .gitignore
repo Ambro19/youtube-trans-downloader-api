@@ -333,6 +333,6 @@ downloads/
 # (usually also ignore the DB itself)
 *.db
 
-
 cookies.txt
 cookies_base64.txt
+main_important_backup.txt

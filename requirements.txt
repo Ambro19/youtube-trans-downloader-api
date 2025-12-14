@@ -1,46 +1,52 @@
-# requirements.txt - Production Ready
-# Updated: November 2025
+# requirements.txt - YCD Production Dependencies
+# Updated: December 2025
 
-# Core dependencies
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
-python-multipart==0.0.6
-python-dotenv==1.0.0
+# ============================================================================
+# Core Framework
+# ============================================================================
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.20
+python-dotenv==1.0.1
 
+# ============================================================================
 # Database
-sqlalchemy==2.0.25
-psycopg2-binary==2.9.9
+# ============================================================================
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10
 
+# ============================================================================
 # Authentication & Security
-pyjwt==2.8.0
+# ============================================================================
+pyjwt==2.10.1
 passlib[bcrypt]==1.7.4
 itsdangerous==2.2.0
 
+# ============================================================================
 # YouTube & Media Processing
-yt-dlp>=2025.11.12
-youtube-transcript-api==1.1.0
+# ============================================================================
+yt-dlp>=2024.12.13  # Use >= to get security updates
+youtube-transcript-api==0.6.3
 
+# ============================================================================
 # Payment Processing
-stripe==7.10.0
+# ============================================================================
+stripe==11.2.0  # CRITICAL UPDATE: v7 is deprecated, v11 has breaking changes
 
-# Email
+# ============================================================================
+# Email & Communication
+# ============================================================================
 sendgrid==6.11.0
 email-validator==2.1.1
 
+# ============================================================================
 # HTTP & Utilities
-httpx==0.26.0
-requests==2.32.4
-aiofiles==23.2.0
-# Use python-magic on Linux/macOS, python-magic-bin on Windows
-python-magic==0.4.27; sys_platform != "win32"
-python-magic-bin==0.4.14; sys_platform == "win32"
-defusedxml==0.7.1
-pytz==2023.3
+# ============================================================================
+requests==2.32.3  # For SendGrid fallback
+orjson==3.10.12   # Fast JSON serialization for ORJSONResponse
 
-#Faster JSON with orjson
-orjson==3.10.7
-#orjson>=3.10.0,<4
-
-# Install PO Token Provider
-#bgutil-ytdlp-pot-provider>=2024.11.0
-
+# ============================================================================
+# Optional/Development (uncomment if needed)
+# ============================================================================
+# httpx==0.27.2           # Modern HTTP client (not currently used)
+# aiofiles==24.1.0        # Async file operations (not currently used)

@@ -4,7 +4,7 @@ Reset ALL users' passwords to a known value (default: 'test123').
 Self-contained: does not import hashing from app modules.
 """
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session # pyright: ignore[reportMissingImports]
 from models import User, SessionLocal
 from passlib.context import CryptContext
 
