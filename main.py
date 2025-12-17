@@ -26,7 +26,7 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired 
 from pydantic import BaseModel, EmailStr # type: ignore
 from email_utils import send_password_reset_email
 from auth_utils import get_password_hash, verify_password, validate_password_strength
-from subscription_sync import sync_user_subscription_from_stripe, apply_local_overdue_downgrade_if_possible
+from subscription_sync import sync_user_subscription_from_stripe, _apply_local_overdue_downgrade_if_possible
 from youtube_transcript_api import YouTubeTranscriptApi # type: ignore
 from transcript_fetcher import get_transcript_smart as get_transcript_youtube_api
 #from datetime import datetime, timezone
@@ -34,7 +34,7 @@ from transcript_fetcher import get_transcript_smart as get_transcript_youtube_ap
 # IMPORTANT: make sure you have these imports available in main.py
 from subscription_sync import (
      sync_user_subscription_from_stripe,
-     apply_local_overdue_downgrade_if_possible,  # <-- ensure this exists in your subscription_sync.py
+     _apply_local_overdue_downgrade_if_possible,  # <-- ensure this exists in your subscription_sync.py
  )
 
 from webhook_handler import handle_stripe_webhook  # if you call it from main.py webhook endpoint
@@ -103,7 +103,7 @@ from models import (
 )
 from db_migrations import run_startup_migrations
 from auth_deps import get_current_user
-from webhook_handler import handle_stripe_webhook, fix_existing_premium_users
+from webhook_handler import handle_stripe_webhook #fix_existing_premium_users
 from payment import router as payment_router
 
 try:
