@@ -1,372 +1,210 @@
+# webhook_handler.py
 """
-Stripe webhook handler for automatic subscription upgrades.
-Integrates with existing YouTube Content Downloader API.
+Stripe webhook handler for automatic subscription upgrades/downgrades.
+
+Design:
+- main.py verifies Stripe signature + idempotency and sets request.state.verified_event
+- this handler processes the event and updates local user state
+- tier/status/expiry are ultimately aligned by calling sync_user_subscription_from_stripe(user, db)
 """
+
 import os
-import json
 import logging
-from datetime import datetime
-from fastapi import Request, HTTPException
-from sqlalchemy.orm import Session
+from datetime import datetime, timezone
+from typing import Optional, Any, Dict
 
-# Import existing modules
-from models import User, Subscription, SessionLocal
+from fastapi import Request, HTTPException  # pyright: ignore[reportMissingImports]
+from sqlalchemy.orm import Session  # pyright: ignore[reportMissingImports]
 
-# Configure logging  
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from models import User, SessionLocal
+from subscription_sync import sync_user_subscription_from_stripe  # your updated sync
 
-# Import stripe (already configured in main.py)
+logger = logging.getLogger("payment")
+
+# Stripe is already configured in many projects in main.py; keep this lightweight.
+stripe = None
 try:
-    import stripe
-    stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
-    STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
-except ImportError:
+    import stripe as _stripe  # type: ignore
+    if os.getenv("STRIPE_SECRET_KEY"):
+        _stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+        stripe = _stripe
+except Exception:
     stripe = None
-    STRIPE_WEBHOOK_SECRET = None
 
-def get_db_session():
-    """Get database session for webhook processing"""
-    db = SessionLocal()
-    return db
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _to_dt(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(int(value), tz=timezone.utc)
+        except Exception:
+            return None
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            return None
+    return None
+
+
+def _db() -> Session:
+    return SessionLocal()
+
+
+def _find_user_by_customer_id(db: Session, customer_id: str) -> Optional[User]:
+    return db.query(User).filter(User.stripe_customer_id == customer_id).first()
+
+
+def _find_user_fallback_by_email(db: Session, email: Optional[str]) -> Optional[User]:
+    if not email:
+        return None
+    return db.query(User).filter(User.email == email).first()
+
+
+def _set_user_stripe_fields_best_effort(user: User, *, status: Optional[str], period_end: Optional[datetime]) -> None:
+    # These are the local timestamps/status fields you wanted.
+    now = _utcnow()
+
+    if hasattr(user, "stripe_subscription_status") and status:
+        user.stripe_subscription_status = status.lower()
+
+    if hasattr(user, "subscription_expires_at") and period_end:
+        user.subscription_expires_at = period_end
+
+    if hasattr(user, "subscription_updated_at"):
+        user.subscription_updated_at = now
+
+
+def _extract_customer_id(event_type: str, obj: Dict[str, Any]) -> Optional[str]:
+    # For most subscription/invoice events:
+    cid = obj.get("customer")
+    if cid:
+        return str(cid)
+
+    # checkout.session.completed: customer is also here; sometimes nested
+    if event_type == "checkout.session.completed":
+        cid = obj.get("customer")
+        if cid:
+            return str(cid)
+
+    return None
+
+
+def _extract_email_from_checkout(obj: Dict[str, Any]) -> Optional[str]:
+    # Stripe checkout sessions often include email in customer_details
+    cd = obj.get("customer_details") or {}
+    email = cd.get("email") or obj.get("customer_email")
+    return str(email) if email else None
+
+
+def _extract_period_end(event_type: str, obj: Dict[str, Any]) -> Optional[datetime]:
+    # Subscription objects include current_period_end (unix seconds)
+    if event_type.startswith("customer.subscription."):
+        return _to_dt(obj.get("current_period_end"))
+
+    # Invoice objects sometimes have lines with period end; but simplest:
+    # rely on sync_user_subscription_from_stripe to pull canonical period_end.
+    return None
+
+
+def _extract_sub_status(event_type: str, obj: Dict[str, Any]) -> Optional[str]:
+    if event_type.startswith("customer.subscription."):
+        st = obj.get("status")
+        return str(st) if st else None
+    # invoice events don't directly represent subscription status reliably
+    return None
+
+
+RELEVANT_EVENTS = {
+    "checkout.session.completed",
+    "customer.subscription.created",
+    "customer.subscription.updated",
+    "customer.subscription.deleted",
+    "invoice.payment_succeeded",
+    "invoice.payment_failed",
+}
+
 
 async def handle_stripe_webhook(request: Request):
     """
-    Main webhook handler for Stripe events.
-    Uses pre-verified event and updates user subscription tier/status.
+    Main webhook handler. Expects main.py already:
+    - verified signature
+    - did idempotency check
+    - stored event in request.state.verified_event
     """
-    if not stripe or not STRIPE_WEBHOOK_SECRET:
-        raise HTTPException(status_code=503, detail="Stripe not configured")
+    if not stripe or not os.getenv("STRIPE_SECRET_KEY"):
+        raise HTTPException(status_code=503, detail="Stripe is not configured")
 
+    event = getattr(request.state, "verified_event", None)
+    if not event:
+        raise HTTPException(status_code=400, detail="Missing verified webhook event")
+
+    event_type = event.get("type")
+    if not event_type:
+        raise HTTPException(status_code=400, detail="Invalid event type")
+
+    obj = (event.get("data") or {}).get("object") or {}
+    logger.info(f"✅ Stripe webhook received: {event_type}")
+
+    # Ignore irrelevant events safely
+    if event_type not in RELEVANT_EVENTS:
+        return {"status": "ok", "ignored": True, "event_type": event_type}
+
+    db = _db()
     try:
-        # ✅ Use already verified event (set in main.py)
-        event = request.state.verified_event
+        customer_id = _extract_customer_id(event_type, obj)
+        user: Optional[User] = None
 
-        logger.info(f"✅ Stripe webhook received: {event['type']}")
+        if customer_id:
+            user = _find_user_by_customer_id(db, customer_id)
 
-        event_type = event['type']
-        obj = event['data']['object']
+        # Fallback for checkout events: attach customer_id to user found by email (first-time purchase)
+        if not user and event_type == "checkout.session.completed":
+            email = _extract_email_from_checkout(obj)
+            user = _find_user_fallback_by_email(db, email)
+            if user and customer_id and not (user.stripe_customer_id or "").strip():
+                user.stripe_customer_id = customer_id
 
-        if event_type == 'checkout.session.completed':
-            await handle_checkout_completed(obj)
-        elif event_type == 'customer.subscription.created':
-            await handle_subscription_created(obj)
-        elif event_type == 'customer.subscription.updated':
-            await handle_subscription_updated(obj)
-        elif event_type == 'customer.subscription.deleted':
-            await handle_subscription_cancelled(obj)
-        elif event_type == 'invoice.payment_succeeded':
-            await handle_payment_succeeded(obj)
-
-        return {"status": "success", "processed": event_type}
-
-    except Exception as e:
-        logger.error(f"❌ Webhook error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Webhook error: {str(e)}")
-
-
-async def handle_checkout_completed(session):
-    """Handle completed checkout session - upgrade user immediately"""
-    logger.info(f"Processing checkout completion for session: {session['id']}")
-    
-    db = get_db_session()
-    try:
-        customer_email = session.get('customer_details', {}).get('email')
-        customer_id = session.get('customer')
-        
-        if not customer_email:
-            logger.warning("No customer email in checkout session")
-            return
-            
-        # Find user by email
-        user = db.query(User).filter(User.email == customer_email).first()
         if not user:
-            logger.warning(f"User not found for email: {customer_email}")
-            return
-            
-        # Update stripe customer ID if not set
-        if not user.stripe_customer_id and customer_id:
-            user.stripe_customer_id = customer_id
-            
-        # Determine tier from the checkout session
-        subscription_tier = determine_tier_from_session(session)
-        if subscription_tier and subscription_tier != "free":
-            old_tier = user.subscription_tier
-            user.subscription_tier = subscription_tier
-            user.updated_at = datetime.utcnow()
-            
-            logger.info(f"✅ UPGRADED user {user.email} from {old_tier} to {subscription_tier}")
-            
+            logger.warning(f"Webhook {event_type}: could not map to a user (customer_id={customer_id!r}).")
+            db.commit()  # commit any possible customer_id attach (rare path)
+            return {"status": "ok", "processed": event_type, "mapped_user": False}
+
+        # Best-effort store local status/expiry from webhook payload (if present)
+        sub_status = _extract_sub_status(event_type, obj)
+        period_end = _extract_period_end(event_type, obj)
+        _set_user_stripe_fields_best_effort(user, status=sub_status, period_end=period_end)
+
         db.commit()
-        
-    except Exception as e:
-        logger.error(f"Error handling checkout completion: {e}")
-        db.rollback()
-    finally:
-        db.close()
+        db.refresh(user)
 
-async def handle_subscription_created(subscription):
-    """Handle new subscription creation"""
-    logger.info(f"Processing subscription creation: {subscription['id']}")
-    
-    db = get_db_session()
-    try:
-        customer_id = subscription['customer']
-        
-        # Find user by stripe customer ID
-        user = db.query(User).filter(User.stripe_customer_id == customer_id).first()
-        if not user:
-            logger.warning(f"User not found for customer: {customer_id}")
-            return
-            
-        # Determine tier from subscription
-        tier = determine_tier_from_subscription(subscription)
-        
-        # Update user
-        old_tier = user.subscription_tier
-        user.subscription_tier = tier
-        user.stripe_subscription_id = subscription['id']
-        user.updated_at = datetime.utcnow()
-        
-        # Create subscription record
-        sub_record = Subscription(
-            user_id=user.id,
-            tier=tier,
-            status=subscription['status'],
-            stripe_subscription_id=subscription['id'],
-            stripe_customer_id=customer_id,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow()
-        )
-        
-        # Set price if available
-        if subscription.get('items') and subscription['items']['data']:
-            price_data = subscription['items']['data'][0]['price']
-            if price_data.get('unit_amount'):
-                sub_record.price_paid = price_data['unit_amount'] / 100  # Convert from cents
-                sub_record.currency = price_data.get('currency', 'usd')
-        
-        db.add(sub_record)
-        db.commit()
-        
-        logger.info(f"✅ UPGRADED user {user.email} from {old_tier} to {tier}")
-        
-    except Exception as e:
-        logger.error(f"Error handling subscription creation: {e}")
-        db.rollback()
-    finally:
-        db.close()
-
-async def handle_subscription_updated(subscription):
-    """Handle subscription updates"""
-    logger.info(f"Processing subscription update: {subscription['id']}")
-    
-    db = get_db_session()
-    try:
-        # Find user by subscription ID or customer ID
-        user = db.query(User).filter(User.stripe_subscription_id == subscription['id']).first()
-        if not user:
-            # Try by customer ID
-            user = db.query(User).filter(User.stripe_customer_id == subscription['customer']).first()
-        
-        if not user:
-            logger.warning(f"User not found for subscription: {subscription['id']}")
-            return
-            
-        # Update tier based on current subscription
-        tier = determine_tier_from_subscription(subscription)
-        old_tier = user.subscription_tier
-        user.subscription_tier = tier
-        user.stripe_subscription_id = subscription['id']
-        user.updated_at = datetime.utcnow()
-        
-        # Update subscription record
-        sub_record = db.query(Subscription).filter(
-            Subscription.stripe_subscription_id == subscription['id']
-        ).first()
-        
-        if sub_record:
-            sub_record.tier = tier
-            sub_record.status = subscription['status']
-            sub_record.updated_at = datetime.utcnow()
-            
-        db.commit()
-        
-        logger.info(f"✅ UPDATED user {user.email} from {old_tier} to {tier}")
-        
-    except Exception as e:
-        logger.error(f"Error handling subscription update: {e}")
-        db.rollback()
-    finally:
-        db.close()
-
-async def handle_subscription_cancelled(subscription):
-    """Handle subscription cancellation"""
-    logger.info(f"Processing subscription cancellation: {subscription['id']}")
-    
-    db = get_db_session()
-    try:
-        # Find user by subscription ID
-        user = db.query(User).filter(User.stripe_subscription_id == subscription['id']).first()
-        if not user:
-            logger.warning(f"User not found for subscription: {subscription['id']}")
-            return
-            
-        # Downgrade to free
-        old_tier = user.subscription_tier
-        user.subscription_tier = "free"
-        user.stripe_subscription_id = None
-        user.updated_at = datetime.utcnow()
-        
-        # Update subscription record
-        sub_record = db.query(Subscription).filter(
-            Subscription.stripe_subscription_id == subscription['id']
-        ).first()
-        
-        if sub_record:
-            sub_record.status = "cancelled"
-            sub_record.cancelled_at = datetime.utcnow()
-            sub_record.updated_at = datetime.utcnow()
-            
-        db.commit()
-        
-        logger.info(f"⬇️ DOWNGRADED user {user.email} from {old_tier} to free")
-        
-    except Exception as e:
-        logger.error(f"Error handling subscription cancellation: {e}")
-        db.rollback()
-    finally:
-        db.close()
-
-async def handle_payment_succeeded(invoice):
-    """Handle successful payment - ensure user stays upgraded"""
-    logger.info(f"Processing successful payment: {invoice['id']}")
-    
-    # Get subscription from invoice
-    if invoice.get('subscription'):
+        # Single source of truth: pull Stripe state and set tier + subscription_expires_at/status/updated_at
+        # (your sync function should set these fields too)
         try:
-            subscription = stripe.Subscription.retrieve(invoice['subscription'])
-            await handle_subscription_updated(subscription)
+            sync_user_subscription_from_stripe(user, db)
         except Exception as e:
-            logger.error(f"Error processing payment success: {e}")
+            logger.warning(f"Webhook Stripe sync failed (non-fatal): {e}")
 
-def determine_tier_from_session(session):
-    """Determine subscription tier from checkout session"""
-    # Check metadata first
-    metadata = session.get('metadata', {})
-    if metadata.get('tier'):
-        return metadata['tier']
-    
-    # Check line items for amount
-    if session.get('amount_total'):
-        amount = session['amount_total'] / 100  # Convert from cents
-        if amount >= 19.99:
-            return 'premium'
-        elif amount >= 9.99:
-            return 'pro'
-    
-    return 'free'
+        return {"status": "ok", "processed": event_type, "mapped_user": True, "user_id": user.id}
 
-def determine_tier_from_subscription(subscription):
-    """Determine tier from subscription data"""
-    if not subscription.get('items') or not subscription['items']['data']:
-        return 'free'
-        
-    price_id = subscription['items']['data'][0]['price']['id']
-    amount = subscription['items']['data'][0]['price']['unit_amount']
-    
-    if amount:
-        amount_dollars = amount / 100
-        if amount_dollars >= 19.99:
-            return 'premium'
-        elif amount_dollars >= 9.99:
-            return 'pro'
-    
-    return 'free'
-
-def fix_existing_premium_users():
-    """
-    One-time function to fix users who paid but weren't upgraded.
-    Checks Stripe for active subscriptions and upgrades users accordingly.
-    """
-    if not stripe:
-        logger.error("Stripe not configured")
-        return {"error": "Stripe not configured"}
-    
-    db = SessionLocal()
-    fixed_count = 0
-    
-    try:
-        # Find users with stripe_customer_id but still on free tier
-        users_to_check = db.query(User).filter(
-            User.stripe_customer_id.isnot(None),
-            User.subscription_tier == "free"
-        ).all()
-        
-        logger.info(f"Checking {len(users_to_check)} users who might need fixing...")
-        
-        for user in users_to_check:
-            try:
-                # Check their Stripe subscriptions
-                subscriptions = stripe.Subscription.list(
-                    customer=user.stripe_customer_id, 
-                    status='active',
-                    limit=10
-                )
-                
-                if subscriptions.data:
-                    # They have active subscriptions, upgrade them
-                    sub = subscriptions.data[0]
-                    tier = determine_tier_from_subscription(sub)
-                    
-                    if tier != "free":
-                        old_tier = user.subscription_tier
-                        user.subscription_tier = tier
-                        user.stripe_subscription_id = sub.id
-                        user.updated_at = datetime.utcnow()
-                        
-                        # Create subscription record if not exists
-                        existing_sub = db.query(Subscription).filter(
-                            Subscription.stripe_subscription_id == sub.id
-                        ).first()
-                        
-                        if not existing_sub:
-                            sub_record = Subscription(
-                                user_id=user.id,
-                                tier=tier,
-                                status=sub.status,
-                                stripe_subscription_id=sub.id,
-                                stripe_customer_id=user.stripe_customer_id,
-                                created_at=datetime.utcnow(),
-                                updated_at=datetime.utcnow()
-                            )
-                            if sub.items.data:
-                                price_data = sub.items.data[0].price
-                                if price_data.unit_amount:
-                                    sub_record.price_paid = price_data.unit_amount / 100
-                                    sub_record.currency = price_data.currency
-                            db.add(sub_record)
-                        
-                        fixed_count += 1
-                        logger.info(f"✅ FIXED user {user.email}: {old_tier} → {tier}")
-                    
-            except Exception as e:
-                logger.error(f"Error checking user {user.email}: {e}")
-                continue
-                
-        db.commit()
-        logger.info(f"Fixed {fixed_count} users total")
-        
-        return {
-            "status": "success",
-            "fixed_count": fixed_count,
-            "checked_count": len(users_to_check)
-        }
-        
     except Exception as e:
-        logger.error(f"Error in fix function: {e}")
+        logger.error(f"❌ Webhook error: {e}")
         db.rollback()
-        return {"error": str(e)}
+        raise HTTPException(status_code=500, detail="Webhook processing failed")
     finally:
         db.close()
-

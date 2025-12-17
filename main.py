@@ -26,9 +26,19 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired 
 from pydantic import BaseModel, EmailStr # type: ignore
 from email_utils import send_password_reset_email
 from auth_utils import get_password_hash, verify_password, validate_password_strength
-from subscription_sync import sync_user_subscription_from_stripe
+from subscription_sync import sync_user_subscription_from_stripe, apply_local_overdue_downgrade_if_possible
 from youtube_transcript_api import YouTubeTranscriptApi # type: ignore
 from transcript_fetcher import get_transcript_smart as get_transcript_youtube_api
+#from datetime import datetime, timezone
+
+# IMPORTANT: make sure you have these imports available in main.py
+from subscription_sync import (
+     sync_user_subscription_from_stripe,
+     apply_local_overdue_downgrade_if_possible,  # <-- ensure this exists in your subscription_sync.py
+ )
+
+from webhook_handler import handle_stripe_webhook  # if you call it from main.py webhook endpoint
+
 
 # ---------------------------------------------------------------------------
 # Safe imports for youtube_transcript_api exceptions
@@ -306,6 +316,59 @@ def ensure_stripe_customer_for_user(user: "User", db: Session) -> None:
     except Exception as e:
         logger.warning("ensure_stripe_customer_for_user failed for %s: %s", email, e)
         db.rollback()
+
+
+#---------------------------------------------------------------------------
+# Stripe Helper: The one-line call point (with a safe throttle guard)
+#---------------------------------------------------------------------------
+
+def should_sync_stripe_now(user: User) -> bool:
+    # Only hit Stripe if we haven’t synced recently
+    last = getattr(user, "subscription_updated_at", None)
+    if not last:
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - last >= timedelta(minutes=10)  # adjust as you like
+
+
+# ---------------------------------------------------------------------------
+# Additional Helper: Add this helper (server-side reset enforcement)
+# ---------------------------------------------------------------------------
+
+def enforce_billing_cycle_and_tier(db: Session, user_id: int, *, force_stripe_sync: bool) -> None:
+    """
+    1) If now >= next_reset: reset monthly usage counters and advance next_reset
+    2) If Stripe inactive: downgrade to free
+    NOTE: Implementation must use your actual models/tables.
+    """
+    now = datetime.now(timezone.utc)
+
+    sub = db.query(Subscription).filter(Subscription.user_id == user_id).one_or_none()
+    if not sub:
+        return
+
+    # Optional: if force_stripe_sync, call your existing Stripe sync logic here
+    # e.g. sync_user_subscription_from_stripe(db, user_id)
+
+    # --- Handle monthly reset ---
+    if sub.next_reset and now >= sub.next_reset:
+        # Reset usage counters (whatever table/columns you use)
+        usage = db.query(Usage).filter(Usage.user_id == user_id).one_or_none() # pyright: ignore[reportUndefinedVariable]
+        if usage:
+            usage.clean_transcripts = 0
+            usage.unclean_transcripts = 0
+            usage.audio_downloads = 0
+            usage.video_downloads = 0
+
+        # Advance next_reset (example: +30 days; better: add 1 month with dateutil.relativedelta)
+        sub.next_reset = sub.next_reset.replace(year=sub.next_reset.year) + timedelta(days=30)
+
+    # --- Enforce downgrade if not active ---
+    if sub.status != "active":
+        sub.tier = "free"
+
+    db.commit()
 
 # ---------------------------------------------------------------------------
 # Timestamp middleware (optional)
@@ -2499,6 +2562,15 @@ def get_recent_activity(
 # ---------------------------------------------------------------------------
 # Subscription status
 # ---------------------------------------------------------------------------
+from datetime import datetime, timezone
+
+# IMPORTANT: make sure you have these imports available in main.py
+# from subscription_sync import (
+#     sync_user_subscription_from_stripe,
+#     apply_local_overdue_downgrade_if_possible,  # <-- ensure this exists in your subscription_sync.py
+# )
+# from webhook_handler import handle_stripe_webhook  # if you call it from main.py webhook endpoint
+
 @app.get("/subscription_status")
 @app.get("/subscription_status/")
 def subscription_status(
@@ -2506,40 +2578,46 @@ def subscription_status(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # 1) Always enforce local overdue downgrade first (works even when Stripe is down)
+    try:
+        # expects your subscription_sync.py to expose this name
+        apply_local_overdue_downgrade_if_possible(current_user, db)
+    except Exception as e:
+        logger.warning(f"Local overdue downgrade check skipped (non-fatal): {e}")
+
+    # 2) Optional Stripe sync (you said you already added the throttle guard elsewhere)
     if request.query_params.get("sync") == "1":
         try:
             sync_user_subscription_from_stripe(current_user, db)
         except Exception as e:
             logger.warning(f"Stripe sync skipped (non-fatal): {e}")
 
+    # 3) Do monthly reset AFTER tier enforcement/sync
     next_reset = ensure_monthly_reset_and_tier(db, current_user)
 
-    tier = (
-        getattr(current_user, "subscription_tier", "free") or "free"
-    ).lower()
+    tier = (getattr(current_user, "subscription_tier", "free") or "free").lower()
+
     usage = {
-        "clean_transcripts": getattr(
-            current_user, "usage_clean_transcripts", 0
-        )
-        or 0,
-        "unclean_transcripts": getattr(
-            current_user, "usage_unclean_transcripts", 0
-        )
-        or 0,
-        "audio_downloads": getattr(
-            current_user, "usage_audio_downloads", 0
-        )
-        or 0,
-        "video_downloads": getattr(
-            current_user, "usage_video_downloads", 0
-        )
-        or 0,
+        "clean_transcripts": getattr(current_user, "usage_clean_transcripts", 0) or 0,
+        "unclean_transcripts": getattr(current_user, "usage_unclean_transcripts", 0) or 0,
+        "audio_downloads": getattr(current_user, "usage_audio_downloads", 0) or 0,
+        "video_downloads": getattr(current_user, "usage_video_downloads", 0) or 0,
     }
 
     limits = PLAN_LIMITS.get(tier, PLAN_LIMITS["free"])
-    limits_display = {
-        k: ("unlimited" if v == float("inf") else v) for k, v in limits.items()
-    }
+    limits_display = {k: ("unlimited" if v == float("inf") else v) for k, v in limits.items()}
+
+    # Optional: expose Stripe/local subscription metadata (safe + helps debugging UI)
+    sub_expires_at = getattr(current_user, "subscription_expires_at", None)
+    stripe_status = getattr(current_user, "stripe_subscription_status", None)
+    sub_updated_at = getattr(current_user, "subscription_updated_at", None)
+
+    def _iso(dt):
+        if not dt:
+            return None
+        if getattr(dt, "tzinfo", None) is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
 
     return {
         "tier": tier,
@@ -2549,6 +2627,10 @@ def subscription_status(
         "next_reset": next_reset.isoformat() if next_reset else None,
         "downloads_folder": str(DOWNLOADS_DIR),
         "account": canonical_account(current_user),
+        # helpful metadata for UI/debug (optional)
+        "subscription_expires_at": _iso(sub_expires_at),
+        "stripe_subscription_status": (stripe_status.lower() if isinstance(stripe_status, str) else stripe_status),
+        "subscription_updated_at": _iso(sub_updated_at),
     }
 
 # ---------------------------------------------------------------------------
