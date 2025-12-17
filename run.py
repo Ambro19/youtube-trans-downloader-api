@@ -10,6 +10,8 @@ import sys
 import logging
 from pathlib import Path
 
+from fastapi import FastAPI, HTTPException, Depends, Request, Query, Response # type: ignore
+
 # Ensure project root is importable
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
@@ -70,7 +72,7 @@ def main():
         log.exception("❌ Failed to import FastAPI application")
         sys.exit(1)
 
-    import uvicorn
+    import uvicorn # pyright: ignore[reportMissingImports]
 
     local_ip = _local_ip_hint()
     log.info("🌐 Will listen on 0.0.0.0:%d (Render needs this).", port)

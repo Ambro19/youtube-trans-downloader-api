@@ -2581,7 +2581,7 @@ def subscription_status(
     # 1) Always enforce local overdue downgrade first (works even when Stripe is down)
     try:
         # expects your subscription_sync.py to expose this name
-        apply_local_overdue_downgrade_if_possible(current_user, db)
+        _apply_local_overdue_downgrade_if_possible(current_user, db)
     except Exception as e:
         logger.warning(f"Local overdue downgrade check skipped (non-fatal): {e}")
 
