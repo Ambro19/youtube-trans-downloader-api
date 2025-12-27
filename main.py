@@ -29,7 +29,6 @@ from auth_utils import get_password_hash, verify_password, validate_password_str
 from subscription_sync import sync_user_subscription_from_stripe, _apply_local_overdue_downgrade_if_possible
 from youtube_transcript_api import YouTubeTranscriptApi # type: ignore
 from transcript_fetcher import get_transcript_smart as get_transcript_youtube_api
-#from datetime import datetime, timezone
 
 # IMPORTANT: make sure you have these imports available in main.py
 from subscription_sync import (
@@ -40,9 +39,9 @@ from subscription_sync import (
 from webhook_handler import handle_stripe_webhook  # if you call it from main.py webhook endpoint
 
 
-# ---------------------------------------------------------------------------
+# ---------------------------------------------------
 # Safe imports for youtube_transcript_api exceptions
-# ---------------------------------------------------------------------------
+# ---------------------------------------------------
 try:
     from youtube_transcript_api import ( # type: ignore
         YouTubeTranscriptApi,
@@ -65,9 +64,9 @@ except Exception:
     class CouldNotRetrieveTranscript(Exception):
         pass
 
-# ---------------------------------------------------------------------------
+# ----------------------
 # JWT Secret (required)
-# ---------------------------------------------------------------------------
+# ----------------------
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
     raise RuntimeError(
@@ -78,9 +77,9 @@ if not SECRET_KEY:
 RESET_TOKEN_TTL_SECONDS = int(os.getenv("RESET_TOKEN_TTL_SECONDS", "3600"))
 serializer = URLSafeTimedSerializer(SECRET_KEY)
 
-# ---------------------------------------------------------------------------
+# ----------------------------
 # Database URL normalization
-# ---------------------------------------------------------------------------
+# ----------------------------
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./youtube_trans_downloader.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg2://", 1)
@@ -136,22 +135,34 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 FILE_RETENTION_DAYS = int(os.getenv("FILE_RETENTION_DAYS", "7"))
 
-# ---------------------------------------------------------------------------
+# --------------------------------------------
 # Stripe configuration (module-level handle)
-# ---------------------------------------------------------------------------
+# --------------------------------------------
+# ===== FIX #1: Stripe configuration with NO_PROXY support =====
 stripe = None
 try:
-    import stripe as _stripe # pyright: ignore[reportMissingImports]
+    import stripe as _stripe
 
     if os.getenv("STRIPE_SECRET_KEY"):
         _stripe.api_key = os.getenv("STRIPE_SECRET_KEY").strip()
         stripe = _stripe
-except Exception:
+        
+        # ✅ CRITICAL: Exclude Stripe from proxy (fix for 403 Forbidden errors)
+        os.environ.setdefault("NO_PROXY", "")
+        current_no_proxy = os.environ.get("NO_PROXY", "")
+        stripe_domains = "api.stripe.com,files.stripe.com,checkout.stripe.com"
+        
+        if stripe_domains not in current_no_proxy:
+            os.environ["NO_PROXY"] = f"{current_no_proxy},{stripe_domains}" if current_no_proxy else stripe_domains
+            logger.info("✅ Stripe domains excluded from proxy: %s", stripe_domains)
+            
+except Exception as e:
+    logger.warning("⚠️ Stripe initialization issue: %s", e)
     stripe = None
 
 app = FastAPI(
     title="YouTube Content Downloader API",
-    version="3.4.2",
+    version="3.4.3",
     default_response_class=ORJSONResponse,
 )
 
@@ -164,27 +175,18 @@ app = FastAPI(
 #   PROXY_PASSWORD=...
 # ---------------------------------------------------------------------------
 
+# Proxy configuration for YouTube downloads (NOT Stripe)
 def _configure_global_proxy_from_env() -> None:
-    """
-    Configure process-wide HTTP(S) proxy for outbound requests.
-
-    This is intentionally generic: it sets environment variables commonly
-    honored by HTTP clients and yt-dlp (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY,
-    YTDLP_PROXY). It does NOT log credentials.
-    """
+    """Configure process-wide proxy for YouTube downloads ONLY (excludes Stripe)"""
     try:
         enabled = (os.getenv("PROXY_ENABLED", "false") or "").lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
+            "1", "true", "yes", "on",
         }
         host = (os.getenv("PROXY_HOST") or "").strip()
         port = (os.getenv("PROXY_PORT") or "").strip()
         user = (os.getenv("PROXY_USERNAME") or "").strip()
         pwd = (os.getenv("PROXY_PASSWORD") or "").strip()
 
-        # If disabled, clear any previous proxy envs
         if not enabled:
             for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "YTDLP_PROXY"]:
                 os.environ.pop(key, None)
@@ -193,12 +195,10 @@ def _configure_global_proxy_from_env() -> None:
 
         if not host or not port:
             logger.warning(
-                "🌐 Proxy: PROXY_ENABLED is true but PROXY_HOST/PROXY_PORT are missing. "
-                "Proxy will not be used."
+                "🌐 Proxy: PROXY_ENABLED is true but PROXY_HOST/PROXY_PORT are missing."
             )
             return
 
-        # Build proxy URL (with optional auth), but never log password.
         from urllib.parse import quote as urlquote
 
         if user and pwd:
@@ -208,51 +208,42 @@ def _configure_global_proxy_from_env() -> None:
             proxy_url = f"http://{host}:{port}"
             auth_label = "no-auth"
 
-        # Set standard env vars
         os.environ["HTTP_PROXY"] = proxy_url
         os.environ["HTTPS_PROXY"] = proxy_url
         os.environ["ALL_PROXY"] = proxy_url
-        # yt-dlp will also honor this if used in its config
         os.environ["YTDLP_PROXY"] = proxy_url
 
-        logger.info(
-            "🌐 Proxy: enabled (%s) host=%s port=%s",
-            auth_label,
-            host,
-            port,
-        )
+        # ✅ Ensure NO_PROXY includes Stripe (redundant but safe)
+        os.environ.setdefault("NO_PROXY", "api.stripe.com,files.stripe.com,checkout.stripe.com")
+
+        logger.info("🌐 Proxy: enabled (%s) host=%s port=%s", auth_label, host, port)
     except Exception as e:
         logger.warning("🌐 Proxy: configuration failed: %s", e)
 
 
-# ---------------------------------------------------------------------------
+# --------------
 # Stripe helper
-# ---------------------------------------------------------------------------
-def ensure_stripe_customer_for_user(user: "User", db: Session) -> None:
-    """
-    Ensure this app user has a Stripe customer id.
+# --------------
 
-    - If one already exists, do nothing.
-    - Otherwise, try to find a Stripe customer by email.
-    - If not found, create one.
-    """
+# ===== FIX #2: Graceful Stripe customer creation (doesn't fail registration) =====
+def ensure_stripe_customer_for_user(user: "User", db: Session) -> None:
+    """Ensure user has Stripe customer ID (graceful - doesn't fail if Stripe is down)"""
     if not stripe or not os.getenv("STRIPE_SECRET_KEY"):
-        return
+        return  # Silent skip if Stripe not configured
 
     if getattr(user, "stripe_customer_id", None):
-        # Already linked
-        return
+        return  # Already linked
 
     email = (user.email or "").strip().lower()
     username = (user.username or "").strip() or None
 
     if not email:
-        return  # nothing we can do
+        return
 
     try:
         customer = None
 
-        # 1) Try Customer.search (newer API)
+        # Try Customer.search
         try:
             found = stripe.Customer.search(
                 query=f"email:'{email}' AND -deleted:'true'",
@@ -261,23 +252,18 @@ def ensure_stripe_customer_for_user(user: "User", db: Session) -> None:
             if getattr(found, "data", []):
                 customer = found.data[0]
         except Exception as e:
-            logger.debug(
-                "ensure_stripe_customer_for_user: customer.search failed: %s", e
-            )
+            logger.debug("Customer search failed (non-fatal): %s", e)
 
-        # 2) Fallback to Customer.list
+        # Fallback to Customer.list
         if not customer:
             try:
                 listed = stripe.Customer.list(email=email, limit=1)
                 if getattr(listed, "data", []):
                     customer = listed.data[0]
             except Exception as e:
-                logger.debug(
-                    "ensure_stripe_customer_for_user: customer.list failed: %s", e
-                )
+                logger.debug("Customer list failed (non-fatal): %s", e)
 
         if customer:
-            # Backfill existing Stripe customer
             user.stripe_customer_id = customer["id"]
             try:
                 stripe.Customer.modify(
@@ -292,14 +278,10 @@ def ensure_stripe_customer_for_user(user: "User", db: Session) -> None:
                 pass
             db.commit()
             db.refresh(user)
-            logger.info(
-                "🔄 Linked existing Stripe customer %s to user %s",
-                customer["id"],
-                email,
-            )
+            logger.info("🔄 Linked existing Stripe customer %s", customer["id"])
             return
 
-        # 3) No customer found → create a new one
+        # Create new customer
         created = stripe.Customer.create(
             email=email,
             name=username,
@@ -309,13 +291,12 @@ def ensure_stripe_customer_for_user(user: "User", db: Session) -> None:
         user.stripe_customer_id = created["id"]
         db.commit()
         db.refresh(user)
-        logger.info(
-            "✅ Created Stripe customer %s for user %s", created["id"], email
-        )
+        logger.info("✅ Created Stripe customer %s", created["id"])
 
     except Exception as e:
-        logger.warning("ensure_stripe_customer_for_user failed for %s: %s", email, e)
-        db.rollback()
+        # ✅ FIX: Don't fail registration if Stripe is unavailable
+        logger.warning("⚠️ Stripe customer creation skipped (non-fatal): %s", e)
+        # User account still created successfully
 
 
 #---------------------------------------------------------------------------
@@ -381,9 +362,9 @@ except Exception as e:
     logger.info("Timestamp middleware not loaded: %s", e)
 
 
-# ---------------------------------------------------------------------------
+# ------------------------------
 # Security headers middleware
-# ---------------------------------------------------------------------------
+# ------------------------------
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     def __init__(
         self,
@@ -427,14 +408,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                     hsts_value += "; preload"
                 response.headers["Strict-Transport-Security"] = hsts_value
         if self.csp:
-            ct = (response.headers.get("content-type", "") or "").split(";")[
-                0
-            ].strip().lower()
+            ct = (response.headers.get("content-type", "") or "").split(";")[0].strip().lower()
             if self.apply_csp_to_api_only:
-                if (
-                    not ct.startswith("text/html")
-                    and not request.url.path.startswith("/_spa")
-                ):
+                if not ct.startswith("text/html") and not request.url.path.startswith("/_spa"):
                     response.headers["Content-Security-Policy"] = self.csp
             else:
                 response.headers["Content-Security-Policy"] = self.csp
@@ -444,7 +420,6 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 
 DEV_CSP = None
-
 PROD_CSP = (
     "default-src 'self'; "
     "img-src 'self' data: blob:; "
@@ -471,18 +446,16 @@ app.add_middleware(
 )
 
 
-# ---------------------------------------------------------------------------
+# -------------------------
 # Rate limiting middleware
-# ---------------------------------------------------------------------------
+# -------------------------
 class RateLimitMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: ASGIApp) -> None:
         super().__init__(app)
         self.now = time.time
         self.buckets: Dict[str, deque] = defaultdict(deque)
         self.lock = threading.Lock()
-        self.enabled = (
-            os.getenv("RL_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
-        )
+        self.enabled = (os.getenv("RL_ENABLED", "true").lower() in {"1", "true", "yes", "on"})
         self.default_window = int(os.getenv("RL_DEFAULT_WINDOW_SEC", "60"))
         self.default_max = int(os.getenv("RL_DEFAULT_MAX", "120"))
         self.auth_window = int(os.getenv("RL_AUTH_WINDOW_SEC", "60"))
@@ -521,9 +494,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(RateLimitMiddleware)
 
-# ---------------------------------------------------------------------------
+# -----
 # CORS
-# ---------------------------------------------------------------------------
+# ------
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
@@ -553,18 +526,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=[
-        "Content-Disposition",
-        "Content-Type",
-        "Content-Length",
-        "Content-Range",
+        "Content-Disposition", "Content-Type", "Content-Length", "Content-Range",
     ],
 )
 
 print("✅ CORS enabled for origins:", allow_origins)
 
-# ---------------------------------------------------------------------------
+# -------------------
 # Download directory
-# ---------------------------------------------------------------------------
+# -------------------
+
 USE_SYSTEM_DOWNLOADS = os.getenv("USE_SYSTEM_DOWNLOADS", "false").lower() == "true"
 if USE_SYSTEM_DOWNLOADS:
     try:
@@ -585,9 +556,10 @@ else:
 
 app.mount("/files", StaticFiles(directory=str(DOWNLOADS_DIR)), name="files")
 
-# ---------------------------------------------------------------------------
+
+# --------------------
 # JWT / Auth helpers
-# ---------------------------------------------------------------------------
+# --------------------
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
@@ -621,15 +593,8 @@ def is_mobile_request(request: Request) -> bool:
     return any(
         p in ua
         for p in [
-            "android",
-            "iphone",
-            "ipad",
-            "ipod",
-            "blackberry",
-            "windows phone",
-            "mobile",
-            "webos",
-            "opera mini",
+            "android", "iphone", "ipad", "ipod", "blackberry", "windows phone",
+            "mobile", "webos", "opera mini",
         ]
     )
 
@@ -683,110 +648,70 @@ def extract_youtube_video_id(text: str) -> str:
     m = _YT_ID_RE.search(t)
     return m.group(1) if m else ""
 
-# ============================================================================
-# Fixed Transcript Helper Functions
-# ============================================================================
 
-def _get_segment_value(seg: Any, key: str, default: Any = None) -> Any:
-    if isinstance(seg, dict):
-        return seg.get(key, default)
-    else:
-        return getattr(seg, key, default)
-
-
-def _sec_to_vtt(ts: float) -> str:
-    h = int(ts // 3600)
-    m = int((ts % 3600) // 60)
-    s = int(ts % 60)
-    ms = int((ts - int(ts)) * 1000)
-    return f"{h:02}:{m:02}:{s:02}.{ms:03}"
+def is_mobile_request(request: Request) -> bool:
+    ua = (request.headers.get("user-agent") or "").lower()
+    return any(
+        p in ua
+        for p in [
+            "android", "iphone", "ipad", "ipod", "blackberry", "windows phone",
+            "mobile", "webos", "opera mini",
+        ]
+    )
 
 
-def segments_to_vtt(transcript) -> str:
-    lines = ["WEBVTT", "Kind: captions", "Language: en", ""]
+def get_safe_filename(filename: str) -> str:
+    return re.sub(r'[<>:"/\\|?*]', "_", filename)[:120]
+
+
+def get_mobile_mime_type(path: str, file_type: str) -> str:
+    if file_type == "audio" or path.endswith((".mp3", ".m4a", ".aac")):
+        return "audio/mpeg"
+    if file_type == "video" or path.endswith((".mp4", ".m4v", ".mov")):
+        return "video/mp4"
+    mime, _ = mimetypes.guess_type(path)
+    return mime or "application/octet-stream"
+
+
+def check_internet() -> bool:
     try:
-        for seg in transcript:
-            start = _get_segment_value(seg, "start", 0)
-            duration = _get_segment_value(seg, "duration", 0)
-            text = _get_segment_value(seg, "text", "")
-            if not text:
-                continue
-            start_ts = _sec_to_vtt(start)
-            end_ts = _sec_to_vtt(start + duration)
-            text_clean = text.replace("\n", " ").strip()
-            lines.append(f"{start_ts} --> {end_ts}")
-            lines.append(text_clean)
-            lines.append("")
-        return "\n".join(lines)
-    except Exception as e:
-        logger.warning(f"segments_to_vtt error: {e}")
-        raise
+        socket.create_connection(("8.8.8.8", 53), timeout=3)
+        return True
+    except OSError:
+        return False
 
 
-def segments_to_srt(transcript) -> str:
-    def sec_to_srt(ts: float) -> str:
-        h = int(ts // 3600)
-        m = int((ts % 3600) // 60)
-        s = int(ts % 60)
-        ms = int((ts - int(ts)) * 1000)
-        return f"{h:02}:{m:02}:{s:02},{ms:03}"
-
-    out = []
+def check_youtube() -> bool:
     try:
-        for i, seg in enumerate(transcript, start=1):
-            start = _get_segment_value(seg, "start", 0)
-            duration = _get_segment_value(seg, "duration", 0)
-            text = _get_segment_value(seg, "text", "")
-            if not text:
-                continue
-            start_ts = sec_to_srt(start)
-            end_ts = sec_to_srt(start + duration)
-            text_clean = text.replace("\n", " ").strip()
-            out.append(str(i))
-            out.append(f"{start_ts} --> {end_ts}")
-            out.append(text_clean)
-            out.append("")
-        return "\n".join(out)
-    except Exception as e:
-        logger.warning(f"segments_to_srt error: {e}")
-        raise
+        socket.create_connection(("www.youtube.com", 443), timeout=5)
+        return True
+    except OSError:
+        return False
 
 
-_EN_PRIORITY = ["en", "en-US", "en-GB", "en-CA", "en-AU", "en-IE", "en-NZ"]
+_YT_ID_RE = re.compile(r"(?<![\w-])([A-Za-z0-9_-]{11})(?![\w-])")
 
 
-def _clean_plain_blocks(blocks: list[str]) -> str:
-    out, cur, chars = [], [], 0
-    for word in " ".join(blocks).split():
-        cur.append(word)
-        chars += len(word) + 1
-        if chars > 400 and word.endswith((".", "!", "?")):
-            out.append(" ".join(cur))
-            cur, chars = [], 0
-    if cur:
-        out.append(" ".join(cur))
-    return "\n\n".join(out)
+def extract_youtube_video_id(text: str) -> str:
+    t = (text or "").strip()
+    pats = [
+        r"(?:youtube\.com/watch\?[^#\s]*[?&]v=)([^&\n?#]{11})",
+        r"(?:youtu\.be/)([^&\n?#/]{11})",
+        r"(?:youtube\.com/embed/)([^&\n?#/]{11})",
+        r"(?:youtube\.com/shorts/)([^&\n?#/]{11})",
+    ]
+    for p in pats:
+        m = re.search(p, t)
+        if m:
+            cand = m.group(1)
+            if _YT_ID_RE.fullmatch(cand):
+                return cand
+    m = _YT_ID_RE.search(t)
+    return m.group(1) if m else ""
 
-
-def _format_timestamped(segments):
-    lines = []
-    try:
-        for seg in segments:
-            start = _get_segment_value(seg, "start", 0)
-            text = _get_segment_value(seg, "text", "")
-            if not text:
-                continue
-            t = int(start)
-            text_clean = text.replace("\n", " ")
-            lines.append(f"[{t // 60:02d}:{t % 60:02d}] {text_clean}")
-        return "\n".join(lines)
-    except Exception as e:
-        logger.warning(f"_format_timestamped error: {e}")
-        raise
-
-# ============================================================================
+# ------------
 # Plan Limits
-# ============================================================================
+# -----------
 PLAN_LIMITS = {
     "free": {
         "clean_transcripts": 5,
@@ -830,24 +755,27 @@ def _compute_next_reset_date(user: User) -> datetime:
     )
     today = datetime.utcnow()
     day = min(anchor.day, 28)
-    this_month_anniv = today.replace(
-        day=day, hour=0, minute=0, second=0, microsecond=0
-    )
+    this_month_anniv = today.replace(day=day, hour=0, minute=0, second=0, microsecond=0)
     if today < this_month_anniv:
         return this_month_anniv
     y, m = (today.year + (today.month // 12), ((today.month % 12) + 1))
     return this_month_anniv.replace(year=y, month=m)
 
 
+# ===== FIX #3: Proper usage reset (fixes "over by 2" display issue) =====
 def _reset_usage_counters(user: User):
+    """Reset ALL usage counters to 0 (fixes over-limit display bug)"""
     user.usage_clean_transcripts = 0
     user.usage_unclean_transcripts = 0
     user.usage_audio_downloads = 0
     user.usage_video_downloads = 0
+    logger.info("🔁 Reset usage counters for user %s", user.email)
 
 
 def ensure_monthly_reset_and_tier(db: Session, user: User) -> datetime:
+    """Enforce tier downgrade + monthly usage reset"""
     try:
+        # Check if user should be downgraded based on subscription status
         sub = (
             db.query(Subscription)
             .filter(Subscription.user_id == user.id)
@@ -856,37 +784,31 @@ def ensure_monthly_reset_and_tier(db: Session, user: User) -> datetime:
         )
         if sub and getattr(sub, "status", "active") not in ("active", "trialing"):
             if user.subscription_tier != "free":
-                logger.info(
-                    "⬇️ Auto-downgrade %s -> free (status=%s)", user.email, sub.status
-                )
-            user.subscription_tier = "free"
+                logger.info("⬇️ Auto-downgrade %s -> free (status=%s)", user.email, sub.status)
+                user.subscription_tier = "free"
+                # ✅ FIX: Reset usage when downgrading to free
+                _reset_usage_counters(user)
     except Exception as e:
         logger.debug("subscription check failed: %s", e)
 
     next_reset = getattr(user, "next_usage_reset_at", None)
     now = datetime.utcnow()
+    
     if not next_reset:
         next_reset = _compute_next_reset_date(user)
         user.next_usage_reset_at = next_reset
 
     if now >= next_reset:
-        logger.info(
-            "🔁 Usage reset for %s (was due %s)",
-            user.email,
-            next_reset.isoformat(),
-        )
+        logger.info("🔁 Usage reset for %s (was due %s)", user.email, next_reset.isoformat())
         _reset_usage_counters(user)
+        
         try:
             day = min((next_reset.day or 1), 28)
         except Exception:
             day = min((_compute_next_reset_date(user).day or 1), 28)
-        nxt_month = (
-            next_reset.year + (next_reset.month // 12),
-            ((next_reset.month % 12) + 1),
-        )
-        user.next_usage_reset_at = next_reset.replace(
-            year=nxt_month[0], month=nxt_month[1], day=day
-        )
+        
+        nxt_month = (next_reset.year + (next_reset.month // 12), ((next_reset.month % 12) + 1))
+        user.next_usage_reset_at = next_reset.replace(year=nxt_month[0], month=nxt_month[1], day=day)
 
     db.commit()
     db.refresh(user)
@@ -915,9 +837,7 @@ def check_usage_limit(user: User, usage_type: str) -> Tuple[bool, int, int]:
     return cur < limit, cur, (int(limit) if limit != float("inf") else int(1e12))
 
 
-def create_download_record(
-    db: Session, user: User, kind: str, youtube_id: str, **kw
-):
+def create_download_record(db: Session, user: User, kind: str, youtube_id: str, **kw):
     try:
         rec = TranscriptDownload(
             user_id=user.id,
@@ -938,10 +858,7 @@ def create_download_record(
         db.rollback()
         return None
 
-
-def classify_activity_by_format(
-    transcript_type: str, file_format: str
-) -> tuple[str, str, str, str]:
+def classify_activity_by_format(transcript_type: str, file_format: str) -> tuple[str, str, str, str]:
     t_type = (transcript_type or "").lower()
     f_format = (file_format or "").lower()
 
@@ -949,7 +866,6 @@ def classify_activity_by_format(
         return ("Downloaded Audio File", "🎵", f"{f_format.upper()} file", "audio")
     if f_format in ["mp4", "mkv", "avi", "mov"]:
         return ("Downloaded Video File", "🎬", f"{f_format.upper()} file", "video")
-
     if "audio" in t_type:
         return ("Downloaded Audio File", "🎵", "Audio file", "audio")
     if "video" in t_type:
@@ -961,15 +877,8 @@ def classify_activity_by_format(
     if "clean" in t_type:
         return ("Generated Clean Transcript", "📄", "Clean text transcript", "transcript")
     if "unclean" in t_type or "timestamped" in t_type:
-        return (
-            "Generated Timestamped Transcript",
-            "🕒",
-            "Timestamped transcript",
-            "transcript",
-        )
-
+        return ("Generated Timestamped Transcript", "🕒", "Timestamped transcript", "transcript")
     return ("Downloaded Content", "📁", "Content", "general")
-
 
 def delete_user_subscription(db: Session, user: User) -> bool:
     try:
@@ -1114,10 +1023,9 @@ def _send_contact_email(name: str, email: str, message: str) -> None:
         "No mail provider configured (SENDGRID_API_KEY or Gmail SMTP creds required)."
     )
 
-# ---------------------------------------------------------------------------
+# ----------------
 # Pydantic models
-# ---------------------------------------------------------------------------
-
+# ----------------
 class UserCreate(BaseModel):
     username: str
     email: str
@@ -1165,25 +1073,6 @@ class DeleteAccountResponse(BaseModel):
     user_email: str
 
 
-class ClientTranscriptUpload(BaseModel):
-    youtube_id: str
-    text: str
-    clean_transcript: bool = True
-    format: Optional[str] = None
-    duration: Optional[float] = None
-    source: Optional[str] = "desktop_helper"
-
-
-class ClientMediaReport(BaseModel):
-    youtube_id: str
-    kind: Literal["audio", "video"]
-    quality: str = "default"
-    file_format: Optional[str] = None
-    file_size: Optional[int] = None
-    duration: Optional[float] = None
-    source: Optional[str] = "desktop_helper"
-
-
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str
@@ -1213,9 +1102,9 @@ _email_re = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _contact_hits: Dict[str, deque] = defaultdict(deque)
 _contact_lock = threading.Lock()
 
-# ---------------------------------------------------------------------------
+# ------------------
 # File cleanup loop
-# ---------------------------------------------------------------------------
+# ------------------
 def _cleanup_stale_files_loop():
     keep_days = max(1, FILE_RETENTION_DAYS)
     suffixes = {".mp3", ".m4a", ".aac", ".mp4", ".mkv", ".mov", ".txt", ".srt", ".vtt"}
@@ -1236,64 +1125,48 @@ def _cleanup_stale_files_loop():
             logger.warning(f"stale-files cleanup error: {e}")
         time.sleep(12 * 3600)
 
-# ---------------------------------------------------------------------------
+# ---------------------
 # Stripe key sanitizer
-# ---------------------------------------------------------------------------
+# ---------------------
+
+# Stripe key sanitizer
 def _sanitize_stripe_key():
-    """
-    Remove whitespace/newlines from Stripe key.
-    """
+    """Remove whitespace from Stripe key and reinitialize"""
     key = os.getenv("STRIPE_SECRET_KEY")
     if key:
         clean_key = key.strip()
         if clean_key != key:
             os.environ["STRIPE_SECRET_KEY"] = clean_key
-            logger.info(
-                "✅ Sanitized STRIPE_SECRET_KEY (removed %d whitespace chars)",
-                len(key) - len(clean_key),
-            )
+            logger.info("✅ Sanitized STRIPE_SECRET_KEY (removed whitespace)")
 
-        # Re-initialize Stripe with clean key
         try:
-            import stripe as _stripe # pyright: ignore[reportMissingImports]
-
+            import stripe as _stripe
             _stripe.api_key = clean_key
             global stripe
             stripe = _stripe
             logger.info("✅ Stripe configured with clean API key")
         except Exception as e:
-            logger.warning("⚠️  Could not reinitialize Stripe: %s", e)
+            logger.warning("⚠️ Could not reinitialize Stripe: %s", e)
 
-# ---------------------------------------------------------------------------
+
+# -----------------------------
 # Cookie hydration for yt-dlp
-# ---------------------------------------------------------------------------
+# -----------------------------
+# Cookie hydration
 def _hydrate_youtube_cookies_to_tmp() -> None:
-    """
-    Normalize cookie env so yt-dlp always gets a writable, ephemeral file.
-
-    Priority:
-      1. YT_COOKIES_B64 (preferred) -> decode to /tmp/yt-dlp/cookies.txt
-      2. YT_COOKIES_FILE (fallback) -> copy to /tmp if in read-only mount
-
-    Also sets cache dirs to /tmp to avoid permission issues.
-    """
+    """Normalize cookie env for yt-dlp"""
     import base64
     import shutil
 
-    # Keep yt-dlp caches ephemeral (writable)
     os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
     os.environ.setdefault("YTDLP_HOME", "/tmp/yt-dlp")
     os.environ.setdefault("YT_DLP_DIR", "/tmp/yt-dlp")
 
-    # Strategy 1: Decode YT_COOKIES_B64 env var
     b64 = (os.getenv("YT_COOKIES_B64") or "").strip()
     if b64:
         try:
             raw = base64.b64decode(b64)
-
-            # Normalize line endings for Netscape cookie file format
             raw = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-
             target_dir = Path("/tmp/yt-dlp")
             target_dir.mkdir(parents=True, exist_ok=True)
             target = target_dir / "cookies.txt"
@@ -1303,19 +1176,11 @@ def _hydrate_youtube_cookies_to_tmp() -> None:
 
             if target.exists() and target.stat().st_size > 10:
                 os.environ["YT_COOKIES_FILE"] = str(target)
-                logger.info(
-                    "✅ Decoded YT_COOKIES_B64 to %s (%d bytes)",
-                    target,
-                    len(raw),
-                )
+                logger.info("✅ Decoded YT_COOKIES_B64 to %s (%d bytes)", target, len(raw))
                 return
-            else:
-                logger.warning("⚠️  Decoded cookies file is empty or missing")
-
         except Exception as e:
-            logger.error("❌ Failed to decode YT_COOKIES_B64: %s", e, exc_info=True)
+            logger.error("❌ Failed to decode YT_COOKIES_B64: %s", e)
 
-    # Strategy 2: Copy existing YT_COOKIES_FILE if in read-only location
     fpath = (os.getenv("YT_COOKIES_FILE") or "").strip()
     if fpath and os.path.exists(fpath):
         try:
@@ -1323,141 +1188,78 @@ def _hydrate_youtube_cookies_to_tmp() -> None:
                 target_dir = Path("/tmp/yt-dlp")
                 target_dir.mkdir(parents=True, exist_ok=True)
                 target = target_dir / "cookies.txt"
-
                 shutil.copyfile(fpath, target)
                 os.environ["YT_COOKIES_FILE"] = str(target)
-                logger.info(
-                    "✅ Copied YT_COOKIES_FILE from %s to %s", fpath, target
-                )
-            else:
-                logger.info("✅ Using YT_COOKIES_FILE: %s", fpath)
+                logger.info("✅ Copied YT_COOKIES_FILE to %s", target)
         except Exception as e:
-            logger.warning(
-                "⚠️  Could not copy YT_COOKIES_FILE to /tmp: %s", e
-            )
-    else:
-        if not b64 and not fpath:
-            logger.warning(
-                "⚠️  No YouTube cookies configured (YT_COOKIES_B64 or YT_COOKIES_FILE)"
-            )
-            logger.warning(
-                "⚠️  Transcript downloads may be limited by YouTube"
-            )
+            logger.warning("⚠️ Could not copy YT_COOKIES_FILE: %s", e)
 
-# ---------------------------------------------------------------------------
+# --------
 # Startup
-# ---------------------------------------------------------------------------
+# --------
 @app.on_event("startup")
 async def on_startup():
-    """
-    Application startup tasks.
-
-    Order:
-    1. Fix environment variables (Stripe key, cookies, proxy)
-    2. Initialize database / migrations
-    3. Start background tasks
-    4. Log startup info
-    """
-    # Step 1: Environment
+    """Application startup tasks"""
     _sanitize_stripe_key()
     _hydrate_youtube_cookies_to_tmp()
     _configure_global_proxy_from_env()
 
-    # Step 2: DB init / migrations
     initialize_database()
     run_startup_migrations(engine)
 
-    # Step 3: Background cleanup
     threading.Thread(target=_cleanup_stale_files_loop, daemon=True).start()
 
-    # Step 4: Logging
     logger.info("=" * 60)
     logger.info("🚀 YouTube Content Downloader API Starting")
     logger.info("=" * 60)
     logger.info("📝 Environment: %s", ENVIRONMENT)
     logger.info("📁 Downloads directory: %s", DOWNLOADS_DIR)
-    logger.info(
-        "🗄️  Database: %s",
-        "PostgreSQL" if "postgres" in DATABASE_URL else "SQLite",
-    )
+    logger.info("🗄️ Database: %s", "PostgreSQL" if "postgres" in DATABASE_URL else "SQLite")
 
     cookie_file = os.getenv("YT_COOKIES_FILE")
-    logger.info(
-        "🍪 Cookies configured: %s",
-        bool(cookie_file and os.path.exists(cookie_file)),
-    )
-    if cookie_file and os.path.exists(cookie_file):
-        logger.info("   └─ Path: %s", cookie_file)
-        logger.info("   └─ Size: %d bytes", os.path.getsize(cookie_file))
-
-    proxy_enabled = (os.getenv("PROXY_ENABLED", "false") or "").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    logger.info("🍪 Cookies configured: %s", bool(cookie_file and os.path.exists(cookie_file)))
+    
+    proxy_enabled = (os.getenv("PROXY_ENABLED", "false") or "").lower() in {"1", "true", "yes", "on"}
     logger.info("🌐 Proxy enabled: %s", proxy_enabled)
-
-    logger.info(
-        "💳 Stripe configured: %s",
-        bool(stripe and os.getenv("STRIPE_SECRET_KEY")),
-    )
+    logger.info("💳 Stripe configured: %s", bool(stripe and os.getenv("STRIPE_SECRET_KEY")))
     logger.info("🎬 yt-dlp available: %s", check_ytdlp_availability())
-    logger.info("🌍 Internet reachable: %s", check_internet())
     logger.info("=" * 60)
     logger.info("✅ Backend started successfully")
     logger.info("=" * 60)
 
-# ---------------------------------------------------------------------------
+# --------
 # Routes
-# ---------------------------------------------------------------------------
-
+# --------
 @app.get("/")
 def root():
     return {
         "message": "YouTube Content Downloader API",
         "status": "running",
-        "version": "3.4.2",
-        "features": [
-            "transcripts",
-            "audio",
-            "video",
-            "mobile",
-            "history",
-            "payments",
-        ],
+        "version": "3.4.3",  # Updated version
+        "features": ["transcripts", "audio", "video", "mobile", "history", "payments"],
         "downloads_path": str(DOWNLOADS_DIR),
     }
 
+# ===== FIX #4: Graceful registration (doesn't fail if Stripe is down) =====
 @app.post("/register")
 def register(user: UserCreate, db: Session = Depends(get_db)):
-    logger.info(
-        f"🔵 REGISTRATION STARTED - Username: {user.username}, Email: {user.email}"
-    )
+    logger.info(f"🔵 REGISTRATION STARTED - Username: {user.username}, Email: {user.email}")
 
     username = (user.username or "").strip()
     email = (user.email or "").strip().lower()
 
-    logger.info(
-        f"🔵 Processing registration - Username: '{username}', Email: '{email}'"
-    )
-
+    # Validation
     existing_user = db.query(User).filter(User.username == username).first()
     if existing_user:
-        logger.warning(
-            f"❌ REGISTRATION FAILED - Username already exists: {username}"
-        )
+        logger.warning(f"❌ Username already exists: {username}")
         raise HTTPException(status_code=400, detail="Username already exists.")
 
     existing_email = db.query(User).filter(User.email == email).first()
     if existing_email:
-        logger.warning(
-            f"❌ REGISTRATION FAILED - Email already exists: {email}"
-        )
+        logger.warning(f"❌ Email already exists: {email}")
         raise HTTPException(status_code=400, detail="Email already exists.")
 
-    logger.info("🔵 No existing user found - Creating new user account")
-
+    # Create user account (ALWAYS succeeds, even if Stripe fails)
     try:
         obj = User(
             username=username,
@@ -1469,146 +1271,47 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
         db.add(obj)
         db.commit()
         db.refresh(obj)
-        logger.info(
-            f"✅ DATABASE SUCCESS - Registered new user: {username} ({email}) with ID: {obj.id}"
-        )
+        logger.info(f"✅ User account created: {username} (ID: {obj.id})")
     except Exception as e:
-        logger.error(
-            f"❌ DATABASE ERROR - Failed to create user {username}: {str(e)}"
-        )
-        raise HTTPException(
-            status_code=500, detail="Database error during registration"
-        )
+        logger.error(f"❌ Database error: {e}")
+        raise HTTPException(status_code=500, detail="Database error during registration")
 
+    # Try to create Stripe customer (graceful - doesn't fail registration)
+    stripe_customer_id = None
     if stripe:
         try:
-            logger.info(
-                f"🔵 Starting Stripe integration for user {obj.id}"
-            )
-            customer = None
-
-            try:
-                logger.info(
-                    f"🔵 Searching for existing Stripe customer with email: {email}"
-                )
-                found = stripe.Customer.search(
-                    query=f"email:'{email}' AND -deleted:'true'", limit=1
-                )
-                if getattr(found, "data", []):
-                    customer = found.data[0]
-                    logger.info(
-                        f"✅ Found existing Stripe customer: {customer['id']}"
-                    )
-            except Exception as e:
-                logger.warning(
-                    f"⚠️ Stripe customer search failed for {email}: {str(e)}"
-                )
-
-            if not customer:
-                try:
-                    logger.info(
-                        f"🔵 Fallback: listing customers with email: {email}"
-                    )
-                    listed = stripe.Customer.list(email=email, limit=1)
-                    if getattr(listed, "data", []):
-                        customer = listed.data[0]
-                        logger.info(
-                            f"✅ Found existing Stripe customer via list: {customer['id']}"
-                        )
-                except Exception as e:
-                    logger.warning(
-                        f"⚠️ Stripe customer list failed for {email}: {str(e)}"
-                    )
-
-            if customer:
-                logger.info(
-                    f"🔵 Updating existing Stripe customer: {customer['id']}"
-                )
-                obj.stripe_customer_id = customer["id"]
-                try:
-                    stripe.Customer.modify(
-                        customer["id"],
-                        name=username or customer.get("name"),
-                        metadata={
-                            **(customer.get("metadata") or {}),
-                            "app_user_id": str(obj.id),
-                        },
-                    )
-                    logger.info(
-                        f"✅ Successfully updated Stripe customer: {customer['id']}"
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"⚠️ Failed to update Stripe customer {customer['id']}: {str(e)}"
-                    )
-
-                db.commit()
-                db.refresh(obj)
-            else:
-                logger.info(
-                    f"🔵 Creating new Stripe customer for user {obj.id}"
-                )
-                try:
-                    created = stripe.Customer.create(
-                        email=email,
-                        name=username,
-                        metadata={"app_user_id": str(obj.id)},
-                        idempotency_key=f"user_register_{obj.id}",
-                    )
-                    obj.stripe_customer_id = created["id"]
-                    db.commit()
-                    db.refresh(obj)
-                    logger.info(
-                        f"✅ Successfully created new Stripe customer: {created['id']}"
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"❌ Stripe customer creation failed for {email}: {str(e)}"
-                    )
-                    logger.info(
-                        "🟡 Continuing registration without full Stripe integration"
-                    )
-
+            ensure_stripe_customer_for_user(obj, db)
+            stripe_customer_id = obj.stripe_customer_id
         except Exception as e:
-            logger.error(
-                f"❌ STRIPE INTEGRATION FAILED for {email}: {str(e)}"
-            )
-            logger.info(
-                "🟡 Registration continuing despite Stripe failure"
-            )
+            logger.warning(f"⚠️ Stripe customer creation skipped (non-fatal): {e}")
+            # Registration still succeeds!
 
-    logger.info(
-        f"🎉 REGISTRATION COMPLETED SUCCESSFULLY - User: {username} ({email})"
-    )
+    logger.info(f"🎉 REGISTRATION COMPLETED: {username}")
 
     return {
         "message": "User registered successfully.",
         "account": canonical_account(obj),
-        "stripe_customer_id": getattr(obj, "stripe_customer_id", None),
+        "stripe_customer_id": stripe_customer_id,
     }
+
 
 @app.post("/auth/forgot-password")
 def forgot_password(payload: ForgotPasswordIn):
     from models import SessionLocal
-
     db = SessionLocal()
     try:
-        def get_user_by_email(db, email):
-            return db.query(User).filter(User.email == email).first()
-
-        user = get_user_by_email(db, payload.email)
+        user = db.query(User).filter(User.email == payload.email).first()
         if user:
             token = serializer.dumps({"email": payload.email})
             reset_link = f"{FRONTEND_URL}/reset?token={token}"
             try:
                 send_password_reset_email(payload.email, reset_link)
             except Exception as e:
-                logger.exception(
-                    "Failed to send reset email; link still valid"
-                )
+                logger.exception("Failed to send reset email")
         return {"ok": True}
     finally:
         db.close()
+
 
 @app.post("/auth/reset-password")
 def reset_password(payload: ResetPasswordIn):
@@ -1621,13 +1324,9 @@ def reset_password(payload: ResetPasswordIn):
         raise HTTPException(status_code=400, detail="Reset link invalid")
 
     from models import SessionLocal
-
     db = SessionLocal()
     try:
-        def get_user_by_email(db, email):
-            return db.query(User).filter(User.email == email).first()
-
-        user = get_user_by_email(db, email)
+        user = db.query(User).filter(User.email == email).first()
         if not user:
             raise HTTPException(status_code=400, detail="Reset link invalid")
 
@@ -1638,20 +1337,21 @@ def reset_password(payload: ResetPasswordIn):
     finally:
         db.close()
 
+
 @app.post("/token")
-def token_login(
-    form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)
-):
+def token_login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     username_input = (form.username or "").strip()
     password_input = form.password or ""
 
     user = db.query(User).filter(User.username == username_input).first()
     if not user or not verify_password(password_input, user.hashed_password):
-        raise HTTPException(
-            status_code=401, detail="Incorrect username or password"
-        )
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
 
-    ensure_stripe_customer_for_user(user, db)
+    # Try to ensure Stripe customer (graceful)
+    try:
+        ensure_stripe_customer_for_user(user, db)
+    except Exception as e:
+        logger.warning(f"⚠️ Stripe customer link skipped during login: {e}")
 
     token = create_access_token(
         {"sub": user.username},
@@ -1661,10 +1361,9 @@ def token_login(
         "access_token": token,
         "token_type": "bearer",
         "user": canonical_account(user),
-        "must_change_password": bool(
-            getattr(user, "must_change_password", False)
-        ),
+        "must_change_password": bool(getattr(user, "must_change_password", False)),
     }
+
 
 @app.post("/token_json")
 def token_login_json(req: LoginJSON, db: Session = Depends(get_db)):
@@ -1673,11 +1372,12 @@ def token_login_json(req: LoginJSON, db: Session = Depends(get_db)):
 
     user = db.query(User).filter(User.username == username_input).first()
     if not user or not verify_password(password_input, user.hashed_password):
-        raise HTTPException(
-            status_code=401, detail="Incorrect username or password"
-        )
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
 
-    ensure_stripe_customer_for_user(user, db)
+    try:
+        ensure_stripe_customer_for_user(user, db)
+    except Exception as e:
+        logger.warning(f"⚠️ Stripe customer link skipped: {e}")
 
     token = create_access_token(
         {"sub": user.username},
@@ -1687,14 +1387,14 @@ def token_login_json(req: LoginJSON, db: Session = Depends(get_db)):
         "access_token": token,
         "token_type": "bearer",
         "user": canonical_account(user),
-        "must_change_password": bool(
-            getattr(user, "must_change_password", False)
-        ),
+        "must_change_password": bool(getattr(user, "must_change_password", False)),
     }
+
 
 @app.get("/users/me", response_model=UserResponse)
 def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
+
 
 @app.post("/user/change_password")
 def change_password(
@@ -1703,14 +1403,10 @@ def change_password(
     db: Session = Depends(get_db),
 ):
     if not verify_password(req.current_password, current_user.hashed_password):
-        raise HTTPException(
-            status_code=400, detail="Current password is incorrect"
-        )
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
     if not req.new_password or len(req.new_password) < 8:
-        raise HTTPException(
-            status_code=400,
-            detail="New password must be at least 8 characters",
-        )
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+    
     current_user.hashed_password = get_password_hash(req.new_password)
     try:
         current_user.must_change_password = False
@@ -1721,19 +1417,15 @@ def change_password(
     logger.info("🔑 Password changed for user %s", current_user.username)
     return {"status": "ok"}
 
+
 @app.delete("/user/delete-account")
-def delete_account(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
+def delete_account(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     uid = int(current_user.id)
     email = (current_user.email or "unknown@unknown.com")
 
     try:
         if stripe and getattr(current_user, "stripe_customer_id", None):
-            subs = stripe.Subscription.list(
-                customer=current_user.stripe_customer_id, limit=100
-            )
+            subs = stripe.Subscription.list(customer=current_user.stripe_customer_id, limit=100)
             for sub in getattr(subs, "data", []):
                 try:
                     stripe.Subscription.delete(sub.id)
@@ -1743,22 +1435,14 @@ def delete_account(
         pass
 
     try:
-        db.execute(
-            sqla_delete(Subscription).where(Subscription.user_id == uid)
-        )
-        db.execute(
-            sqla_delete(TranscriptDownload).where(
-                TranscriptDownload.user_id == uid
-            )
-        )
+        db.execute(sqla_delete(Subscription).where(Subscription.user_id == uid))
+        db.execute(sqla_delete(TranscriptDownload).where(TranscriptDownload.user_id == uid))
         db.execute(sqla_delete(User).where(User.id == uid))
         db.commit()
     except Exception as e:
         db.rollback()
         logger.error(f"DB delete failed for user {uid}: {e}")
-        raise HTTPException(
-            status_code=500, detail="Failed to delete account"
-        )
+        raise HTTPException(status_code=500, detail="Failed to delete account")
 
     try:
         for p in DOWNLOADS_DIR.glob(f"*{uid}*"):
@@ -1775,13 +1459,13 @@ def delete_account(
         "user_email": email,
     }
 
-# ---------------------------------------------------------------------------
+
+# ---------------------------
 # Stripe webhook idempotency
-# ---------------------------------------------------------------------------
+# ---------------------------
 _IDEMP_STORE: Dict[str, float] = {}
 _IDEMP_TTL_SEC = 24 * 3600
 _IDEMP_LOCK = threading.Lock()
-
 
 def _idemp_seen(event_id: str) -> bool:
     now = time.time()
@@ -1794,46 +1478,36 @@ def _idemp_seen(event_id: str) -> bool:
         _IDEMP_STORE[event_id] = now
         return False
 
+
 @app.post("/webhook/stripe")
 async def stripe_webhook_endpoint(request: Request):
     if not stripe or not os.getenv("STRIPE_SECRET_KEY"):
-        raise HTTPException(
-            status_code=503, detail="Stripe is not configured"
-        )
+        raise HTTPException(status_code=503, detail="Stripe is not configured")
+    
     secret = os.getenv("STRIPE_WEBHOOK_SECRET")
     if not secret:
-        raise HTTPException(
-            status_code=500, detail="Webhook secret not configured"
-        )
+        raise HTTPException(status_code=500, detail="Webhook secret not configured")
 
     payload = await request.body()
     sig = request.headers.get("stripe-signature")
+    
     try:
-        event = stripe.Webhook.construct_event(
-            payload=payload, sig_header=sig, secret=secret
-        )
+        event = stripe.Webhook.construct_event(payload=payload, sig_header=sig, secret=secret)
     except Exception as e:
-        logger.warning(
-            f"Stripe webhook signature verification failed: {e}"
-        )
+        logger.warning(f"Stripe webhook signature verification failed: {e}")
         raise HTTPException(status_code=400, detail="Invalid signature")
 
     if not event or not event.get("id"):
         raise HTTPException(status_code=400, detail="Invalid event payload")
 
     if _idemp_seen(event["id"]):
-        logger.info(
-            f"Stripe webhook duplicate event {event['id']} ignored"
-        )
+        logger.info(f"Stripe webhook duplicate event {event['id']} ignored")
         return {"status": "ok", "duplicate": True}
 
     request.state.verified_event = event
-    result = (
-        await handle_stripe_webhook(request)
-        if hasattr(handle_stripe_webhook, "__call__")
-        else {"status": "ok"}
-    )
+    result = await handle_stripe_webhook(request) if hasattr(handle_stripe_webhook, "__call__") else {"status": "ok"}
     return result
+
 
 def _latest_subscription(db: Session, user_id: int) -> Optional[Subscription]:
     try:
@@ -1846,6 +1520,7 @@ def _latest_subscription(db: Session, user_id: int) -> Optional[Subscription]:
     except Exception:
         return None
 
+
 @app.post("/subscription/cancel")
 def cancel_subscription(
     req: CancelRequest,
@@ -1853,9 +1528,7 @@ def cancel_subscription(
     db: Session = Depends(get_db),
 ):
     if (current_user.subscription_tier or "free") == "free":
-        raise HTTPException(
-            status_code=400, detail="No active subscription to cancel."
-        )
+        raise HTTPException(status_code=400, detail="No active subscription to cancel.")
 
     sub = _latest_subscription(db, current_user.id)
     at_period_end = True if req.at_period_end is None else bool(req.at_period_end)
@@ -1866,42 +1539,27 @@ def cancel_subscription(
         if stripe_sub_id:
             try:
                 if at_period_end:
-                    stripe.Subscription.modify(
-                        stripe_sub_id, cancel_at_period_end=True
-                    )
+                    stripe.Subscription.modify(stripe_sub_id, cancel_at_period_end=True)
                     stripe_updated = True
                 else:
                     stripe.Subscription.delete(stripe_sub_id)
                     stripe_updated = True
             except Exception as e:
-                logger.warning(
-                    "Stripe cancel failed for user %s: %s",
-                    current_user.username,
-                    e,
-                )
+                logger.warning("Stripe cancel failed for user %s: %s", current_user.username, e)
 
     if at_period_end:
         if sub:
-            note = (
-                f"cancel_at_period_end=true; updated={datetime.utcnow().isoformat()}"
-            )
-            sub.extra_data = (
-                (sub.extra_data or "") + ("\n" if sub.extra_data else "") + note
-            )
-        result = {
-            "status": "scheduled_cancellation",
-            "at_period_end": True,
-        }
+            note = f"cancel_at_period_end=true; updated={datetime.utcnow().isoformat()}"
+            sub.extra_data = ((sub.extra_data or "") + ("\n" if sub.extra_data else "") + note)
+        result = {"status": "scheduled_cancellation", "at_period_end": True}
     else:
         if sub:
             sub.status = "cancelled"
             sub.cancelled_at = datetime.utcnow()
         current_user.subscription_tier = "free"
-        result = {
-            "status": "cancelled",
-            "at_period_end": False,
-            "tier": "free",
-        }
+        # ✅ Reset usage when cancelling immediately
+        _reset_usage_counters(current_user)
+        result = {"status": "cancelled", "at_period_end": False, "tier": "free"}
 
     try:
         db.commit()
@@ -1913,92 +1571,6 @@ def cancel_subscription(
     result.update({"stripe_updated": stripe_updated})
     return result
 
-@app.get("/debug/probe/{video_id}")
-def debug_probe(video_id: str):
-    result = {
-        "video_id": video_id,
-        "internet": check_internet(),
-        "youtube_reachable": check_youtube(),
-        "proxy_enabled": (os.getenv("PROXY_ENABLED", "false") or "").lower()
-        in {"1", "true", "yes", "on"},
-        "strategies": {
-            "direct_en": None,
-            "list_pick": None,
-            "translate_en": None,
-            "yt_dlp": None,
-        },
-        "errors": {},
-    }
-
-    try:
-        seg = YouTubeTranscriptApi.get_transcript(
-            video_id, languages=["en", "en-US", "en-GB"]
-        )
-        txt = " ".join(_get_segment_value(s, "text", "") for s in seg)
-        result["strategies"]["direct_en"] = {
-            "segments": len(seg),
-            "preview": txt[:200],
-        }
-    except Exception as e:
-        result["errors"]["direct_en"] = str(e)
-
-    try:
-        listing = YouTubeTranscriptApi.list_transcripts(video_id)
-        authored = generated = None
-        for t in listing:
-            lang = (getattr(t, "language_code", "") or "").lower()
-            is_gen = bool(getattr(t, "is_generated", False))
-            if lang in {"en", "en-us", "en-gb"} and not is_gen and authored is None:
-                authored = t
-            if lang in {"en", "en-us", "en-gb"} and is_gen and generated is None:
-                generated = t
-        picked = authored or generated
-        if picked:
-            seg = picked.fetch()
-            txt = " ".join(_get_segment_value(s, "text", "") for s in seg)
-            result["strategies"]["list_pick"] = {
-                "picked": "authored_en" if picked is authored else "generated_en",
-                "segments": len(seg),
-                "preview": txt[:200],
-            }
-        else:
-            result["strategies"]["list_pick"] = "no_english_track"
-    except Exception as e:
-        result["errors"]["list_pick"] = str(e)
-
-    try:
-        listing = YouTubeTranscriptApi.list_transcripts(video_id)
-        candidate = None
-        for t in listing:
-            if getattr(t, "is_generated", False) and "en" in (
-                getattr(t, "translation_languages", []) or []
-            ):
-                candidate = t
-                break
-        if candidate:
-            seg = candidate.translate("en").fetch()
-            txt = " ".join(_get_segment_value(s, "text", "") for s in seg)
-            result["strategies"]["translate_en"] = {
-                "segments": len(seg),
-                "preview": txt[:200],
-            }
-        else:
-            result["strategies"][
-                "translate_en"
-            ] = "no_generated_translatable_to_en"
-    except Exception as e:
-        result["errors"]["translate_en"] = str(e)
-
-    try:
-        fb = get_transcript_with_ytdlp(video_id, clean=True)
-        result["strategies"]["yt_dlp"] = {
-            "found": bool(fb),
-            "preview": (fb or "")[:200],
-        }
-    except Exception as e:
-        result["errors"]["yt_dlp"] = str(e)
-
-    return result
 
 class _AuthForm(BaseModel):
     pass
@@ -2010,9 +1582,9 @@ def _touch_now(p: Path):
     except Exception as e:
         logger.warning("Could not set mtime: %s", e)
 
-# ---------------------------------------------------------------------------
+# --------------------
 # Download transcript
-# ---------------------------------------------------------------------------
+# --------------------
 @app.post("/download_transcript")
 @app.post("/download_transcript/")
 def download_transcript(
@@ -2123,9 +1695,9 @@ def download_transcript(
         "account": canonical_account(user),
     }
 
-# ---------------------------------------------------------------------------
+# ---------------
 # Download audio
-# ---------------------------------------------------------------------------
+# ---------------
 @app.post("/download_audio/")
 def download_audio(
     req: AudioRequest,
@@ -2261,9 +1833,9 @@ def download_audio(
         "account": canonical_account(user),
     }
 
-# ---------------------------------------------------------------------------
+# -----------------
 # Download video
-# ---------------------------------------------------------------------------
+# -----------------
 @app.post("/download_video/")
 def download_video(
     req: VideoRequest,
@@ -2364,9 +1936,9 @@ def download_video(
         "account": canonical_account(user),
     }
 
-# ---------------------------------------------------------------------------
+# -----------------------------
 # Authenticated file download
-# ---------------------------------------------------------------------------
+# -----------------------------
 @app.get("/download-file/{file_type}/{filename}")
 async def download_file(
     request: Request,
@@ -2455,9 +2027,9 @@ async def download_file(
         filename=safe_name,
     )
 
-# ---------------------------------------------------------------------------
+# ---------------------------
 # History & recent activity
-# ---------------------------------------------------------------------------
+# ---------------------------
 @app.get("/user/download-history")
 def get_download_history(
     current_user: User = Depends(get_current_user),
@@ -2559,18 +2131,9 @@ def get_recent_activity(
         "fetched_at": datetime.utcnow().isoformat(),
     }
 
-# ---------------------------------------------------------------------------
+# ---------------------
 # Subscription status
-# ---------------------------------------------------------------------------
-from datetime import datetime, timezone
-
-# IMPORTANT: make sure you have these imports available in main.py
-# from subscription_sync import (
-#     sync_user_subscription_from_stripe,
-#     apply_local_overdue_downgrade_if_possible,  # <-- ensure this exists in your subscription_sync.py
-# )
-# from webhook_handler import handle_stripe_webhook  # if you call it from main.py webhook endpoint
-
+# ---------------------
 @app.get("/subscription_status")
 @app.get("/subscription_status/")
 def subscription_status(
@@ -2578,21 +2141,20 @@ def subscription_status(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # 1) Always enforce local overdue downgrade first (works even when Stripe is down)
+    # Local overdue downgrade first
     try:
-        # expects your subscription_sync.py to expose this name
         _apply_local_overdue_downgrade_if_possible(current_user, db)
     except Exception as e:
-        logger.warning(f"Local overdue downgrade check skipped (non-fatal): {e}")
+        logger.warning(f"Local overdue downgrade check skipped: {e}")
 
-    # 2) Optional Stripe sync (you said you already added the throttle guard elsewhere)
+    # Optional Stripe sync
     if request.query_params.get("sync") == "1":
         try:
             sync_user_subscription_from_stripe(current_user, db)
         except Exception as e:
             logger.warning(f"Stripe sync skipped (non-fatal): {e}")
 
-    # 3) Do monthly reset AFTER tier enforcement/sync
+    # Monthly reset AFTER tier enforcement
     next_reset = ensure_monthly_reset_and_tier(db, current_user)
 
     tier = (getattr(current_user, "subscription_tier", "free") or "free").lower()
@@ -2607,7 +2169,6 @@ def subscription_status(
     limits = PLAN_LIMITS.get(tier, PLAN_LIMITS["free"])
     limits_display = {k: ("unlimited" if v == float("inf") else v) for k, v in limits.items()}
 
-    # Optional: expose Stripe/local subscription metadata (safe + helps debugging UI)
     sub_expires_at = getattr(current_user, "subscription_expires_at", None)
     stripe_status = getattr(current_user, "stripe_subscription_status", None)
     sub_updated_at = getattr(current_user, "subscription_updated_at", None)
@@ -2627,16 +2188,14 @@ def subscription_status(
         "next_reset": next_reset.isoformat() if next_reset else None,
         "downloads_folder": str(DOWNLOADS_DIR),
         "account": canonical_account(current_user),
-        # helpful metadata for UI/debug (optional)
         "subscription_expires_at": _iso(sub_expires_at),
         "stripe_subscription_status": (stripe_status.lower() if isinstance(stripe_status, str) else stripe_status),
         "subscription_updated_at": _iso(sub_updated_at),
     }
 
-# ---------------------------------------------------------------------------
+# -----------------
 # Contact form
-# ---------------------------------------------------------------------------
-@app.post("/contact")
+# -----------------
 @app.post("/contact")
 def send_contact_message(req: ContactMessage, request: Request):
     name = (req.name or "").strip()[:200]
@@ -2673,9 +2232,8 @@ def send_contact_message(req: ContactMessage, request: Request):
             detail="Unable to send message right now.",
         )
 
-# ---------------------------------------------------------------------------
-# Health
-# ---------------------------------------------------------------------------
+
+# Health endpoints
 @app.get("/health")
 def health():
     return {
@@ -2684,17 +2242,12 @@ def health():
         "environment": ENVIRONMENT,
         "services": {
             "youtube_api": "available",
-            "stripe": "configured"
-            if os.getenv("STRIPE_SECRET_KEY")
-            else "not_configured",
+            "stripe": "configured" if os.getenv("STRIPE_SECRET_KEY") else "not_configured",
             "file_system": "accessible",
-            "yt_dlp": "available"
-            if check_ytdlp_availability()
-            else "unavailable",
+            "yt_dlp": "available" if check_ytdlp_availability() else "unavailable",
         },
         "downloads_path": str(DOWNLOADS_DIR),
-        "proxy_enabled": (os.getenv("PROXY_ENABLED", "false") or "").lower()
-        in {"1", "true", "yes", "on"},
+        "proxy_enabled": (os.getenv("PROXY_ENABLED", "false") or "").lower() in {"1", "true", "yes", "on"},
     }
 
 @app.head("/health")
@@ -2724,9 +2277,8 @@ def debug_users(db: Session = Depends(get_db)):
         ],
     }
 
-# ---------------------------------------------------------------------------
-# Routers
-# ---------------------------------------------------------------------------
+
+# Include routers
 if batch_router:
     try:
         app.include_router(batch_router, tags=["batch"])
@@ -2740,36 +2292,23 @@ if activity_router:
     except Exception as e:
         logger.warning("Could not include activity routes: %s", e)
 
-    try:
-        app.include_router(payment_router, tags=["payments"])
-    except Exception as e:
-        logger.error("Could not include payment routes: %s", e)
+try:
+    app.include_router(payment_router, tags=["payments"])
+except Exception as e:
+    logger.error("Could not include payment routes: %s", e)
 
-# ---------------------------------------------------------------------------
-# Frontend (SPA)
-# ---------------------------------------------------------------------------
-FRONTEND_BUILD = (
-    Path(__file__).resolve().parents[1] / "frontend" / "build"
-)
+
+# Frontend SPA catch-all
+FRONTEND_BUILD = Path(__file__).resolve().parents[1] / "frontend" / "build"
 if FRONTEND_BUILD.exists():
-    app.mount(
-        "/_spa", StaticFiles(directory=str(FRONTEND_BUILD), html=True), name="spa"
-    )
+    app.mount("/_spa", StaticFiles(directory=str(FRONTEND_BUILD), html=True), name="spa")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa_catch_all(full_path: str):
-        if full_path.startswith(
-            (
-                "download_",
-                "user/",
-                "subscription_status",
-                "health",
-                "token",
-                "register",
-                "files/",
-                "debug/",
-            )
-        ):
+        if full_path.startswith((
+            "download_", "user/", "subscription_status", "health",
+            "token", "register", "files/", "debug/",
+        )):
             raise HTTPException(status_code=404, detail="Not found")
         index_file = FRONTEND_BUILD / "index.html"
         if index_file.exists():
@@ -2785,5 +2324,5 @@ if __name__ == "__main__":
     print(f"Starting server on 0.0.0.0:8000 — files: {DOWNLOADS_DIR}")
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
 
-##=========End of main.py module =============
+##--------- End of main.py module -------------
 

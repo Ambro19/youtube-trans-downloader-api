@@ -1,9 +1,9 @@
-# transcript_utils.py — PRODUCTION (cookies + proxy + PO tokens, fixed extractor_args merging)
+# transcript_utils.py — PRODUCTION (cookies + proxy + PO tokens, FIXED postprocessor)
 """
 Enhanced with residential proxy support to bypass YouTube IP blocking.
 Production fixes:
+- ✅ FIXED: Remove 'preferredformat' from FFmpegVideoRemuxer (doesn't accept this param)
 - Do NOT overwrite extractor_args (merge instead)
-- Fix postprocessor key typo preferredformat
 - Support PROXY_URL as a single env var
 - Keep player_client logic stable
 """
@@ -422,9 +422,11 @@ def _common_ydl_opts(output_dir: str) -> Dict[str, Any]:
         "format": "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/bv*+ba/best",
         "merge_output_format": "mp4",
         "postprocessors": [
-            {"key": "FFmpegVideoRemuxer", "preferredformat": "mp4"},  # FIXED KEY
-            {"key": "FFmpegMetadata"},
-            {"key": "EmbedThumbnail", "already_have_thumbnail": False},
+            # ✅ FIXED: FFmpegVideoRemuxer doesn't accept 'preferredformat' parameter
+            # The output format is controlled by 'merge_output_format' above
+            {"key": "FFmpegVideoRemuxer"},  # Just remux to MP4 container
+            {"key": "FFmpegMetadata"},  # Add metadata
+            {"key": "EmbedThumbnail", "already_have_thumbnail": False},  # Embed thumbnail
         ],
         "writethumbnail": True,
         "outtmpl": _safe_outtmpl(output_dir),

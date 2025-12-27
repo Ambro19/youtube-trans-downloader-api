@@ -1,4 +1,4 @@
-# backend/payment.py
+# backend/payment.py - FIXED: Robust customer creation + NO_PROXY for Stripe
 import os
 import logging
 from typing import Optional
@@ -7,59 +7,72 @@ from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
-# ✅ shared auth dependency (no circular import)
 from auth_deps import get_current_user
 from models import User, get_db
 
 router = APIRouter(prefix="/billing")
 logger = logging.getLogger("payment")
 
-# ---- Stripe init (robust / optional) ---------------------------------------
-#-----To fix Stripe everywhere ------
+# ===== FIX: Stripe init with NO_PROXY support =====
 stripe = None
 try:
-    import stripe as _stripe  # type: ignore
-    key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()   # ← strip here
+    import stripe as _stripe
+    key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
     if key:
         _stripe.api_key = key
         stripe = _stripe
-except Exception:
+        
+        # ✅ Ensure Stripe bypasses proxy (prevents 403 Forbidden errors)
+        os.environ.setdefault("NO_PROXY", "")
+        current_no_proxy = os.environ.get("NO_PROXY", "")
+        stripe_domains = "api.stripe.com,files.stripe.com,checkout.stripe.com"
+        
+        if stripe_domains not in current_no_proxy:
+            os.environ["NO_PROXY"] = f"{current_no_proxy},{stripe_domains}" if current_no_proxy else stripe_domains
+            logger.info("✅ Stripe domains excluded from proxy in payment.py")
+except Exception as e:
+    logger.warning("⚠️ Stripe initialization issue in payment.py: %s", e)
     stripe = None
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
-PRO_LOOKUP   = os.getenv("STRIPE_PRO_LOOKUP_KEY", "pro_monthly")
-PREM_LOOKUP  = os.getenv("STRIPE_PREMIUM_LOOKUP_KEY", "premium_monthly")
+PRO_LOOKUP = os.getenv("STRIPE_PRO_LOOKUP_KEY", "pro_monthly")
+PREM_LOOKUP = os.getenv("STRIPE_PREMIUM_LOOKUP_KEY", "premium_monthly")
 
 
-# ---- Models for small payloads ---------------------------------------------
+# Models
 class CheckoutPayload(BaseModel):
-    # allow either plan/tier OR a price_lookup_key; frontend may send both
     plan: Optional[str] = None
     tier: Optional[str] = None
     price_lookup_key: Optional[str] = None
 
 
-# ---- Helpers ----------------------------------------------------------------
+# ===== FIX: Better price lookup with error handling =====
 def _get_price_id(lookup_key: str) -> Optional[str]:
+    """Get Stripe price ID from lookup key (with detailed error logging)"""
     if not stripe:
+        logger.warning("Stripe not configured - cannot fetch price for %s", lookup_key)
         return None
+    
     try:
         lst = stripe.Price.list(active=True, lookup_keys=[lookup_key], limit=1)
         if lst.data:
-            return lst.data[0].id
+            price_id = lst.data[0].id
+            logger.info("✅ Found price for %s: %s", lookup_key, price_id)
+            return price_id
+        else:
+            logger.warning("⚠️ No price found for lookup key: %s (check Stripe Dashboard)", lookup_key)
+            return None
     except Exception as e:
-        logger.warning("Stripe price lookup failed for %s: %s", lookup_key, e)
-    return None
+        logger.error("❌ Stripe price lookup failed for %s: %s", lookup_key, e, exc_info=True)
+        return None
 
+
+# ===== FIX: Robust customer creation (handles stale IDs, retries) =====
 def _get_or_create_customer(user: User, db: Session) -> str:
-    """
-    Get or create a Stripe customer for the user.
-    Handles stale customer IDs and ensures a valid customer is returned.
-    """
+    """Get or create Stripe customer (handles all edge cases gracefully)"""
     if not stripe:
         raise HTTPException(status_code=503, detail="Stripe is not configured")
     
-    # Get current stored customer ID
     stored_customer_id = (user.stripe_customer_id or "").strip() or None
     valid_customer_id = None
     
@@ -69,27 +82,27 @@ def _get_or_create_customer(user: User, db: Session) -> str:
             customer = stripe.Customer.retrieve(stored_customer_id)
             if customer and not customer.get('deleted', False):
                 valid_customer_id = stored_customer_id
-                logger.info(f"Using existing valid customer ID: {valid_customer_id}")
+                logger.info("✅ Using existing valid customer: %s", valid_customer_id)
             else:
-                logger.warning(f"Stored customer ID {stored_customer_id} is deleted")
+                logger.warning("⚠️ Stored customer %s is deleted", stored_customer_id)
         except stripe.error.InvalidRequestError as e:
             if "No such customer" in str(e):
-                logger.warning(f"Stored customer ID {stored_customer_id} does not exist in Stripe")
+                logger.warning("⚠️ Stored customer %s does not exist", stored_customer_id)
             else:
-                logger.warning(f"Error verifying customer {stored_customer_id}: {e}")
+                logger.warning("⚠️ Error verifying customer %s: %s", stored_customer_id, e)
         except Exception as e:
-            logger.warning(f"Unexpected error verifying customer {stored_customer_id}: {e}")
+            logger.warning("⚠️ Unexpected error verifying customer %s: %s", stored_customer_id, e)
     
-    # Step 2: If no valid customer ID, try to find by email
+    # Step 2: Search by email if no valid customer
     user_email = (user.email or "").strip().lower()
     if not valid_customer_id and user_email:
         try:
             customers = stripe.Customer.list(email=user_email, limit=1)
             if customers.data:
                 valid_customer_id = customers.data[0].id
-                logger.info(f"Found existing customer by email: {valid_customer_id}")
+                logger.info("✅ Found existing customer by email: %s", valid_customer_id)
         except Exception as e:
-            logger.warning(f"Error searching for customer by email {user_email}: {e}")
+            logger.warning("⚠️ Error searching customer by email %s: %s", user_email, e)
     
     # Step 3: Create new customer if none found
     if not valid_customer_id:
@@ -97,19 +110,18 @@ def _get_or_create_customer(user: User, db: Session) -> str:
             customer_data = {
                 "email": user_email,
                 "name": (user.username or user.email or "User").strip(),
-            }
-            # Add metadata for tracking
-            customer_data["metadata"] = {
-                "user_id": str(user.id),
-                "created_by": "youtube_downloader_app"
+                "metadata": {
+                    "user_id": str(user.id),
+                    "created_by": "youtube_downloader_app"
+                }
             }
             
             customer = stripe.Customer.create(**customer_data)
             valid_customer_id = customer.id
-            logger.info(f"Created new customer: {valid_customer_id}")
+            logger.info("✅ Created new Stripe customer: %s", valid_customer_id)
         except Exception as e:
             msg = getattr(e, "user_message", None) or str(e)
-            logger.error(f"Failed to create Stripe customer: {e}")
+            logger.error("❌ Failed to create Stripe customer: %s", e, exc_info=True)
             raise HTTPException(status_code=500, detail=f"Could not create Stripe customer: {msg}")
     
     # Step 4: Update user record if customer ID changed
@@ -118,21 +130,19 @@ def _get_or_create_customer(user: User, db: Session) -> str:
             user.stripe_customer_id = valid_customer_id
             db.commit()
             db.refresh(user)
-            logger.info(f"Updated user {user.id} with customer ID: {valid_customer_id}")
+            logger.info("✅ Updated user %s with customer ID: %s", user.id, valid_customer_id)
         except Exception as e:
-            logger.error(f"Failed to update user with customer ID: {e}")
+            logger.error("❌ Failed to update user with customer ID: %s", e)
             db.rollback()
-            # Don't fail the request if DB update fails, we can still proceed with checkout
+            # Don't fail - we can still proceed with checkout
     
     return valid_customer_id
 
 
-# ---- Public endpoints -------------------------------------------------------
+# Public endpoints
 @router.get("/config")
 def billing_config():
-    """
-    Expose which prices the server found (safe to show in UI).
-    """
+    """Expose billing configuration (safe for frontend)"""
     if not stripe:
         return {
             "mode": "test",
@@ -140,8 +150,16 @@ def billing_config():
             "pro_price_id": None,
             "premium_price_id": None,
         }
+    
     pro = _get_price_id(PRO_LOOKUP)
     prem = _get_price_id(PREM_LOOKUP)
+    
+    # ✅ Log if prices are missing (helps debugging)
+    if not pro:
+        logger.warning("⚠️ Pro price not found - check STRIPE_PRO_LOOKUP_KEY=%s in Stripe Dashboard", PRO_LOOKUP)
+    if not prem:
+        logger.warning("⚠️ Premium price not found - check STRIPE_PREMIUM_LOOKUP_KEY=%s", PREM_LOOKUP)
+    
     return {
         "mode": "live" if (stripe.api_key or "").startswith("sk_live_") else "test",
         "is_demo": False,
@@ -158,12 +176,17 @@ def create_checkout_session(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """Create Stripe checkout session (with comprehensive error handling)"""
     if not stripe:
-        raise HTTPException(status_code=503, detail="Payments are not configured on this server.")
+        raise HTTPException(
+            status_code=503,
+            detail="Payments are not configured. Please contact support."
+        )
 
-    # Resolve lookup key from payload (plan/tier OR explicit lookup_key)
+    # Resolve lookup key
     plan_or_tier = (payload.plan or payload.tier or "").strip().lower()
     lookup_key = payload.price_lookup_key
+    
     if not lookup_key:
         if plan_or_tier == "pro":
             lookup_key = PRO_LOOKUP
@@ -171,22 +194,36 @@ def create_checkout_session(
             lookup_key = PREM_LOOKUP
 
     if not lookup_key:
-        raise HTTPException(status_code=400, detail="Missing plan/price_lookup_key")
+        raise HTTPException(
+            status_code=400,
+            detail="Missing plan/price_lookup_key. Please specify 'pro' or 'premium'."
+        )
 
+    # Get price ID
     price_id = _get_price_id(lookup_key)
     if not price_id:
-        raise HTTPException(status_code=400, detail=f"Unknown price for lookup key: {lookup_key}")
+        logger.error("❌ No price found for lookup key: %s (user: %s)", lookup_key, user.email)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown price for lookup key: {lookup_key}. "
+                "This may indicate a configuration issue. Please contact support."
+            )
+        )
 
-    # Get or create customer (this handles all the stale ID logic)
+    # Get or create customer (handles all edge cases)
     try:
         customer_id = _get_or_create_customer(user, db)
     except HTTPException:
-        raise  # Re-raise HTTP exceptions as-is
+        raise  # Re-raise HTTP exceptions
     except Exception as e:
-        logger.error(f"Unexpected error getting customer: {e}")
-        raise HTTPException(status_code=500, detail="Error setting up customer account")
+        logger.error("❌ Unexpected error getting customer: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Error setting up customer account. Please try again or contact support."
+        )
 
-    # Build session params - simplified and working
+    # Create checkout session
     try:
         session_params = {
             "mode": "subscription",
@@ -194,50 +231,65 @@ def create_checkout_session(
             "line_items": [{"price": price_id, "quantity": 1}],
             "success_url": f"{FRONTEND_URL}/subscription?checkout=success&session_id={{CHECKOUT_SESSION_ID}}",
             "cancel_url": f"{FRONTEND_URL}/subscription",
-
-            # --- make UI predictable ---
-            "payment_method_types": ["card"],   # card only
-            "phone_number_collection": {"enabled": False},  # removes phone row
+            "payment_method_types": ["card"],
+            "phone_number_collection": {"enabled": False},
             "billing_address_collection": "auto",
             "allow_promotion_codes": True,
             "automatic_tax": {"enabled": False},
         }
 
         session = stripe.checkout.Session.create(**session_params)
-        logger.info(f"Created checkout session {session.id} for customer {customer_id}")
+        logger.info("✅ Created checkout session %s for customer %s", session.id, customer_id)
         return {"url": session.url}
         
     except Exception as e:
-        logger.error(f"Failed to create Checkout session: {e}", exc_info=True)
+        logger.error("❌ Failed to create checkout session: %s", e, exc_info=True)
         msg = getattr(e, "user_message", None) or str(e)
-        raise HTTPException(status_code=500, detail=f"Failed to create checkout session: {msg}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create checkout session: {msg}"
+        )
+
 
 @router.post("/create_portal_session")
 def create_portal_session(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """Create Stripe billing portal session"""
     if not stripe:
-        raise HTTPException(status_code=503, detail="Billing portal is not configured on this server.")
+        raise HTTPException(
+            status_code=503,
+            detail="Billing portal is not configured. Please contact support."
+        )
     
-    # Ensure we have a valid customer ID
+    # Ensure valid customer ID
     try:
         customer_id = _get_or_create_customer(user, db)
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting customer for portal: {e}")
-        raise HTTPException(status_code=500, detail="Error accessing customer account")
+        logger.error("❌ Error getting customer for portal: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Error accessing customer account. Please try again."
+        )
 
     try:
         session = stripe.billing_portal.Session.create(
             customer=customer_id,
             return_url=f"{FRONTEND_URL}/subscription",
         )
-        logger.info(f"Created portal session for customer {customer_id}")
+        logger.info("✅ Created portal session for customer %s", customer_id)
         return {"url": session.url}
         
     except Exception as e:
-        logger.error(f"Failed to create portal session: {e}")
+        logger.error("❌ Failed to create portal session: %s", e, exc_info=True)
         msg = getattr(e, "user_message", None) or str(e)
-        raise HTTPException(status_code=500, detail=f"Could not open billing portal: {msg}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not open billing portal: {msg}"
+        )
+
+##--------- End payment.py Module -----------
+
